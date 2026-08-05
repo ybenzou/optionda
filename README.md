@@ -29,6 +29,12 @@ optionda deactivate           # prompt → (optionda)
 optionda activate hedge       # prompt → (hedge)
 
 optionda add AAPL270115C00200000 --qty 2
+# or batch from a file / heredoc (Rich progress bar):
+optionda add-batch - <<'EOF'
+INTC 261016 140 C
+TSLA 261218 500 C
+AAPL 261120 350 C
+EOF
 optionda export
 optionda run
 ```
@@ -65,7 +71,8 @@ Credentials live in `~/.optionda/credentials.toml` (mode `0600` when the OS allo
 | `optionda activate <name>` | Session-activate (prompt → `(name)`) |
 | `optionda deactivate` | Back to `(optionda)` |
 | `optionda init` | Persist hook in shell rc (like `conda init`) |
-| `optionda add …` | Add position (OCC or fields) |
+| `optionda add …` | Add one position (OCC or fields) |
+| `optionda add-batch <file\|->` | Batch-add lines with progress bar |
 | `optionda delete <id\|OCC>` | Remove position |
 | `optionda refresh-iv` | Re-freeze IV from market |
 | `optionda run` | Live table until Ctrl+C |

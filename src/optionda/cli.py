@@ -19,6 +19,7 @@ from optionda.credentials import (
     save_alpaca,
 )
 from optionda.display.table import render_snapshot, spinner_frame
+from optionda.batch import add_batch, read_batch_lines
 from optionda.engine import freeze_iv_for_position, mark_account
 from optionda.market.alpaca import AlpacaClient, AlpacaError
 from optionda.market.router import MarketRouter, resolve_poll_interval
@@ -393,6 +394,64 @@ def add_cmd(
         f"added {draft.occ_symbol} {draft.side} x{draft.qty:g} "
         f"IV*={draft.iv_frozen * 100:.1f}% (src={src})"
     )
+
+
+@app.command("add-batch")
+def add_batch_cmd(
+    source: str = typer.Argument(
+        ...,
+        help="Path to a text file, or '-' to read stdin.",
+    ),
+    qty: float = typer.Option(1.0, "--qty", "-q"),
+    side: str = typer.Option("long", "--side", "-s", help="long|short"),
+    iv: Optional[float] = typer.Option(
+        None,
+        "--iv",
+        help="Optional IV for all rows; otherwise fetch per contract.",
+    ),
+) -> None:
+    """Batch-add positions with a progress bar.
+
+    Each non-empty line may be OCC or human form, e.g.:
+      INTC261016C00140000
+      INTC 261016 140 C
+      INTC261016 140 CALL
+    """
+    store = _store()
+    try:
+        store.require_current()
+    except StoreError as exc:
+        _err(str(exc))
+        raise typer.Exit(1) from exc
+
+    side_n = side.strip().lower()
+    if side_n not in {"long", "short"}:
+        _err("--side must be long or short")
+        raise typer.Exit(1)
+
+    try:
+        lines = read_batch_lines(source)
+    except OSError as exc:
+        _err(f"cannot read {source}: {exc}")
+        raise typer.Exit(1) from exc
+    if not lines:
+        _err("no positions to add (empty input)")
+        raise typer.Exit(1)
+
+    result = add_batch(
+        store,
+        lines,
+        qty=qty,
+        side=side_n,  # type: ignore[arg-type]
+        iv=iv,
+        home=_home_opt(),
+        console=console,
+    )
+    _ok(
+        f"batch done: ok={result.ok} skipped={result.skipped} failed={result.failed}"
+    )
+    if result.failed:
+        raise typer.Exit(1)
 
 
 @app.command("delete")

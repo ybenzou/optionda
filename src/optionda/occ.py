@@ -51,6 +51,65 @@ def parse_occ(symbol: str) -> OccParts:
     )
 
 
+_CP_MAP = {
+    "C": "call",
+    "CALL": "call",
+    "P": "put",
+    "PUT": "put",
+}
+
+# ROOT + YYMMDD as one token, then strike, then C/P
+_COMPACT_RE = re.compile(
+    r"^(?P<root>[A-Z]{1,6})"
+    r"(?P<yymmdd>\d{6})"
+    r"$"
+)
+
+
+def parse_position_line(line: str) -> OccParts:
+    """Parse OCC or human lines like 'INTC 261016 140 C' / 'INTC261016 140 CALL'."""
+    raw = line.strip()
+    if not raw or raw.startswith("#"):
+        raise OccError("empty line")
+    # Full OCC first
+    compact = raw.upper().replace(" ", "")
+    try:
+        return parse_occ(compact)
+    except OccError:
+        pass
+
+    tokens = raw.upper().replace(",", " ").split()
+    if len(tokens) == 4:
+        root, yymmdd, strike_s, cp = tokens
+        if not re.fullmatch(r"\d{6}", yymmdd):
+            raise OccError(f"invalid expiry token in: {line}")
+    elif len(tokens) == 3:
+        head, strike_s, cp = tokens
+        m = _COMPACT_RE.match(head)
+        if not m:
+            raise OccError(f"invalid line (want ROOT YYMMDD STRIKE C|P): {line}")
+        root = m.group("root")
+        yymmdd = m.group("yymmdd")
+    else:
+        raise OccError(f"invalid line (want ROOT YYMMDD STRIKE C|P): {line}")
+
+    cp_n = _CP_MAP.get(cp)
+    if cp_n is None:
+        raise OccError(f"invalid call/put token in: {line}")
+    try:
+        strike = float(strike_s)
+    except ValueError as exc:
+        raise OccError(f"invalid strike in: {line}") from exc
+    yy, mm, dd = int(yymmdd[:2]), int(yymmdd[2:4]), int(yymmdd[4:6])
+    try:
+        expiry = date(2000 + yy, mm, dd)
+    except ValueError as exc:
+        raise OccError(f"invalid expiry in: {line}") from exc
+    otype: OptionType = cp_n  # type: ignore[assignment]
+    symbol = format_occ(root, expiry, otype, strike)
+    return parse_occ(symbol)
+
+
 def format_occ(
     underlying: str,
     expiry: date,
