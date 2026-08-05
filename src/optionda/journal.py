@@ -66,6 +66,7 @@ def append_export_log(
     *,
     feed: str,
     home: Path | None = None,
+    source: str = "export",
 ) -> Path:
     """Append a timestamped MODEL snapshot to the account log (never overwrite)."""
     path = log_path(account.name, home)
@@ -73,7 +74,7 @@ def append_export_log(
     total = 0.0
     body: list[str] = [
         "=" * 72,
-        f"export  account={account.name}  feed={feed}  at={now}",
+        f"{source}  account={account.name}  feed={feed}  at={now}",
         "-" * 72,
         f"{'OCC':<22} {'Side':<6} {'Qty':>6} {'Spot':>10} {'IV*':>8} "
         f"{'Model$':>10} {'Delta':>8} {'DTE':>8}",

@@ -45,3 +45,7 @@ def test_sync_book_and_append_log(tmp_path) -> None:
     append_export_log(acc, rows, feed="alpaca", home=tmp_path)
     second = log.read_text(encoding="utf-8")
     assert second.count("export  account=demo") == 2
+
+    append_export_log(acc, rows, feed="alpaca", home=tmp_path, source="run")
+    third = log.read_text(encoding="utf-8")
+    assert "run  account=demo" in third

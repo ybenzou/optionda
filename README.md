@@ -67,11 +67,12 @@ Per-account tracking files (under the optionda data library, **not** your shell 
 | Path | Role |
 |------|------|
 | `~/.optionda/books/<account>.txt` | Human book; created/updated on `add` / `delete` |
-| `~/.optionda/logs/<account>.log` | Append-only `export` snapshots |
+| `~/.optionda/logs/<account>.log` | Append-only snapshots from `export` and each `run` refresh |
 
 ```bash
 optionda add …          # refreshes books/demo.txt
 optionda export         # prints table + appends logs/demo.log
+optionda run            # every refresh appends a `run` block to the same log
 ```
 
 ## Commands

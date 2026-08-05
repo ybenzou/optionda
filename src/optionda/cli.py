@@ -505,14 +505,14 @@ def export_cmd() -> None:
         )
     )
     sync_book(acc, home)
-    log_file = append_export_log(acc, rows, feed=feed, home=home)
+    log_file = append_export_log(acc, rows, feed=feed, home=home, source="export")
     _ok(f"book: {book_path(acc.name, home)}")
     _ok(f"log:  {log_file}  (appended)")
 
 
 @app.command("run")
 def run_cmd() -> None:
-    """Continuously refresh MODEL marks for the activated account until Ctrl+C."""
+    """Continuously refresh MODEL marks; each refresh appends to the account log."""
     home = _home_opt()
     store = _store()
     try:
@@ -526,11 +526,17 @@ def run_cmd() -> None:
     prev_theos: dict[str, float] = {}
     prev_notionals: dict[str, float] = {}
     tick = 0
+    log_file = log_path(store.require_current().name, home)
+    _ok(f"logging each refresh → {log_file}")
 
     def _fetch_rows():
         acc = store.require_current()
         router = MarketRouter(home)
         rows = mark_account(acc, home=home, router=router)
+        sync_book(acc, home)
+        append_export_log(
+            acc, rows, feed=router.feed_name, home=home, source="run"
+        )
         return acc, router, rows
 
     def _panel(acc, router, rows, *, eta: int | None):
@@ -570,7 +576,7 @@ def run_cmd() -> None:
                         live.update(_panel(acc, router, rows, eta=remaining))
                         time.sleep(0.125)
     except KeyboardInterrupt:
-        console.print("\n[dim]stopped[/dim]")
+        console.print(f"\n[dim]stopped · log: {log_file}[/dim]")
 
 
 def main() -> None:
