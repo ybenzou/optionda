@@ -19,14 +19,20 @@ from optionda.credentials import (
     save_alpaca,
 )
 from optionda.display.table import render_snapshot, spinner_frame
-from optionda.add_resolve import looks_like_field_add, resolve_add_lines
+import sys
+
+from optionda.add_resolve import (
+    looks_like_field_add,
+    read_interactive_lines,
+    resolve_add_lines,
+)
 from optionda.batch import add_batch
 from optionda.engine import freeze_iv_for_position, mark_account
 from optionda.journal import append_export_log, book_path, log_path, sync_book
 from optionda.market.alpaca import AlpacaClient, AlpacaError
 from optionda.market.router import MarketRouter, resolve_poll_interval
 from optionda.models import Position
-from optionda.occ import OccError, format_occ, parse_occ, parse_position_line
+from optionda.occ import OccError, format_occ, parse_position_line
 from optionda.shellenv import (
     default_rc_path,
     install_rc_hook,
@@ -313,7 +319,7 @@ def use_cmd(name: str = typer.Argument(...)) -> None:
 def add_cmd(
     items: Optional[list[str]] = typer.Argument(
         None,
-        help="OCC symbol(s), human line tokens, a text file, or '-' for stdin.",
+        help="OCC / human tokens / file. Omit to paste interactively.",
     ),
     underlying: Optional[str] = typer.Option(None, "--underlying", "-u"),
     expiry: Optional[str] = typer.Option(None, "--expiry", help="YYYY-MM-DD"),
@@ -326,15 +332,14 @@ def add_cmd(
 ) -> None:
     """Add one or many positions to the activated account.
 
+    Easiest batch: run bare `optionda add`, paste lines, blank line to finish.
+
     Examples:
+      optionda add
       optionda add AAPL261120C00350000
       optionda add INTC 261016 140 C
-      optionda add OCC1 OCC2 OCC3
+      optionda add "INTC 261016 140 C; TSLA 261218 500 C"
       optionda add positions.txt
-      optionda add - <<'EOF'
-      INTC 261016 140 C
-      TSLA 261218 500 C
-      EOF
     """
     store = _store()
     try:
@@ -365,13 +370,19 @@ def add_cmd(
         except (OccError, ValueError) as exc:
             _err(str(exc))
             raise typer.Exit(1) from exc
-    else:
-        if not item_list:
-            _err(
-                "usage: optionda add <OCC|human line|file|-> "
-                "or --underlying --expiry --strike --type"
-            )
+    elif not item_list:
+        # Interactive paste — no EOF heredoc needed
+        if not sys.stdin.isatty():
+            _err("no positions provided (stdin is not a TTY)")
             raise typer.Exit(1)
+        lines = read_interactive_lines(
+            prompt_print=lambda m: console.print(f"[dim]{m}[/dim]"),
+            line_input=input,
+        )
+        if not lines:
+            _err("no positions pasted")
+            raise typer.Exit(1)
+    else:
         try:
             lines = resolve_add_lines(item_list)
         except (ValueError, OSError) as exc:

@@ -3,7 +3,36 @@ from __future__ import annotations
 from pathlib import Path
 
 from optionda.batch import read_batch_lines
-from optionda.occ import OccError, parse_occ, parse_position_line
+from optionda.occ import OccError, parse_position_line
+
+
+def split_semi_separated(text: str) -> list[str]:
+    """Split 'A; B; C' into position lines (keeps spaces inside each part)."""
+    parts = [p.strip() for p in text.replace("\n", ";").split(";")]
+    return [p for p in parts if p and not p.startswith("#")]
+
+
+def read_interactive_lines(
+    *,
+    prompt_print=print,
+    line_input=input,
+) -> list[str]:
+    """Read pasted lines until a blank line or EOF (Ctrl+Z Enter on Windows)."""
+    prompt_print("Paste positions (one per line).")
+    prompt_print("Finish with an empty line, or Ctrl+Z then Enter (Windows).")
+    prompt_print("")
+    lines: list[str] = []
+    while True:
+        try:
+            line = line_input()
+        except EOFError:
+            break
+        if not line.strip():
+            break
+        if line.strip().startswith("#"):
+            continue
+        lines.append(line.strip())
+    return lines
 
 
 def resolve_add_lines(items: list[str]) -> list[str]:
@@ -12,6 +41,7 @@ def resolve_add_lines(items: list[str]) -> list[str]:
     Supports:
       - single/multiple OCC symbols
       - one human line split across argv: INTC 261016 140 C
+      - semicolon-separated in one argv: "INTC 261016 140 C; TSLA 261218 500 C"
       - file path or '-' (stdin) for multi-line batch
     """
     if not items:
@@ -24,7 +54,11 @@ def resolve_add_lines(items: list[str]) -> list[str]:
             if not lines:
                 raise ValueError("no positions to add (empty input)")
             return lines
-        # single OCC or compact human-ish token
+        if ";" in token:
+            parts = split_semi_separated(token)
+            if not parts:
+                raise ValueError("no positions to add")
+            return parts
         try:
             return [parse_position_line(token).occ_symbol]
         except OccError as exc:
@@ -32,6 +66,11 @@ def resolve_add_lines(items: list[str]) -> list[str]:
 
     # Multiple argv tokens: either many OCCs, or one spaced human line
     joined = " ".join(items)
+    if ";" in joined:
+        parts = split_semi_separated(joined)
+        if parts:
+            return parts
+
     try:
         return [parse_position_line(joined).occ_symbol]
     except OccError:

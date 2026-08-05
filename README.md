@@ -29,12 +29,16 @@ optionda deactivate           # prompt → (optionda)
 optionda activate hedge       # prompt → (hedge)
 
 optionda add AAPL270115C00200000 --qty 2
-# same command for batch (auto progress bar when >1 line):
-optionda add - <<'EOF'
-INTC 261016 140 C
-TSLA 261218 500 C
-AAPL 261120 350 C
-EOF
+
+# easiest batch: bare add → paste lines → blank line to finish
+optionda add
+# INTC 261016 140 C
+# TSLA 261218 500 C
+# <empty line>
+
+# or one line with semicolons:
+optionda add "INTC 261016 140 C; TSLA 261218 500 C"
+
 optionda export
 optionda run
 ```
