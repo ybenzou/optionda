@@ -316,11 +316,15 @@ def add_cmd(
     qty: float = typer.Option(1.0, "--qty", "-q"),
     side: str = typer.Option("long", "--side", "-s", help="long|short"),
     iv: Optional[float] = typer.Option(None, "--iv", help="manual IV override (e.g. 0.32)"),
-    account: Optional[str] = typer.Option(None, "--account", "-a"),
     entry: Optional[float] = typer.Option(None, "--entry", help="optional entry premium"),
 ) -> None:
-    """Add an option position to the current (or given) account."""
+    """Add an option position to the activated account."""
     store = _store()
+    try:
+        store.require_current()
+    except StoreError as exc:
+        _err(str(exc))
+        raise typer.Exit(1) from exc
     side_n = side.strip().lower()
     if side_n not in {"long", "short"}:
         _err("--side must be long or short")
@@ -370,7 +374,10 @@ def add_cmd(
         console.print(f"[dim]fetching IV from {feed}…[/dim]")
     try:
         draft = freeze_iv_for_position(draft, iv=iv, home=home)
-        store.add_position(account, draft)
+        store.add_position(None, draft)
+    except StoreError as exc:
+        _err(str(exc))
+        raise typer.Exit(1) from exc
     except Exception as exc:  # noqa: BLE001
         if iv is None:
             _err(
@@ -391,11 +398,10 @@ def add_cmd(
 @app.command("delete")
 def delete_cmd(
     key: str = typer.Argument(..., help="position id or OCC symbol"),
-    account: Optional[str] = typer.Option(None, "--account", "-a"),
 ) -> None:
-    """Delete a position by id or OCC symbol."""
+    """Delete a position by id or OCC symbol (active account only)."""
     try:
-        _store().delete_position(account, key)
+        _store().delete_position(None, key)
     except StoreError as exc:
         _err(str(exc))
         raise typer.Exit(1) from exc
@@ -403,13 +409,11 @@ def delete_cmd(
 
 
 @app.command("refresh-iv")
-def refresh_iv_cmd(
-    account: Optional[str] = typer.Option(None, "--account", "-a"),
-) -> None:
-    """Re-fetch and freeze IV for all positions in the account."""
+def refresh_iv_cmd() -> None:
+    """Re-fetch and freeze IV for positions in the activated account."""
     store = _store()
     try:
-        acc = store.require_current(account)
+        acc = store.require_current()
     except StoreError as exc:
         _err(str(exc))
         raise typer.Exit(1) from exc
@@ -433,21 +437,15 @@ def refresh_iv_cmd(
     _ok("IV refresh complete")
 
 
-def _resolve_account(account: str | None):
+@app.command("export")
+def export_cmd() -> None:
+    """Print a one-shot MODEL snapshot for the activated account."""
     store = _store()
     try:
-        return store.require_current(account)
+        acc = store.require_current()
     except StoreError as exc:
         _err(str(exc))
         raise typer.Exit(1) from exc
-
-
-@app.command("export")
-def export_cmd(
-    account: Optional[str] = typer.Option(None, "--account", "-a"),
-) -> None:
-    """Print a one-shot MODEL snapshot and exit."""
-    acc = _resolve_account(account)
     home = _home_opt()
     feed = MarketRouter(home).feed_name
     refresh = resolve_poll_interval(home)
@@ -464,15 +462,12 @@ def export_cmd(
 
 
 @app.command("run")
-def run_cmd(
-    account: Optional[str] = typer.Option(None, "--account", "-a"),
-) -> None:
-    """Continuously refresh MODEL marks until Ctrl+C."""
-    acc_name = account
+def run_cmd() -> None:
+    """Continuously refresh MODEL marks for the activated account until Ctrl+C."""
     home = _home_opt()
     store = _store()
     try:
-        store.require_current(acc_name)
+        store.require_current()
     except StoreError as exc:
         _err(str(exc))
         raise typer.Exit(1) from exc
@@ -484,7 +479,7 @@ def run_cmd(
     tick = 0
 
     def _fetch_rows():
-        acc = store.require_current(acc_name)
+        acc = store.require_current()
         router = MarketRouter(home)
         rows = mark_account(acc, home=home, router=router)
         return acc, router, rows

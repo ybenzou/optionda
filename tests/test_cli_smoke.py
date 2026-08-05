@@ -9,6 +9,15 @@ from optionda.models import OptionIvQuote, SpotQuote
 runner = CliRunner()
 
 
+def test_export_blocked_without_activate(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("OPTIONDA_HOME", str(tmp_path))
+    monkeypatch.delenv("OPTIONDA_ACTIVE", raising=False)
+    assert runner.invoke(app, ["create", "demo"]).exit_code == 0
+    blocked = runner.invoke(app, ["export"])
+    assert blocked.exit_code == 1
+    assert "activate" in blocked.output.lower()
+
+
 def test_cli_create_add_export(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("OPTIONDA_HOME", str(tmp_path))
     monkeypatch.setenv("OPTIONDA_ACTIVE", "demo")

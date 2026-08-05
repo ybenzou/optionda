@@ -45,6 +45,20 @@ def test_require_current_needs_activate(tmp_path) -> None:
         store.require_current()
 
 
+def test_cannot_peek_other_account(tmp_path, monkeypatch) -> None:
+    store = AccountStore(tmp_path)
+    store.create("demo")
+    store.create("hedge")
+    monkeypatch.setenv("OPTIONDA_ACTIVE", "demo")
+    store.add_position(None, _pos("AAPL270115C00200000"))
+    with pytest.raises(StoreError, match="not active"):
+        store.require_current("hedge")
+    # Without activation, no book is visible
+    monkeypatch.delenv("OPTIONDA_ACTIVE", raising=False)
+    with pytest.raises(StoreError, match="activate"):
+        store.require_current("demo")
+
+
 def test_duplicate_account(tmp_path) -> None:
     store = AccountStore(tmp_path)
     store.create("main")

@@ -35,6 +35,8 @@ optionda run
 
 `pip install` cannot safely edit your shell config (unlike the Conda installer). Run **`optionda init` once**, then **`optionda activate <name>`** each session (like `conda activate`). Undo init with `optionda init --reverse`.
 
+Without `activate`, `export` / `run` / `add` / `delete` cannot read or change any account book — only the session-active account is visible.
+
 `add` **without** `--iv` pulls IV from Alpaca (if key configured) or Yahoo. Use `--iv` only as fallback.
 
 In the table, **`Model$`** is the Black–Scholes theoretical premium (per share). It is not a live option bid/ask.

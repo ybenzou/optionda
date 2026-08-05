@@ -74,12 +74,23 @@ class AccountStore:
         return self.active_name()
 
     def require_current(self, name: str | None = None) -> Account:
-        target = name or self.active_name()
-        if not target:
+        """Load the session-active account only.
+
+        Positions are never readable without OPTIONDA_ACTIVE.
+        An explicit name is allowed only when it matches the active account
+        (cannot peek at other books via --account).
+        """
+        active = self.active_name()
+        if not active:
             raise StoreError(
                 "no account activated; run: optionda activate <name>"
             )
-        return self.load(target)
+        if name is not None and name.strip() and name.strip() != active:
+            raise StoreError(
+                f"account '{name}' is not active (active={active}); "
+                f"run: optionda activate {name}"
+            )
+        return self.load(active)
 
     def add_position(self, account_name: str | None, position: Position) -> Account:
         account = self.require_current(account_name)
