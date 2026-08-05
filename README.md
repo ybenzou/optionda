@@ -19,17 +19,17 @@ py -3.11 -m venv .venv
 source .venv/Scripts/activate
 pip install -e .
 
-# once per shell (conda-style): prompt shows (account)
-eval "$(optionda shellenv)"
+# one-time (like conda init) — writes ~/.bashrc, then new shells get (account) prompt
+optionda init
 
-optionda create demo          # prompt → (demo)
+optionda create demo          # prompt → (demo) after hook is active
 optionda use hedge            # prompt → (hedge)
 optionda add AAPL270115C00200000 --qty 2
 optionda export
 optionda run
 ```
 
-Put `eval "$(optionda shellenv)"` in `~/.bashrc` if you want it every time.
+`pip install` cannot safely edit your shell config by itself (unlike the Conda installer, which runs `conda init`). After installing optionda, run **`optionda init` once**. Undo with `optionda init --reverse`.
 
 `add` **without** `--iv` pulls IV from Alpaca (if key configured) or Yahoo. Use `--iv` only as fallback.
 
@@ -57,7 +57,8 @@ Credentials live in `~/.optionda/credentials.toml` (mode `0600` when the OS allo
 | `optionda create <name>` | Create account |
 | `optionda list` / `use <name>` | List / select account |
 | `optionda current` | Print current account (for hooks) |
-| `optionda shellenv` | Print bash/zsh hook → `eval "$(optionda shellenv)"` |
+| `optionda init` | Persist hook in `~/.bashrc` (like `conda init`) |
+| `optionda shellenv` | Print hook for manual `eval` (used by init) |
 | `optionda add …` | Add position (OCC or fields) |
 | `optionda delete <id\|OCC>` | Remove position |
 | `optionda refresh-iv` | Re-freeze IV from market |

@@ -24,7 +24,13 @@ from optionda.market.alpaca import AlpacaClient, AlpacaError
 from optionda.market.router import MarketRouter, resolve_poll_interval
 from optionda.models import Position
 from optionda.occ import OccError, format_occ, parse_occ
-from optionda.shellenv import render_shellenv
+from optionda.shellenv import (
+    default_rc_path,
+    install_rc_hook,
+    rc_has_hook,
+    remove_rc_hook,
+    render_shellenv,
+)
 from optionda.store import AccountStore, StoreError
 
 app = typer.Typer(
@@ -150,8 +156,14 @@ def _prompt_hook_tip() -> None:
 
     if os.environ.get("OPTIONDA_SHELL_HOOK"):
         return
+    rc = default_rc_path("bash")
+    if rc_has_hook(rc):
+        console.print(
+            '[dim]tip: open a new shell (or: eval "$(optionda shellenv)") to show (account) in prompt[/dim]'
+        )
+        return
     console.print(
-        '[dim]tip: eval "$(optionda shellenv)"  # show (account) in this shell prompt[/dim]'
+        '[dim]tip: run once — optionda init  # like conda init, then open a new shell[/dim]'
     )
 
 
@@ -171,7 +183,7 @@ def shellenv_cmd(
         help="Shell type: bash or zsh (Git Bash supported).",
     ),
 ) -> None:
-    """Print shell hook code. Use: eval "$(optionda shellenv)" """
+    """Print shell hook code. Prefer: optionda init (persists like conda init)."""
     try:
         script = render_shellenv(shell)
     except ValueError as exc:
@@ -179,6 +191,41 @@ def shellenv_cmd(
         raise typer.Exit(1) from exc
     # Must be plain stdout for eval
     typer.echo(script, nl=False)
+
+
+@app.command("init")
+def init_cmd(
+    shell: str = typer.Option("bash", "--shell", "-s", help="bash or zsh"),
+    reverse: bool = typer.Option(
+        False,
+        "--reverse",
+        help="Remove the optionda block from the shell rc file.",
+    ),
+) -> None:
+    """Persist prompt hook into ~/.bashrc (same idea as `conda init`)."""
+    try:
+        render_shellenv(shell)  # validate
+    except ValueError as exc:
+        _err(str(exc))
+        raise typer.Exit(1) from exc
+
+    path = default_rc_path(shell)
+    if reverse:
+        result = remove_rc_hook(path)
+        if result == "removed":
+            _ok(f"removed optionda hook from {path}")
+            _ok("restart the shell for changes to take effect")
+        else:
+            _ok(f"no optionda hook found in {path}")
+        return
+
+    result = install_rc_hook(path)
+    if result == "added":
+        _ok(f"modified {path}")
+    else:
+        _ok(f"already initialized in {path}")
+    _ok('restart shell, or run: eval "$(optionda shellenv)"')
+    _ok("then: optionda use demo  →  prompt shows (demo)")
 
 
 @app.command("create")
