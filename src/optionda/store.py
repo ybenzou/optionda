@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 
 from optionda.config import load_config, save_config
 from optionda.models import Account, Position
 from optionda.paths import default_home, ensure_home
+
+ACTIVE_ENV = "OPTIONDA_ACTIVE"
 
 _ACCOUNT_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
 
@@ -38,9 +41,6 @@ class AccountStore:
             raise StoreError(f"account already exists: {name}")
         account = Account(name=name)
         self.save(account)
-        cfg = load_config(self.home)
-        if not cfg.default_account:
-            save_config(cfg.model_copy(update={"default_account": name}), self.home)
         return account
 
     def load(self, name: str) -> Account:
@@ -58,18 +58,27 @@ class AccountStore:
         )
 
     def use(self, name: str) -> None:
+        """Persist last-used account name (does not session-activate)."""
         if not self.exists(name):
             raise StoreError(f"account not found: {name}")
         cfg = load_config(self.home)
         save_config(cfg.model_copy(update={"default_account": name}), self.home)
 
+    def active_name(self) -> str | None:
+        """Session-activated account (conda-style); from OPTIONDA_ACTIVE."""
+        value = (os.environ.get(ACTIVE_ENV) or "").strip()
+        return value or None
+
     def current_name(self) -> str | None:
-        return load_config(self.home).default_account
+        """Prompt/session current: active env only (not disk default)."""
+        return self.active_name()
 
     def require_current(self, name: str | None = None) -> Account:
-        target = name or self.current_name()
+        target = name or self.active_name()
         if not target:
-            raise StoreError("no account selected; run: optionda create <name>")
+            raise StoreError(
+                "no account activated; run: optionda activate <name>"
+            )
         return self.load(target)
 
     def add_position(self, account_name: str | None, position: Position) -> Account:

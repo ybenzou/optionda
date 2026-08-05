@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+# Session activation via OPTIONDA_ACTIVE (like conda activate).
+# Default prompt is always (optionda) until the user activates an account.
 BASH_HOOK = r'''# optionda shell hook — eval "$(optionda shellenv)"
 export OPTIONDA_SHELL_HOOK=1
 
@@ -10,20 +12,42 @@ if [ -z "${__OPTIONDA_PS1_SAVED+x}" ]; then
 fi
 
 __optionda_update_prompt() {
-  local acc
-  acc="$(command optionda current 2>/dev/null)" || acc=""
-  if [ -n "$acc" ]; then
-    PS1="(${acc}) ${__OPTIONDA_PS1_SAVED}"
+  if [ -n "${OPTIONDA_ACTIVE:-}" ]; then
+    PS1="(${OPTIONDA_ACTIVE}) ${__OPTIONDA_PS1_SAVED}"
   else
-    PS1="${__OPTIONDA_PS1_SAVED}"
+    PS1="(optionda) ${__OPTIONDA_PS1_SAVED}"
   fi
 }
 
 optionda() {
-  command optionda "$@"
-  local __optionda_ret=$?
-  __optionda_update_prompt
-  return $__optionda_ret
+  local __cmd="${1:-}"
+  case "$__cmd" in
+    activate)
+      shift
+      local __name="${1:-}"
+      if [ -z "$__name" ]; then
+        echo "usage: optionda activate <account>" >&2
+        return 2
+      fi
+      if ! command optionda assert-account "$__name"; then
+        return 1
+      fi
+      export OPTIONDA_ACTIVE="$__name"
+      __optionda_update_prompt
+      echo "activated ($__name)"
+      ;;
+    deactivate)
+      unset OPTIONDA_ACTIVE
+      __optionda_update_prompt
+      echo "deactivated → (optionda)"
+      ;;
+    *)
+      command optionda "$@"
+      local __optionda_ret=$?
+      __optionda_update_prompt
+      return $__optionda_ret
+      ;;
+  esac
 }
 
 __optionda_update_prompt
@@ -51,10 +75,9 @@ def default_rc_path(shell: str = "bash") -> Path:
     home = Path.home()
     if name in {"zsh"}:
         return home / ".zshrc"
-    # Git Bash / bash on Windows and Unix
     bashrc = home / ".bashrc"
     bash_profile = home / ".bash_profile"
-    # Prefer .bashrc; create it if neither exists
+    # Write both-friendly: prefer .bashrc; if only profile exists use it
     if bashrc.exists() or not bash_profile.exists():
         return bashrc
     return bash_profile
@@ -68,19 +91,18 @@ def rc_has_hook(path: Path) -> bool:
 
 
 def install_rc_hook(path: Path) -> str:
-    """Idempotently install hook block. Returns 'added' | 'unchanged'."""
+    """Install or refresh managed hook block. Returns added|updated."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        text = path.read_text(encoding="utf-8", errors="ignore")
-    else:
-        text = ""
+    text = path.read_text(encoding="utf-8", errors="ignore") if path.exists() else ""
     if BEGIN_MARK in text and END_MARK in text:
-        return "unchanged"
+        remove_rc_hook(path)
+        text = path.read_text(encoding="utf-8", errors="ignore") if path.exists() else ""
+        status = "updated"
+    else:
+        status = "added"
     addition = ("\n" if text and not text.endswith("\n") else "") + RC_BLOCK
-    if text and not text.endswith("\n"):
-        text += "\n"
-    path.write_text(text + addition, encoding="utf-8")
-    return "added"
+    path.write_text((text if text.endswith("\n") or not text else text + "\n") + addition, encoding="utf-8")
+    return status
 
 
 def remove_rc_hook(path: Path) -> str:
@@ -95,7 +117,6 @@ def remove_rc_hook(path: Path) -> str:
     if start < 0 or end < 0:
         return "absent"
     end += len(END_MARK)
-    # drop surrounding newlines cleanly
     new = text[:start].rstrip("\n") + "\n" + text[end:].lstrip("\n")
     if new.strip():
         path.write_text(new if new.endswith("\n") else new + "\n", encoding="utf-8")

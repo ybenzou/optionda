@@ -19,17 +19,21 @@ py -3.11 -m venv .venv
 source .venv/Scripts/activate
 pip install -e .
 
-# one-time (like conda init) — writes ~/.bashrc, then new shells get (account) prompt
+# one-time (like conda init)
 optionda init
+eval "$(optionda shellenv)"   # or open a new shell — default prompt: (optionda)
 
-optionda create demo          # prompt → (demo) after hook is active
-optionda use hedge            # prompt → (hedge)
+optionda create demo
+optionda activate demo        # prompt → (demo)
+optionda deactivate           # prompt → (optionda)
+optionda activate hedge       # prompt → (hedge)
+
 optionda add AAPL270115C00200000 --qty 2
 optionda export
 optionda run
 ```
 
-`pip install` cannot safely edit your shell config by itself (unlike the Conda installer, which runs `conda init`). After installing optionda, run **`optionda init` once**. Undo with `optionda init --reverse`.
+`pip install` cannot safely edit your shell config (unlike the Conda installer). Run **`optionda init` once**, then **`optionda activate <name>`** each session (like `conda activate`). Undo init with `optionda init --reverse`.
 
 `add` **without** `--iv` pulls IV from Alpaca (if key configured) or Yahoo. Use `--iv` only as fallback.
 
@@ -55,10 +59,10 @@ Credentials live in `~/.optionda/credentials.toml` (mode `0600` when the OS allo
 | Command | Purpose |
 |---------|---------|
 | `optionda create <name>` | Create account |
-| `optionda list` / `use <name>` | List / select account |
-| `optionda current` | Print current account (for hooks) |
-| `optionda init` | Persist hook in `~/.bashrc` (like `conda init`) |
-| `optionda shellenv` | Print hook for manual `eval` (used by init) |
+| `optionda list` | List accounts (`*` = session-active) |
+| `optionda activate <name>` | Session-activate (prompt → `(name)`) |
+| `optionda deactivate` | Back to `(optionda)` |
+| `optionda init` | Persist hook in shell rc (like `conda init`) |
 | `optionda add …` | Add position (OCC or fields) |
 | `optionda delete <id\|OCC>` | Remove position |
 | `optionda refresh-iv` | Re-freeze IV from market |

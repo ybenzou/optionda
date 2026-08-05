@@ -11,6 +11,7 @@ runner = CliRunner()
 
 def test_cli_create_add_export(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("OPTIONDA_HOME", str(tmp_path))
+    monkeypatch.setenv("OPTIONDA_ACTIVE", "demo")
 
     result = runner.invoke(app, ["create", "demo"])
     assert result.exit_code == 0, result.output

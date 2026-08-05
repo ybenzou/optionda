@@ -1,6 +1,5 @@
 from datetime import date, datetime, timezone
 
-from optionda.config import load_config
 from optionda.models import Position
 from optionda.store import AccountStore, StoreError
 import pytest
@@ -20,14 +19,15 @@ def _pos(symbol: str = "AAPL250117C00200000") -> Position:
     )
 
 
-def test_create_use_add_delete(tmp_path) -> None:
+def test_create_activate_add_delete(tmp_path, monkeypatch) -> None:
     store = AccountStore(tmp_path)
     store.create("main")
     assert store.list_accounts() == ["main"]
-    assert load_config(tmp_path).default_account == "main"
+    assert store.active_name() is None
 
     store.create("hedge")
-    store.use("hedge")
+    monkeypatch.setenv("OPTIONDA_ACTIVE", "hedge")
+    assert store.active_name() == "hedge"
     assert store.current_name() == "hedge"
 
     store.add_position(None, _pos())
@@ -36,6 +36,13 @@ def test_create_use_add_delete(tmp_path) -> None:
 
     store.delete_position(None, "AAPL250117C00200000")
     assert store.load("hedge").positions == []
+
+
+def test_require_current_needs_activate(tmp_path) -> None:
+    store = AccountStore(tmp_path)
+    store.create("main")
+    with pytest.raises(StoreError, match="activate"):
+        store.require_current()
 
 
 def test_duplicate_account(tmp_path) -> None:

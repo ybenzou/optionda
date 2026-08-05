@@ -155,25 +155,59 @@ def _prompt_hook_tip() -> None:
     import os
 
     if os.environ.get("OPTIONDA_SHELL_HOOK"):
-        return
-    rc = default_rc_path("bash")
-    if rc_has_hook(rc):
-        console.print(
-            '[dim]tip: open a new shell (or: eval "$(optionda shellenv)") to show (account) in prompt[/dim]'
-        )
+        console.print("[dim]tip: optionda activate <name>  # like conda activate[/dim]")
         return
     console.print(
-        '[dim]tip: run once — optionda init  # like conda init, then open a new shell[/dim]'
+        '[dim]tip: optionda init once, then: optionda activate <name>[/dim]'
     )
+
+
+@app.command("assert-account")
+def assert_account_cmd(
+    name: str = typer.Argument(..., help="Account name to validate"),
+) -> None:
+    """Exit 0 if account exists (used by shell activate hook)."""
+    if not _store().exists(name):
+        _err(f"account not found: {name}")
+        raise typer.Exit(1)
 
 
 @app.command("current")
 def current_cmd() -> None:
-    """Print the current account name (for shell hooks)."""
-    name = _store().current_name()
+    """Print session-activated account (OPTIONDA_ACTIVE), if any."""
+    name = _store().active_name()
     if name:
-        # Plain stdout — consumed by shellenv; no Rich markup.
         typer.echo(name)
+
+
+@app.command("activate")
+def activate_cmd(name: str = typer.Argument(...)) -> None:
+    """Activate an account for this shell (requires shell hook, like conda)."""
+    import os
+
+    if not _store().exists(name):
+        _err(f"account not found: {name}")
+        raise typer.Exit(1)
+    if not os.environ.get("OPTIONDA_SHELL_HOOK"):
+        _err("shell hook not loaded — prompt/session activate needs it")
+        _ok('run: eval "$(optionda shellenv)"   # or: optionda init && new shell')
+        _ok(f"then: optionda activate {name}")
+        raise typer.Exit(2)
+    # When hook is loaded, the shell function handles activate before this runs.
+    # If we get here, user called `command optionda activate` directly.
+    _ok(f"account ok: {name}")
+    _ok("export OPTIONDA_ACTIVE yourself, or use the shell wrapper: optionda activate " + name)
+
+
+@app.command("deactivate")
+def deactivate_cmd() -> None:
+    """Deactivate session account (shell hook handles prompt)."""
+    import os
+
+    if not os.environ.get("OPTIONDA_SHELL_HOOK"):
+        _ok("nothing to do without shell hook (prompt already plain)")
+        return
+    _ok("use shell wrapper: optionda deactivate")
 
 
 @app.command("shellenv")
@@ -222,10 +256,12 @@ def init_cmd(
     result = install_rc_hook(path)
     if result == "added":
         _ok(f"modified {path}")
+    elif result == "updated":
+        _ok(f"updated hook in {path}")
     else:
         _ok(f"already initialized in {path}")
     _ok('restart shell, or run: eval "$(optionda shellenv)"')
-    _ok("then: optionda use demo  →  prompt shows (demo)")
+    _ok("default prompt: (optionda)  →  optionda activate demo  →  (demo)")
 
 
 @app.command("create")
@@ -237,6 +273,7 @@ def create_cmd(name: str = typer.Argument(...)) -> None:
         _err(str(exc))
         raise typer.Exit(1) from exc
     _ok(f"created account {account.name}")
+    _ok(f"activate with: optionda activate {account.name}")
     _prompt_hook_tip()
 
 
@@ -245,24 +282,27 @@ def list_cmd() -> None:
     """List accounts."""
     store = _store()
     names = store.list_accounts()
-    current = store.current_name()
+    active = store.active_name()
     if not names:
         _ok("(no accounts)")
         return
     for name in names:
-        mark = "*" if name == current else " "
+        mark = "*" if name == active else " "
         console.print(f"{mark} {name}")
+    if not active:
+        console.print("[dim]none activated — optionda activate <name>[/dim]")
 
 
 @app.command("use")
 def use_cmd(name: str = typer.Argument(...)) -> None:
-    """Set the current account."""
+    """Deprecated alias: prefer `optionda activate` (session) like conda."""
     try:
         _store().use(name)
     except StoreError as exc:
         _err(str(exc))
         raise typer.Exit(1) from exc
-    _ok(f"using account {name}")
+    _ok(f"recorded default {name} (disk only)")
+    _ok(f"for this shell prompt/session, run: optionda activate {name}")
     _prompt_hook_tip()
 
 
