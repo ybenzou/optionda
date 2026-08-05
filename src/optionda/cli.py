@@ -19,12 +19,13 @@ from optionda.credentials import (
     save_alpaca,
 )
 from optionda.display.table import render_snapshot, spinner_frame
-from optionda.batch import add_batch, read_batch_lines
+from optionda.add_resolve import looks_like_field_add, resolve_add_lines
+from optionda.batch import add_batch
 from optionda.engine import freeze_iv_for_position, mark_account
 from optionda.market.alpaca import AlpacaClient, AlpacaError
 from optionda.market.router import MarketRouter, resolve_poll_interval
 from optionda.models import Position
-from optionda.occ import OccError, format_occ, parse_occ
+from optionda.occ import OccError, format_occ, parse_occ, parse_position_line
 from optionda.shellenv import (
     default_rc_path,
     install_rc_hook,
@@ -309,7 +310,10 @@ def use_cmd(name: str = typer.Argument(...)) -> None:
 
 @app.command("add")
 def add_cmd(
-    occ: Optional[str] = typer.Argument(None, help="OCC option symbol"),
+    items: Optional[list[str]] = typer.Argument(
+        None,
+        help="OCC symbol(s), human line tokens, a text file, or '-' for stdin.",
+    ),
     underlying: Optional[str] = typer.Option(None, "--underlying", "-u"),
     expiry: Optional[str] = typer.Option(None, "--expiry", help="YYYY-MM-DD"),
     strike: Optional[float] = typer.Option(None, "--strike", "-k"),
@@ -319,103 +323,17 @@ def add_cmd(
     iv: Optional[float] = typer.Option(None, "--iv", help="manual IV override (e.g. 0.32)"),
     entry: Optional[float] = typer.Option(None, "--entry", help="optional entry premium"),
 ) -> None:
-    """Add an option position to the activated account."""
-    store = _store()
-    try:
-        store.require_current()
-    except StoreError as exc:
-        _err(str(exc))
-        raise typer.Exit(1) from exc
-    side_n = side.strip().lower()
-    if side_n not in {"long", "short"}:
-        _err("--side must be long or short")
-        raise typer.Exit(1)
+    """Add one or many positions to the activated account.
 
-    try:
-        if occ:
-            parts = parse_occ(occ)
-            occ_symbol = parts.occ_symbol
-            und = parts.underlying
-            exp = parts.expiry
-            k = parts.strike
-            otype = parts.option_type
-        else:
-            if not (underlying and expiry and strike is not None and option_type):
-                _err("provide OCC symbol or --underlying --expiry --strike --type")
-                raise typer.Exit(1)
-            otype_n = option_type.strip().lower()
-            if otype_n not in {"call", "put"}:
-                _err("--type must be call or put")
-                raise typer.Exit(1)
-            exp = date.fromisoformat(expiry)
-            und = underlying
-            k = float(strike)
-            otype = otype_n  # type: ignore[assignment]
-            occ_symbol = format_occ(und, exp, otype, k)
-    except (OccError, ValueError) as exc:
-        _err(str(exc))
-        raise typer.Exit(1) from exc
-
-    draft = Position(
-        occ_symbol=occ_symbol,
-        underlying=und,
-        expiry=exp,
-        strike=k,
-        option_type=otype,  # type: ignore[arg-type]
-        qty=qty,
-        side=side_n,  # type: ignore[arg-type]
-        iv_frozen=iv if iv is not None else 0.01,  # placeholder until freeze
-        iv_as_of=datetime.now(timezone.utc),
-        entry_premium=entry,
-    )
-
-    home = _home_opt()
-    if iv is None:
-        feed = MarketRouter(home).feed_name
-        console.print(f"[dim]fetching IV from {feed}…[/dim]")
-    try:
-        draft = freeze_iv_for_position(draft, iv=iv, home=home)
-        store.add_position(None, draft)
-    except StoreError as exc:
-        _err(str(exc))
-        raise typer.Exit(1) from exc
-    except Exception as exc:  # noqa: BLE001
-        if iv is None:
-            _err(
-                f"could not fetch IV ({exc}). "
-                "Use a listed OCC symbol, or pass --iv 0.32 as fallback."
-            )
-        else:
-            _err(str(exc))
-        raise typer.Exit(1) from exc
-
-    src = draft.iv_source or ("manual" if iv is not None else "market")
-    _ok(
-        f"added {draft.occ_symbol} {draft.side} x{draft.qty:g} "
-        f"IV*={draft.iv_frozen * 100:.1f}% (src={src})"
-    )
-
-
-@app.command("add-batch")
-def add_batch_cmd(
-    source: str = typer.Argument(
-        ...,
-        help="Path to a text file, or '-' to read stdin.",
-    ),
-    qty: float = typer.Option(1.0, "--qty", "-q"),
-    side: str = typer.Option("long", "--side", "-s", help="long|short"),
-    iv: Optional[float] = typer.Option(
-        None,
-        "--iv",
-        help="Optional IV for all rows; otherwise fetch per contract.",
-    ),
-) -> None:
-    """Batch-add positions with a progress bar.
-
-    Each non-empty line may be OCC or human form, e.g.:
-      INTC261016C00140000
+    Examples:
+      optionda add AAPL261120C00350000
+      optionda add INTC 261016 140 C
+      optionda add OCC1 OCC2 OCC3
+      optionda add positions.txt
+      optionda add - <<'EOF'
       INTC 261016 140 C
-      INTC261016 140 CALL
+      TSLA 261218 500 C
+      EOF
     """
     store = _store()
     try:
@@ -423,20 +341,84 @@ def add_batch_cmd(
     except StoreError as exc:
         _err(str(exc))
         raise typer.Exit(1) from exc
-
     side_n = side.strip().lower()
     if side_n not in {"long", "short"}:
         _err("--side must be long or short")
         raise typer.Exit(1)
 
-    try:
-        lines = read_batch_lines(source)
-    except OSError as exc:
-        _err(f"cannot read {source}: {exc}")
-        raise typer.Exit(1) from exc
-    if not lines:
-        _err("no positions to add (empty input)")
-        raise typer.Exit(1)
+    item_list = list(items or [])
+    home = _home_opt()
+
+    # Field-form single add
+    if looks_like_field_add(item_list, underlying, expiry, strike, option_type):
+        try:
+            otype_n = option_type.strip().lower()  # type: ignore[union-attr]
+            if otype_n not in {"call", "put"}:
+                _err("--type must be call or put")
+                raise typer.Exit(1)
+            exp = date.fromisoformat(expiry)  # type: ignore[arg-type]
+            und = underlying  # type: ignore[assignment]
+            k = float(strike)  # type: ignore[arg-type]
+            occ_symbol = format_occ(und, exp, otype_n, k)  # type: ignore[arg-type]
+            lines = [occ_symbol]
+        except (OccError, ValueError) as exc:
+            _err(str(exc))
+            raise typer.Exit(1) from exc
+    else:
+        if not item_list:
+            _err(
+                "usage: optionda add <OCC|human line|file|-> "
+                "or --underlying --expiry --strike --type"
+            )
+            raise typer.Exit(1)
+        try:
+            lines = resolve_add_lines(item_list)
+        except (ValueError, OSError) as exc:
+            _err(str(exc))
+            raise typer.Exit(1) from exc
+
+    # One line: quiet path; many lines: progress bar
+    if len(lines) == 1:
+        try:
+            parts = parse_position_line(lines[0])
+        except OccError as exc:
+            _err(str(exc))
+            raise typer.Exit(1) from exc
+        draft = Position(
+            occ_symbol=parts.occ_symbol,
+            underlying=parts.underlying,
+            expiry=parts.expiry,
+            strike=parts.strike,
+            option_type=parts.option_type,
+            qty=qty,
+            side=side_n,  # type: ignore[arg-type]
+            iv_frozen=iv if iv is not None else 0.01,
+            iv_as_of=datetime.now(timezone.utc),
+            entry_premium=entry,
+        )
+        if iv is None:
+            console.print(f"[dim]fetching IV from {MarketRouter(home).feed_name}…[/dim]")
+        try:
+            draft = freeze_iv_for_position(draft, iv=iv, home=home)
+            store.add_position(None, draft)
+        except StoreError as exc:
+            _err(str(exc))
+            raise typer.Exit(1) from exc
+        except Exception as exc:  # noqa: BLE001
+            if iv is None:
+                _err(
+                    f"could not fetch IV ({exc}). "
+                    "Use a listed OCC symbol, or pass --iv 0.32 as fallback."
+                )
+            else:
+                _err(str(exc))
+            raise typer.Exit(1) from exc
+        src = draft.iv_source or ("manual" if iv is not None else "market")
+        _ok(
+            f"added {draft.occ_symbol} {draft.side} x{draft.qty:g} "
+            f"IV*={draft.iv_frozen * 100:.1f}% (src={src})"
+        )
+        return
 
     result = add_batch(
         store,
@@ -444,12 +426,10 @@ def add_batch_cmd(
         qty=qty,
         side=side_n,  # type: ignore[arg-type]
         iv=iv,
-        home=_home_opt(),
+        home=home,
         console=console,
     )
-    _ok(
-        f"batch done: ok={result.ok} skipped={result.skipped} failed={result.failed}"
-    )
+    _ok(f"done: ok={result.ok} skipped={result.skipped} failed={result.failed}")
     if result.failed:
         raise typer.Exit(1)
 
