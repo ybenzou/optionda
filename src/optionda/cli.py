@@ -26,7 +26,7 @@ from optionda.add_resolve import (
     read_interactive_lines,
     resolve_add_lines,
 )
-from optionda.batch import add_batch
+from optionda.batch import add_batch, render_batch_summary, short_path
 from optionda.engine import freeze_iv_for_position, mark_account
 from optionda.journal import append_export_log, book_path, log_path, sync_book
 from optionda.market.alpaca import AlpacaClient, AlpacaError
@@ -427,11 +427,21 @@ def add_cmd(
             raise typer.Exit(1) from exc
         src = draft.iv_source or ("manual" if iv is not None else "market")
         acc = store.require_current()
-        _ok(
-            f"added {draft.occ_symbol} {draft.side} x{draft.qty:g} "
-            f"IV*={draft.iv_frozen * 100:.1f}% (src={src})"
+        from optionda.batch import BatchResult, BatchRow
+
+        summary = BatchResult(
+            ok=1,
+            rows=[
+                BatchRow(
+                    status="ok",
+                    label=draft.occ_symbol,
+                    occ=draft.occ_symbol,
+                    iv=draft.iv_frozen,
+                    source=src,
+                )
+            ],
         )
-        _ok(f"book: {book_path(acc.name, home)}")
+        console.print(render_batch_summary(summary, book=book_path(acc.name, home)))
         return
 
     result = add_batch(
@@ -445,8 +455,7 @@ def add_cmd(
     )
     acc = store.require_current()
     sync_book(acc, home)
-    _ok(f"done: ok={result.ok} skipped={result.skipped} failed={result.failed}")
-    _ok(f"book: {book_path(acc.name, home)}")
+    console.print(render_batch_summary(result, book=book_path(acc.name, home)))
     if result.failed:
         raise typer.Exit(1)
 
