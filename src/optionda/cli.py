@@ -18,7 +18,7 @@ from optionda.credentials import (
     load_alpaca,
     save_alpaca,
 )
-from optionda.display.table import render_snapshot
+from optionda.display.table import render_snapshot, spinner_frame
 from optionda.engine import freeze_iv_for_position, mark_account
 from optionda.market.alpaca import AlpacaClient, AlpacaError
 from optionda.market.router import MarketRouter, resolve_poll_interval
@@ -238,19 +238,27 @@ def add_cmd(
         entry_premium=entry,
     )
 
+    home = _home_opt()
+    if iv is None:
+        feed = MarketRouter(home).feed_name
+        console.print(f"[dim]fetching IV from {feed}…[/dim]")
     try:
-        draft = freeze_iv_for_position(draft, iv=iv, home=_home_opt())
+        draft = freeze_iv_for_position(draft, iv=iv, home=home)
         store.add_position(account, draft)
     except Exception as exc:  # noqa: BLE001
         if iv is None:
-            _err(f"could not fetch IV ({exc}); retry with --iv 0.32")
+            _err(
+                f"could not fetch IV ({exc}). "
+                "Use a listed OCC symbol, or pass --iv 0.32 as fallback."
+            )
         else:
             _err(str(exc))
         raise typer.Exit(1) from exc
 
+    src = draft.iv_source or ("manual" if iv is not None else "market")
     _ok(
         f"added {draft.occ_symbol} {draft.side} x{draft.qty:g} "
-        f"IV*={draft.iv_frozen * 100:.1f}%"
+        f"IV*={draft.iv_frozen * 100:.1f}% (src={src})"
     )
 
 
@@ -280,12 +288,17 @@ def refresh_iv_cmd(
         _err(str(exc))
         raise typer.Exit(1) from exc
 
-    router = MarketRouter(_home_opt())
+    home = _home_opt()
+    router = MarketRouter(home)
+    console.print(f"[dim]refreshing IV via {router.feed_name}…[/dim]")
     updated = []
     for pos in acc.positions:
         try:
-            updated.append(freeze_iv_for_position(pos, iv=None, home=_home_opt(), router=router))
-            console.print(f"  {pos.occ_symbol} IV*={updated[-1].iv_frozen * 100:.1f}%")
+            nxt = freeze_iv_for_position(pos, iv=None, home=home, router=router)
+            updated.append(nxt)
+            console.print(
+                f"  {pos.occ_symbol} IV*={nxt.iv_frozen * 100:.1f}% (src={nxt.iv_source})"
+            )
         except Exception as exc:  # noqa: BLE001
             _err(f"  {pos.occ_symbol}: {exc}")
             updated.append(pos)
@@ -339,30 +352,53 @@ def run_cmd(
         raise typer.Exit(1) from exc
 
     refresh = resolve_poll_interval(home)
-    prev: dict[str, float] = {}
+    prev_spots: dict[str, float] = {}
+    prev_theos: dict[str, float] = {}
+    prev_notionals: dict[str, float] = {}
+    tick = 0
 
-    def _render():
+    def _fetch_rows():
         acc = store.require_current(acc_name)
         router = MarketRouter(home)
         rows = mark_account(acc, home=home, router=router)
-        panel = render_snapshot(
+        return acc, router, rows
+
+    def _panel(acc, router, rows, *, eta: int | None):
+        nonlocal tick
+        tick += 1
+        return render_snapshot(
             account=acc.name,
             feed=router.feed_name,
             refresh_sec=refresh,
             rows=rows,
-            prev_notionals=prev or None,
+            prev_spots=prev_spots or None,
+            prev_theos=prev_theos or None,
+            prev_notionals=prev_notionals or None,
             continuous=True,
+            spin=spinner_frame(tick),
+            eta_sec=eta,
         )
+
+    def _commit_prev(rows) -> None:
         for row in rows:
+            pid = row.position.id
+            if row.spot is not None:
+                prev_spots[pid] = row.spot
+            if row.theo is not None:
+                prev_theos[pid] = row.theo
             if row.notional is not None:
-                prev[row.position.id] = row.notional
-        return panel
+                prev_notionals[pid] = row.notional
 
     try:
-        with Live(console=console, refresh_per_second=4, screen=False) as live:
+        with Live(console=console, refresh_per_second=8, screen=False) as live:
             while True:
-                live.update(_render())
-                time.sleep(refresh)
+                acc, router, rows = _fetch_rows()
+                live.update(_panel(acc, router, rows, eta=refresh))
+                _commit_prev(rows)
+                for remaining in range(refresh, 0, -1):
+                    for _ in range(8):
+                        live.update(_panel(acc, router, rows, eta=remaining))
+                        time.sleep(0.125)
     except KeyboardInterrupt:
         console.print("\n[dim]stopped[/dim]")
 

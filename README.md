@@ -15,13 +15,20 @@ pip install -e ./optionda
 Requires Python 3.11+.
 
 ```bash
+# local install — prompt shows (optionda) like conda
+py -3.11 -m venv --prompt optionda .venv
+source .venv/Scripts/activate   # Git Bash → (optionda)
+pip install -e .
+
 optionda create demo
-optionda add AAPL270115C00200000 --qty 2 --iv 0.28
+optionda add AAPL270115C00200000 --qty 2    # auto IV from Alpaca/Yahoo
 optionda export
-optionda run          # refresh every 60s (Yahoo)
+optionda run                                # spinner + red/green marks
 ```
 
-`add` without `--iv` tries to pull IV from Yahoo option chains.
+`add` **without** `--iv` pulls IV from Alpaca (if key configured) or Yahoo. Use `--iv` only as fallback.
+
+In the table, **`Model$`** is the Black–Scholes theoretical premium (per share). It is not a live option bid/ask.
 
 ## Optional Alpaca key (15s refresh)
 

@@ -22,6 +22,7 @@ class Position(BaseModel):
     side: Side = "long"
     iv_frozen: float
     iv_as_of: datetime
+    iv_source: str | None = None
     entry_premium: float | None = None
     multiplier: int = 100
 

@@ -98,35 +98,27 @@ class AlpacaClient:
     def get_option_iv(self, occ_symbol: str) -> OptionIvQuote:
         symbol = occ_symbol.strip().upper()
         with httpx.Client(timeout=self.timeout, headers=self._headers()) as client:
-            data = self._get(
-                client,
-                f"{OPTIONS_URL}/v1beta1/options/snapshots/{symbol}",
-                params={"feed": "indicative"},
-            )
+            # Official shape: GET /v1beta1/options/snapshots?symbols=...&feed=indicative
+            try:
+                data = self._get(
+                    client,
+                    f"{OPTIONS_URL}/v1beta1/options/snapshots",
+                    params={"symbols": symbol, "feed": "indicative"},
+                )
+            except AlpacaError:
+                data = self._get(
+                    client,
+                    f"{OPTIONS_URL}/v1beta1/options/snapshots/{symbol}",
+                    params={"feed": "indicative"},
+                )
         if not data:
             raise AlpacaError(f"empty alpaca snapshot for {symbol}")
-        # Common shapes: {snapshots:{SYM:{...}}}, {SYM:{...}}, or flat snapshot
-        node: Any = data
-        if isinstance(data.get("snapshots"), dict):
-            node = data["snapshots"].get(symbol) or data["snapshots"]
-        elif symbol in data and isinstance(data[symbol], dict):
-            node = data[symbol]
-        if isinstance(node, dict) and symbol in node and isinstance(node[symbol], dict):
-            node = node[symbol]
-        if not isinstance(node, dict):
-            raise AlpacaError(f"unexpected alpaca snapshot shape for {symbol}")
-        greeks = node.get("greeks") if isinstance(node, dict) else None
-        iv = None
-        if isinstance(greeks, dict) and greeks.get("implied_volatility") is not None:
-            iv = float(greeks["implied_volatility"])
-        if iv is None and isinstance(node, dict) and node.get("impliedVolatility") is not None:
-            iv = float(node["impliedVolatility"])
-        if iv is None and isinstance(node, dict) and node.get("implied_volatility") is not None:
-            iv = float(node["implied_volatility"])
+        node = _extract_option_snapshot(data, symbol)
+        iv = _extract_iv(node)
         if iv is None or iv <= 0:
             raise AlpacaError(f"no IV in alpaca snapshot for {symbol}")
         as_of = None
-        latest = node.get("latestTrade") or node.get("latestQuote") if isinstance(node, dict) else None
+        latest = node.get("latestTrade") or node.get("latestQuote")
         if isinstance(latest, dict):
             as_of = _parse_ts(latest.get("t") or latest.get("timestamp"))
         return OptionIvQuote(
@@ -145,6 +137,31 @@ class AlpacaClient:
         if not isinstance(payload, dict):
             raise AlpacaError("unexpected alpaca response")
         return payload
+
+
+def _extract_option_snapshot(data: dict, symbol: str) -> dict:
+    node: Any = data
+    if isinstance(data.get("snapshots"), dict):
+        node = data["snapshots"].get(symbol) or next(iter(data["snapshots"].values()), None)
+    elif symbol in data and isinstance(data[symbol], dict):
+        node = data[symbol]
+    if isinstance(node, dict) and symbol in node and isinstance(node[symbol], dict):
+        node = node[symbol]
+    if not isinstance(node, dict):
+        raise AlpacaError(f"unexpected alpaca snapshot shape for {symbol}")
+    return node
+
+
+def _extract_iv(node: dict) -> float | None:
+    greeks = node.get("greeks")
+    if isinstance(greeks, dict):
+        for key in ("implied_volatility", "impliedVolatility", "iv"):
+            if greeks.get(key) is not None:
+                return float(greeks[key])
+    for key in ("implied_volatility", "impliedVolatility", "iv"):
+        if node.get(key) is not None:
+            return float(node[key])
+    return None
 
 
 def _parse_ts(value: Any) -> datetime | None:

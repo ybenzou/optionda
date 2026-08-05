@@ -85,7 +85,11 @@ def freeze_iv_for_position(
 ) -> Position:
     if iv is not None:
         return position.model_copy(
-            update={"iv_frozen": iv, "iv_as_of": datetime.now(timezone.utc)}
+            update={
+                "iv_frozen": iv,
+                "iv_as_of": datetime.now(timezone.utc),
+                "iv_source": "manual",
+            }
         )
     market = router or MarketRouter(home)
     quote = market.get_option_iv(position.occ_symbol)
@@ -93,5 +97,6 @@ def freeze_iv_for_position(
         update={
             "iv_frozen": quote.iv,
             "iv_as_of": quote.as_of or datetime.now(timezone.utc),
+            "iv_source": quote.source,
         }
     )
