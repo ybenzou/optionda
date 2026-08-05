@@ -88,7 +88,7 @@ optionda run            # every refresh appends a `run` block to the same log
 | `optionda activate <name>` | Session-activate (prompt → cyan `[name]`) |
 | `optionda deactivate` | Back to cyan `[optionda]` |
 | `optionda init` | Persist hook in shell rc (like `conda init`) |
-| `optionda add …` | Add one or many (file/`-`/multi-OCC; progress when batch) |
+| `optionda add …` | Add one or many; same OCC+side merges qty (1+2→3) |
 | `optionda delete <id\|OCC>` | Remove position |
 | `optionda refresh-iv` | Re-freeze IV from market |
 | `optionda run` | Live table until Ctrl+C |

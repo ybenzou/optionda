@@ -64,3 +64,22 @@ def test_duplicate_account(tmp_path) -> None:
     store.create("main")
     with pytest.raises(StoreError):
         store.create("main")
+
+
+def test_add_merges_qty(tmp_path, monkeypatch) -> None:
+    store = AccountStore(tmp_path)
+    store.create("demo")
+    monkeypatch.setenv("OPTIONDA_ACTIVE", "demo")
+
+    first = store.add_position(None, _pos("AAPL270115C00200000"))
+    assert first.merged is False
+    assert first.position.qty == 2
+
+    again = _pos("AAPL270115C00200000")
+    again = again.model_copy(update={"qty": 3, "iv_frozen": 0.35})
+    second = store.add_position(None, again)
+    assert second.merged is True
+    assert second.previous_qty == 2
+    assert second.position.qty == 5
+    assert second.position.iv_frozen == 0.35
+    assert len(store.load("demo").positions) == 1

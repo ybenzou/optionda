@@ -412,7 +412,7 @@ def add_cmd(
             console.print(f"[dim]fetching IV from {MarketRouter(home).feed_name}…[/dim]")
         try:
             draft = freeze_iv_for_position(draft, iv=iv, home=home)
-            store.add_position(None, draft)
+            outcome = store.add_position(None, draft)
         except StoreError as exc:
             _err(str(exc))
             raise typer.Exit(1) from exc
@@ -425,21 +425,39 @@ def add_cmd(
             else:
                 _err(str(exc))
             raise typer.Exit(1) from exc
-        src = draft.iv_source or ("manual" if iv is not None else "market")
-        acc = store.require_current()
-        summary = BatchResult(
-            ok=1,
-            rows=[
-                BatchRow(
-                    status="ok",
-                    label=draft.occ_symbol,
-                    occ=draft.occ_symbol,
-                    iv=draft.iv_frozen,
-                    source=src,
-                )
-            ],
+        pos = outcome.position
+        src = pos.iv_source or ("manual" if iv is not None else "market")
+        if outcome.merged:
+            summary = BatchResult(
+                merged=1,
+                rows=[
+                    BatchRow(
+                        status="merge",
+                        label=pos.occ_symbol,
+                        occ=pos.occ_symbol,
+                        iv=pos.iv_frozen,
+                        source=src,
+                        detail=f"qty {outcome.previous_qty:g}→{pos.qty:g}",
+                    )
+                ],
+            )
+        else:
+            summary = BatchResult(
+                ok=1,
+                rows=[
+                    BatchRow(
+                        status="ok",
+                        label=pos.occ_symbol,
+                        occ=pos.occ_symbol,
+                        iv=pos.iv_frozen,
+                        source=src,
+                        detail=f"qty={pos.qty:g}",
+                    )
+                ],
+            )
+        console.print(
+            render_batch_summary(summary, book=book_path(outcome.account.name, home))
         )
-        console.print(render_batch_summary(summary, book=book_path(acc.name, home)))
         return
 
     result = add_batch(

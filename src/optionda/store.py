@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from optionda.config import load_config, save_config
@@ -17,6 +18,14 @@ _ACCOUNT_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
 
 class StoreError(Exception):
     pass
+
+
+@dataclass
+class AddOutcome:
+    account: Account
+    position: Position
+    merged: bool
+    previous_qty: float
 
 
 class AccountStore:
@@ -94,17 +103,44 @@ class AccountStore:
             )
         return self.load(active)
 
-    def add_position(self, account_name: str | None, position: Position) -> Account:
+    def add_position(self, account_name: str | None, position: Position) -> AddOutcome:
+        """Add a position, or merge qty into the same OCC+side if it already exists."""
         account = self.require_current(account_name)
-        for existing in account.positions:
-            if existing.occ_symbol == position.occ_symbol and existing.side == position.side:
-                raise StoreError(
-                    f"position already exists: {position.occ_symbol} ({position.side})"
+        for index, existing in enumerate(account.positions):
+            if (
+                existing.occ_symbol == position.occ_symbol
+                and existing.side == position.side
+            ):
+                previous = existing.qty
+                merged = existing.model_copy(
+                    update={
+                        "qty": existing.qty + position.qty,
+                        "iv_frozen": position.iv_frozen,
+                        "iv_as_of": position.iv_as_of,
+                        "iv_source": position.iv_source or existing.iv_source,
+                        "entry_premium": existing.entry_premium
+                        if existing.entry_premium is not None
+                        else position.entry_premium,
+                    }
+                )
+                account.positions[index] = merged
+                self.save(account)
+                sync_book(account, self.home)
+                return AddOutcome(
+                    account=account,
+                    position=merged,
+                    merged=True,
+                    previous_qty=previous,
                 )
         account.positions.append(position)
         self.save(account)
         sync_book(account, self.home)
-        return account
+        return AddOutcome(
+            account=account,
+            position=position,
+            merged=False,
+            previous_qty=0.0,
+        )
 
     def delete_position(self, account_name: str | None, key: str) -> Account:
         account = self.require_current(account_name)

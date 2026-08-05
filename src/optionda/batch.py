@@ -19,7 +19,7 @@ from optionda.store import AccountStore, StoreError
 
 @dataclass
 class BatchRow:
-    status: str  # ok | skip | fail
+    status: str  # ok | merge | fail
     label: str
     occ: str = ""
     iv: float | None = None
@@ -30,6 +30,7 @@ class BatchRow:
 @dataclass
 class BatchResult:
     ok: int = 0
+    merged: int = 0
     failed: int = 0
     skipped: int = 0
     errors: list[str] = field(default_factory=list)
@@ -82,7 +83,11 @@ def render_batch_summary(result: BatchResult, *, book: Path | None = None) -> Pa
         if row.status == "ok":
             st = Text("ok", style="bold green")
             iv = f"{row.iv * 100:.1f}%" if row.iv is not None else "—"
-            note = ""
+            note = row.detail
+        elif row.status == "merge":
+            st = Text("merge", style="bold cyan")
+            iv = f"{row.iv * 100:.1f}%" if row.iv is not None else "—"
+            note = row.detail
         elif row.status == "skip":
             st = Text("skip", style="bold yellow")
             iv = "—"
@@ -96,8 +101,8 @@ def render_batch_summary(result: BatchResult, *, book: Path | None = None) -> Pa
     counts = Text.assemble(
         ("ok ", "dim"),
         (str(result.ok), "bold green"),
-        ("  skip ", "dim"),
-        (str(result.skipped), "bold yellow" if result.skipped else "dim"),
+        ("  merge ", "dim"),
+        (str(result.merged), "bold cyan" if result.merged else "dim"),
         ("  fail ", "dim"),
         (str(result.failed), "bold red" if result.failed else "dim"),
     )
@@ -159,35 +164,41 @@ def add_batch(
                     iv_as_of=datetime.now(timezone.utc),
                 )
                 draft = freeze_iv_for_position(draft, iv=iv, home=home)
-                store.add_position(None, draft)
-                out.ok += 1
-                out.rows.append(
-                    BatchRow(
-                        status="ok",
-                        label=line,
-                        occ=draft.occ_symbol,
-                        iv=draft.iv_frozen,
-                        source=draft.iv_source or "market",
-                    )
-                )
-            except StoreError as exc:
-                msg = str(exc)
-                if "already exists" in msg:
-                    out.skipped += 1
+                outcome = store.add_position(None, draft)
+                pos = outcome.position
+                if outcome.merged:
+                    out.merged += 1
                     out.rows.append(
                         BatchRow(
-                            status="skip",
+                            status="merge",
                             label=line,
-                            occ=line.split()[0] if line else line,
-                            detail="already exists",
+                            occ=pos.occ_symbol,
+                            iv=pos.iv_frozen,
+                            source=pos.iv_source or "market",
+                            detail=(
+                                f"qty {outcome.previous_qty:g}→{pos.qty:g}"
+                            ),
                         )
                     )
                 else:
-                    out.failed += 1
-                    out.errors.append(f"{line}: {msg}")
+                    out.ok += 1
                     out.rows.append(
-                        BatchRow(status="fail", label=line, occ=line, detail=msg)
+                        BatchRow(
+                            status="ok",
+                            label=line,
+                            occ=pos.occ_symbol,
+                            iv=pos.iv_frozen,
+                            source=pos.iv_source or "market",
+                            detail=f"qty={pos.qty:g}",
+                        )
                     )
+            except StoreError as exc:
+                msg = str(exc)
+                out.failed += 1
+                out.errors.append(f"{line}: {msg}")
+                out.rows.append(
+                    BatchRow(status="fail", label=line, occ=line, detail=msg)
+                )
             except (OccError, Exception) as exc:  # noqa: BLE001
                 out.failed += 1
                 out.errors.append(f"{line}: {exc}")
