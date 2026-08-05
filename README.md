@@ -26,11 +26,13 @@ optionda run          # refresh every 60s (Yahoo)
 ## Optional Alpaca key (15s refresh)
 
 ```bash
-optionda key alpaca <KEY_ID> <SECRET>
-optionda key status
-optionda run          # refresh every 15s
+optionda key alpaca <KEY_ID> <SECRET>   # verifies against Alpaca before saving
+optionda key status                     # re-checks live credentials
+optionda run                            # refresh every 15s
 optionda key clear alpaca
 ```
+
+`key alpaca` probes `data.alpaca.markets` (SPY latest trade). Invalid keys are **not** saved.
 
 Credentials live in `~/.optionda/credentials.toml` (mode `0600` when the OS allows). Override the data root with `OPTIONDA_HOME`.
 

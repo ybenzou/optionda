@@ -30,6 +30,29 @@ class AlpacaClient:
             "Accept": "application/json",
         }
 
+    def verify(self) -> str:
+        """Probe Alpaca with these credentials. Raises AlpacaError if rejected."""
+        with httpx.Client(timeout=self.timeout, headers=self._headers()) as client:
+            response = client.get(
+                f"{DATA_URL}/v2/stocks/trades/latest",
+                params={"symbols": "SPY"},
+            )
+            if response.status_code in (401, 403):
+                raise AlpacaError(
+                    f"credentials rejected by Alpaca (HTTP {response.status_code})"
+                )
+            if response.status_code >= 400:
+                raise AlpacaError(
+                    f"verify failed (HTTP {response.status_code}): {response.text[:160]}"
+                )
+            payload = response.json()
+            trades = payload.get("trades") if isinstance(payload, dict) else None
+            spy = (trades or {}).get("SPY") if isinstance(trades, dict) else None
+            price = spy.get("p") if isinstance(spy, dict) else None
+            if price is not None:
+                return f"verified (SPY last={float(price):.2f})"
+            return "verified (market data reachable)"
+
     def get_spots(self, symbols: list[str]) -> dict[str, SpotQuote]:
         uniq = sorted(set(s.upper() for s in symbols))
         if not uniq:

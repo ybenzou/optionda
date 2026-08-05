@@ -11,9 +11,16 @@ from rich.live import Live
 
 from optionda import __version__
 from optionda.config import apply_feed_defaults, load_config, save_config
-from optionda.credentials import clear_alpaca, has_alpaca, save_alpaca
+from optionda.credentials import (
+    AlpacaCredentials,
+    clear_alpaca,
+    has_alpaca,
+    load_alpaca,
+    save_alpaca,
+)
 from optionda.display.table import render_snapshot
 from optionda.engine import freeze_iv_for_position, mark_account
+from optionda.market.alpaca import AlpacaClient, AlpacaError
 from optionda.market.router import MarketRouter, resolve_poll_interval
 from optionda.models import Position
 from optionda.occ import OccError, format_occ, parse_occ
@@ -89,6 +96,18 @@ def key_cmd(
         console.print(f"feed={cfg.feed}")
         console.print(f"poll_interval_sec={resolve_poll_interval(home)}")
         console.print(f"alpaca={'configured' if configured else 'not set'}")
+        if configured:
+            creds = load_alpaca(home)
+            assert creds is not None
+            try:
+                detail = AlpacaClient(creds).verify()
+                console.print(f"check={detail}")
+            except AlpacaError as exc:
+                _err(f"check=failed ({exc})")
+                raise typer.Exit(1) from exc
+            except Exception as exc:  # noqa: BLE001
+                _err(f"check=failed ({exc})")
+                raise typer.Exit(1) from exc
         return
 
     if action == "clear":
@@ -106,10 +125,19 @@ def key_cmd(
         if not arg1 or not arg2:
             _err("usage: optionda key alpaca <key_id> <secret>")
             raise typer.Exit(1)
-        save_alpaca(arg1, arg2, home)
+        creds = AlpacaCredentials(key_id=arg1.strip(), secret=arg2.strip())
+        try:
+            detail = AlpacaClient(creds).verify()
+        except AlpacaError as exc:
+            _err(f"alpaca key not saved: {exc}")
+            raise typer.Exit(1) from exc
+        except Exception as exc:  # noqa: BLE001
+            _err(f"alpaca key not saved: network/verify error ({exc})")
+            raise typer.Exit(1) from exc
+        save_alpaca(creds.key_id, creds.secret, home)
         cfg = apply_feed_defaults(load_config(home), "alpaca")
         save_config(cfg, home)
-        _ok("alpaca credentials saved · feed=alpaca · refresh=15s")
+        _ok(f"alpaca credentials saved | feed=alpaca | refresh=15s | {detail}")
         return
 
     _err("usage: optionda key alpaca <key_id> <secret> | optionda key status | optionda key clear alpaca")

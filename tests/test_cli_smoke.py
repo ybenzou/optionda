@@ -79,9 +79,26 @@ def test_cli_create_add_export(tmp_path, monkeypatch) -> None:
 
 def test_key_status(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("OPTIONDA_HOME", str(tmp_path))
-    result = runner.invoke(app, ["key", "alpaca", "PK", "SEC"])
-    assert result.exit_code == 0, result.output
-    status = runner.invoke(app, ["key", "status"])
-    assert status.exit_code == 0
+    with patch("optionda.cli.AlpacaClient") as client_cls:
+        client_cls.return_value.verify.return_value = "verified (SPY last=500.00)"
+        result = runner.invoke(app, ["key", "alpaca", "PK", "SEC"])
+        assert result.exit_code == 0, result.output
+        assert "verified" in result.output
+        status = runner.invoke(app, ["key", "status"])
+    assert status.exit_code == 0, status.output
     assert "alpaca=configured" in status.output
     assert "poll_interval_sec=15" in status.output
+    assert "check=verified" in status.output
+
+
+def test_key_rejects_bad_credentials(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("OPTIONDA_HOME", str(tmp_path))
+    with patch("optionda.cli.AlpacaClient") as client_cls:
+        from optionda.market.alpaca import AlpacaError
+
+        client_cls.return_value.verify.side_effect = AlpacaError(
+            "credentials rejected by Alpaca (HTTP 403)"
+        )
+        result = runner.invoke(app, ["key", "alpaca", "BAD", "SECRET"])
+    assert result.exit_code == 1
+    assert "not saved" in result.output
