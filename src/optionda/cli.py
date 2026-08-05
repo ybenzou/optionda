@@ -26,7 +26,7 @@ from optionda.add_resolve import (
     read_interactive_lines,
     resolve_add_lines,
 )
-from optionda.batch import add_batch, render_batch_summary, short_path
+from optionda.batch import BatchResult, BatchRow, add_batch, render_batch_summary
 from optionda.engine import freeze_iv_for_position, mark_account
 from optionda.journal import append_export_log, book_path, log_path, sync_book
 from optionda.market.alpaca import AlpacaClient, AlpacaError
@@ -427,8 +427,6 @@ def add_cmd(
             raise typer.Exit(1) from exc
         src = draft.iv_source or ("manual" if iv is not None else "market")
         acc = store.require_current()
-        from optionda.batch import BatchResult, BatchRow
-
         summary = BatchResult(
             ok=1,
             rows=[
