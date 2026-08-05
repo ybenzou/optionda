@@ -270,7 +270,7 @@ def init_cmd(
     else:
         _ok(f"already initialized in {path}")
     _ok('restart shell, or run: eval "$(optionda shellenv)"')
-    _ok("default prompt: (optionda)  →  optionda activate demo  →  (demo)")
+    _ok("default prompt: [optionda]  →  optionda activate demo  →  [demo]")
 
 
 @app.command("create")

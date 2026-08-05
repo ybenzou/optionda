@@ -10,9 +10,10 @@ def test_render_bash_hook() -> None:
     script = render_shellenv("bash")
     assert "OPTIONDA_SHELL_HOOK=1" in script
     assert "OPTIONDA_ACTIVE" in script
-    assert "(optionda)" in script
+    assert "[optionda]" in script
     assert "activate)" in script
     assert "deactivate)" in script
+    assert r"\e[36m" in script
 
 
 def test_current_is_session_only(tmp_path, monkeypatch) -> None:

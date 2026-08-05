@@ -21,12 +21,12 @@ pip install -e .
 
 # one-time (like conda init)
 optionda init
-eval "$(optionda shellenv)"   # or open a new shell — default prompt: (optionda)
+eval "$(optionda shellenv)"   # or open a new shell — default prompt: [optionda] (cyan)
 
 optionda create demo
-optionda activate demo        # prompt → (demo)
-optionda deactivate           # prompt → (optionda)
-optionda activate hedge       # prompt → (hedge)
+optionda activate demo        # prompt → [demo]
+optionda deactivate           # prompt → [optionda]
+optionda activate hedge       # prompt → [hedge]
 
 optionda add AAPL270115C00200000 --qty 2
 
@@ -85,8 +85,8 @@ optionda run            # every refresh appends a `run` block to the same log
 |---------|---------|
 | `optionda create <name>` | Create account |
 | `optionda list` | List accounts (`*` = session-active) |
-| `optionda activate <name>` | Session-activate (prompt → `(name)`) |
-| `optionda deactivate` | Back to `(optionda)` |
+| `optionda activate <name>` | Session-activate (prompt → cyan `[name]`) |
+| `optionda deactivate` | Back to cyan `[optionda]` |
 | `optionda init` | Persist hook in shell rc (like `conda init`) |
 | `optionda add …` | Add one or many (file/`-`/multi-OCC; progress when batch) |
 | `optionda delete <id\|OCC>` | Remove position |

@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 # Session activation via OPTIONDA_ACTIVE (like conda activate).
-# Default prompt is always (optionda) until the user activates an account.
+# Prompt uses cyan [brackets] to avoid clashing with conda/venv (parens).
 BASH_HOOK = r'''# optionda shell hook — eval "$(optionda shellenv)"
 export OPTIONDA_SHELL_HOOK=1
 
@@ -12,10 +12,11 @@ if [ -z "${__OPTIONDA_PS1_SAVED+x}" ]; then
 fi
 
 __optionda_update_prompt() {
+  # cyan [name] — distinct from (.venv) / (base)
   if [ -n "${OPTIONDA_ACTIVE:-}" ]; then
-    PS1="(${OPTIONDA_ACTIVE}) ${__OPTIONDA_PS1_SAVED}"
+    PS1="\[\e[36m\][${OPTIONDA_ACTIVE}]\[\e[0m\] ${__OPTIONDA_PS1_SAVED}"
   else
-    PS1="(optionda) ${__OPTIONDA_PS1_SAVED}"
+    PS1="\[\e[36m\][optionda]\[\e[0m\] ${__OPTIONDA_PS1_SAVED}"
   fi
 }
 
@@ -34,12 +35,12 @@ optionda() {
       fi
       export OPTIONDA_ACTIVE="$__name"
       __optionda_update_prompt
-      echo "activated ($__name)"
+      printf '\033[36mactivated [%s]\033[0m\n' "$__name"
       ;;
     deactivate)
       unset OPTIONDA_ACTIVE
       __optionda_update_prompt
-      echo "deactivated → (optionda)"
+      printf '\033[36mdeactivated → [optionda]\033[0m\n'
       ;;
     *)
       command optionda "$@"

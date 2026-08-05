@@ -71,7 +71,7 @@ def render_snapshot(
     now = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
 
     title = Text.assemble(
-        (f"({account})", "bold cyan"),
+        (f"[{account}]", "bold cyan"),
         ("  optionda", "bold"),
         ("  ·  ", "dim"),
         ("MODEL", "bold yellow"),
