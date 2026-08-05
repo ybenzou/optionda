@@ -15,16 +15,21 @@ pip install -e ./optionda
 Requires Python 3.11+.
 
 ```bash
-# local install — prompt shows (optionda) like conda
-py -3.11 -m venv --prompt optionda .venv
-source .venv/Scripts/activate   # Git Bash → (optionda)
+py -3.11 -m venv .venv
+source .venv/Scripts/activate
 pip install -e .
 
-optionda create demo
-optionda add AAPL270115C00200000 --qty 2    # auto IV from Alpaca/Yahoo
+# once per shell (conda-style): prompt shows (account)
+eval "$(optionda shellenv)"
+
+optionda create demo          # prompt → (demo)
+optionda use hedge            # prompt → (hedge)
+optionda add AAPL270115C00200000 --qty 2
 optionda export
-optionda run                                # spinner + red/green marks
+optionda run
 ```
+
+Put `eval "$(optionda shellenv)"` in `~/.bashrc` if you want it every time.
 
 `add` **without** `--iv` pulls IV from Alpaca (if key configured) or Yahoo. Use `--iv` only as fallback.
 
@@ -49,6 +54,8 @@ Credentials live in `~/.optionda/credentials.toml` (mode `0600` when the OS allo
 |---------|---------|
 | `optionda create <name>` | Create account |
 | `optionda list` / `use <name>` | List / select account |
+| `optionda current` | Print current account (for hooks) |
+| `optionda shellenv` | Print bash/zsh hook → `eval "$(optionda shellenv)"` |
 | `optionda add …` | Add position (OCC or fields) |
 | `optionda delete <id\|OCC>` | Remove position |
 | `optionda refresh-iv` | Re-freeze IV from market |

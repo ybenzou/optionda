@@ -68,10 +68,9 @@ def render_snapshot(
     now = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
 
     badge = Text.assemble(
-        ("(optionda)", "bold cyan"),
+        (f"({account})", "bold cyan"),
         ("  ", ""),
-        ("MODEL mark", "bold"),
-        (f"  account={account}", ""),
+        ("optionda MODEL", "bold"),
         (f"  feed={feed}", "dim"),
         (f"  every {refresh_sec}s", "dim"),
         (f"  {now}", "dim"),

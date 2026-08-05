@@ -24,6 +24,7 @@ from optionda.market.alpaca import AlpacaClient, AlpacaError
 from optionda.market.router import MarketRouter, resolve_poll_interval
 from optionda.models import Position
 from optionda.occ import OccError, format_occ, parse_occ
+from optionda.shellenv import render_shellenv
 from optionda.store import AccountStore, StoreError
 
 app = typer.Typer(
@@ -144,6 +145,42 @@ def key_cmd(
     raise typer.Exit(1)
 
 
+def _prompt_hook_tip() -> None:
+    import os
+
+    if os.environ.get("OPTIONDA_SHELL_HOOK"):
+        return
+    console.print(
+        '[dim]tip: eval "$(optionda shellenv)"  # show (account) in this shell prompt[/dim]'
+    )
+
+
+@app.command("current")
+def current_cmd() -> None:
+    """Print the current account name (for shell hooks)."""
+    name = _store().current_name()
+    if name:
+        # Plain stdout — consumed by shellenv; no Rich markup.
+        typer.echo(name)
+
+
+@app.command("shellenv")
+def shellenv_cmd(
+    shell: str = typer.Argument(
+        "bash",
+        help="Shell type: bash or zsh (Git Bash supported).",
+    ),
+) -> None:
+    """Print shell hook code. Use: eval "$(optionda shellenv)" """
+    try:
+        script = render_shellenv(shell)
+    except ValueError as exc:
+        _err(str(exc))
+        raise typer.Exit(1) from exc
+    # Must be plain stdout for eval
+    typer.echo(script, nl=False)
+
+
 @app.command("create")
 def create_cmd(name: str = typer.Argument(...)) -> None:
     """Create an account."""
@@ -153,6 +190,7 @@ def create_cmd(name: str = typer.Argument(...)) -> None:
         _err(str(exc))
         raise typer.Exit(1) from exc
     _ok(f"created account {account.name}")
+    _prompt_hook_tip()
 
 
 @app.command("list")
@@ -178,6 +216,7 @@ def use_cmd(name: str = typer.Argument(...)) -> None:
         _err(str(exc))
         raise typer.Exit(1) from exc
     _ok(f"using account {name}")
+    _prompt_hook_tip()
 
 
 @app.command("add")
