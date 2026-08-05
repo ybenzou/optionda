@@ -22,6 +22,7 @@ from optionda.display.table import render_snapshot, spinner_frame
 from optionda.add_resolve import looks_like_field_add, resolve_add_lines
 from optionda.batch import add_batch
 from optionda.engine import freeze_iv_for_position, mark_account
+from optionda.journal import append_export_log, book_path, log_path, sync_book
 from optionda.market.alpaca import AlpacaClient, AlpacaError
 from optionda.market.router import MarketRouter, resolve_poll_interval
 from optionda.models import Position
@@ -414,10 +415,12 @@ def add_cmd(
                 _err(str(exc))
             raise typer.Exit(1) from exc
         src = draft.iv_source or ("manual" if iv is not None else "market")
+        acc = store.require_current()
         _ok(
             f"added {draft.occ_symbol} {draft.side} x{draft.qty:g} "
             f"IV*={draft.iv_frozen * 100:.1f}% (src={src})"
         )
+        _ok(f"book: {book_path(acc.name, home)}")
         return
 
     result = add_batch(
@@ -429,7 +432,10 @@ def add_cmd(
         home=home,
         console=console,
     )
+    acc = store.require_current()
+    sync_book(acc, home)
     _ok(f"done: ok={result.ok} skipped={result.skipped} failed={result.failed}")
+    _ok(f"book: {book_path(acc.name, home)}")
     if result.failed:
         raise typer.Exit(1)
 
@@ -478,7 +484,7 @@ def refresh_iv_cmd() -> None:
 
 @app.command("export")
 def export_cmd() -> None:
-    """Print a one-shot MODEL snapshot for the activated account."""
+    """Print a MODEL snapshot and append it to the account log under ~/.optionda."""
     store = _store()
     try:
         acc = store.require_current()
@@ -498,6 +504,10 @@ def export_cmd() -> None:
             continuous=False,
         )
     )
+    sync_book(acc, home)
+    log_file = append_export_log(acc, rows, feed=feed, home=home)
+    _ok(f"book: {book_path(acc.name, home)}")
+    _ok(f"log:  {log_file}  (appended)")
 
 
 @app.command("run")

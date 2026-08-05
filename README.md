@@ -62,6 +62,18 @@ optionda key clear alpaca
 
 Credentials live in `~/.optionda/credentials.toml` (mode `0600` when the OS allows). Override the data root with `OPTIONDA_HOME`.
 
+Per-account tracking files (under the optionda data library, **not** your shell cwd):
+
+| Path | Role |
+|------|------|
+| `~/.optionda/books/<account>.txt` | Human book; created/updated on `add` / `delete` |
+| `~/.optionda/logs/<account>.log` | Append-only `export` snapshots |
+
+```bash
+optionda add …          # refreshes books/demo.txt
+optionda export         # prints table + appends logs/demo.log
+```
+
 ## Commands
 
 | Command | Purpose |

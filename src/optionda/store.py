@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 
 from optionda.config import load_config, save_config
+from optionda.journal import sync_book
 from optionda.models import Account, Position
 from optionda.paths import default_home, ensure_home
 
@@ -41,6 +42,7 @@ class AccountStore:
             raise StoreError(f"account already exists: {name}")
         account = Account(name=name)
         self.save(account)
+        sync_book(account, self.home)
         return account
 
     def load(self, name: str) -> Account:
@@ -101,6 +103,7 @@ class AccountStore:
                 )
         account.positions.append(position)
         self.save(account)
+        sync_book(account, self.home)
         return account
 
     def delete_position(self, account_name: str | None, key: str) -> Account:
@@ -115,7 +118,9 @@ class AccountStore:
         if len(account.positions) == before:
             raise StoreError(f"position not found: {key}")
         self.save(account)
+        sync_book(account, self.home)
         return account
 
     def update_positions(self, account: Account) -> None:
         self.save(account)
+        sync_book(account, self.home)

@@ -10,4 +10,6 @@ def default_home() -> Path:
 def ensure_home(root: Path | None = None) -> Path:
     home = root or default_home()
     (home / "accounts").mkdir(parents=True, exist_ok=True)
+    (home / "books").mkdir(parents=True, exist_ok=True)
+    (home / "logs").mkdir(parents=True, exist_ok=True)
     return home
