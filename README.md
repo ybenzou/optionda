@@ -35,6 +35,8 @@ Put `eval "$(optionda shellenv)"` in `~/.bashrc` if you want it every time.
 
 In the table, **`Model$`** is the Black–Scholes theoretical premium (per share). It is not a live option bid/ask.
 
+UI uses **Rich** (`Panel`, `Rule`, `Table`, `Live` spinner). No `tqdm` / `popen` required for the desk view.
+
 ## Optional Alpaca key (15s refresh)
 
 ```bash

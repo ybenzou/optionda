@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from rich import box
 from rich.console import Group
+from rich.panel import Panel
+from rich.rule import Rule
 from rich.table import Table
 from rich.text import Text
 
@@ -67,29 +70,45 @@ def render_snapshot(
     prev_n = prev_notionals or {}
     now = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
 
-    badge = Text.assemble(
+    title = Text.assemble(
         (f"({account})", "bold cyan"),
-        ("  ", ""),
-        ("optionda MODEL", "bold"),
-        (f"  feed={feed}", "dim"),
-        (f"  every {refresh_sec}s", "dim"),
-        (f"  {now}", "dim"),
+        ("  optionda", "bold"),
+        ("  ·  ", "dim"),
+        ("MODEL", "bold yellow"),
+    )
+    subtitle = Text.assemble(
+        (f"feed={feed}", "dim"),
+        ("  │  ", "dim"),
+        (f"refresh={refresh_sec}s", "dim"),
+        ("  │  ", "dim"),
+        (now, "dim"),
+    )
+    header = Panel(
+        Group(title, subtitle),
+        box=box.SQUARE,
+        border_style="cyan",
+        padding=(0, 1),
     )
 
     legend = Text(
-        "Model$ = Black-Scholes theoretical premium per share (not a live option quote)  |  "
-        "IV* = frozen implied vol used by the model  |  Chg = account $ change vs last refresh",
+        "Model$ = BS theoretical premium / share   ·   "
+        "IV* = frozen vol   ·   "
+        "Chg$ = book $ vs last refresh   ·   "
+        "not a live option quote",
         style="dim",
     )
 
     table = Table(
         show_header=True,
         header_style="bold",
-        box=None,
+        box=box.SIMPLE_HEAD,
+        border_style="dim",
         pad_edge=False,
         expand=True,
+        show_lines=False,
+        row_styles=("", "dim"),
     )
-    table.add_column("OCC")
+    table.add_column("OCC", style="bold")
     table.add_column("Side", justify="center")
     table.add_column("Qty", justify="right")
     table.add_column("Spot", justify="right")
@@ -103,6 +122,9 @@ def render_snapshot(
     total_prev = 0.0
     iv_times: list[str] = []
     iv_sources: set[str] = set()
+
+    if not rows:
+        table.add_row("—", "—", "—", "—", "—", Text("(no positions)", style="dim"), "—", "—", "—")
 
     for row in rows:
         pos = row.position
@@ -145,42 +167,59 @@ def render_snapshot(
 
     total_delta = total - total_prev if prev_n else None
     if total_delta is None:
-        total_text = Text(f"Σ Model$ {_fmt_money(total)}")
+        total_text = Text.assemble(("Σ Model$  ", "bold"), (_fmt_money(total), "bold"))
     elif abs(total_delta) < 1e-9:
-        total_text = Text(f"Σ Model$ {_fmt_money(total)}  (unchanged)", style="dim")
+        total_text = Text.assemble(
+            ("Σ Model$  ", "bold"),
+            (_fmt_money(total), "bold"),
+            ("  (unchanged)", "dim"),
+        )
     elif total_delta > 0:
-        total_text = Text(
-            f"Σ Model$ {_fmt_money(total)}  ({total_delta:+,.2f})",
-            style="bold green",
+        total_text = Text.assemble(
+            ("Σ Model$  ", "bold"),
+            (_fmt_money(total), "bold green"),
+            (f"  ({total_delta:+,.2f})", "bold green"),
         )
     else:
-        total_text = Text(
-            f"Σ Model$ {_fmt_money(total)}  ({total_delta:+,.2f})",
-            style="bold red",
+        total_text = Text.assemble(
+            ("Σ Model$  ", "bold"),
+            (_fmt_money(total), "bold red"),
+            (f"  ({total_delta:+,.2f})", "bold red"),
         )
 
-    footer_bits = [total_text]
-    meta = Text(style="dim")
-    meta.append("not a live option quote")
+    meta_parts = ["indicative / delayed · not executable"]
     if iv_times:
-        meta.append(f"  |  IV frozen {min(iv_times)} … {max(iv_times)}")
+        meta_parts.append(f"IV frozen {min(iv_times)} … {max(iv_times)}")
     if iv_sources:
-        meta.append(f"  |  IV src={','.join(sorted(iv_sources))}")
+        meta_parts.append(f"IV src={','.join(sorted(iv_sources))}")
     if continuous:
-        meta.append("  |  Ctrl+C quit")
+        meta_parts.append("Ctrl+C quit")
+    meta = Text("  ·  ".join(meta_parts), style="dim")
 
-    status = Text()
+    footer_inner: list = [total_text, meta]
     if continuous:
         frame = spin or spinner_frame(0)
         if eta_sec is None:
-            status = Text(f"{frame} waiting for next refresh…", style="cyan")
+            status = Text(f"{frame}  waiting for next refresh…", style="cyan")
         else:
-            status = Text(
-                f"{frame} next refresh in {eta_sec}s",
-                style="cyan",
-            )
+            status = Text(f"{frame}  next refresh in {eta_sec}s", style="cyan")
+        footer_inner.append(status)
 
-    body: list = [badge, legend, table, total_text, meta]
-    if continuous:
-        body.append(status)
-    return Group(*body)
+    footer = Panel(
+        Group(*footer_inner),
+        box=box.SQUARE,
+        border_style="dim",
+        padding=(0, 1),
+        title="summary",
+        title_align="left",
+    )
+
+    return Group(
+        header,
+        Rule(style="dim"),
+        legend,
+        Rule("positions", style="dim", align="left"),
+        table,
+        Rule(style="dim"),
+        footer,
+    )
