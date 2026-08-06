@@ -13,7 +13,13 @@ def test_single_occ() -> None:
 
 def test_human_argv() -> None:
     assert resolve_add_lines(["INTC", "261016", "140", "C"]) == [
-        "INTC261016C00140000"
+        "INTC 261016 140 C"
+    ]
+
+
+def test_human_argv_with_cost() -> None:
+    assert resolve_add_lines(["INTC", "261016", "140", "C", "@", "5.20"]) == [
+        "INTC 261016 140 C @ 5.20"
     ]
 
 

@@ -5,6 +5,7 @@ from typer.testing import CliRunner
 
 from optionda.cli import app
 from optionda.models import OptionIvQuote, SpotQuote
+from optionda.pricing.surface import IvSurface, save_surface
 
 runner = CliRunner()
 
@@ -16,6 +17,159 @@ def test_export_blocked_without_activate(tmp_path, monkeypatch) -> None:
     blocked = runner.invoke(app, ["export"])
     assert blocked.exit_code == 1
     assert "activate" in blocked.output.lower()
+
+
+def test_book_shows_positions(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("OPTIONDA_HOME", str(tmp_path))
+    monkeypatch.setenv("OPTIONDA_ACTIVE", "demo")
+    assert runner.invoke(app, ["create", "demo"]).exit_code == 0
+
+    empty = runner.invoke(app, ["book"])
+    assert empty.exit_code == 0, empty.output
+    assert "empty book" in empty.output
+
+    with patch(
+        "optionda.cli.freeze_iv_for_position",
+        side_effect=lambda p, **kw: p.model_copy(update={"iv_frozen": 0.28}),
+    ):
+        add = runner.invoke(
+            app,
+            ["add", "AAPL250117C00200000", "--qty", "2", "--iv", "0.28", "--entry", "5.2"],
+        )
+    assert add.exit_code == 0, add.output
+
+    shown = runner.invoke(app, ["book"])
+    assert shown.exit_code == 0, shown.output
+    assert "AAPL250117C00200000" in shown.output
+    assert "5.2" in shown.output
+
+
+def test_book_shows_surface_metadata(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("OPTIONDA_HOME", str(tmp_path))
+    monkeypatch.setenv("OPTIONDA_ACTIVE", "demo")
+    assert runner.invoke(app, ["create", "demo"]).exit_code == 0
+    save_surface(
+        IvSurface(
+            underlying="SPCX",
+            spot=116.0,
+            as_of=datetime(2026, 8, 4, 20, 0, tzinfo=timezone.utc),
+            source="alpaca/chain",
+            smiles=[],
+            quality={"accepted": 20, "rejected": 4},
+        ),
+        tmp_path,
+    )
+
+    shown = runner.invoke(app, ["book"])
+
+    assert shown.exit_code == 0, shown.output
+    assert "surface SPCX" in shown.output
+    assert "accepted=20" in shown.output
+
+
+def test_refresh_iv_calibrates_surface(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("OPTIONDA_HOME", str(tmp_path))
+    monkeypatch.setenv("OPTIONDA_ACTIVE", "demo")
+    assert runner.invoke(app, ["create", "demo"]).exit_code == 0
+
+    from optionda.engine import CalibrationResult
+    from optionda.pricing.surface import ExpirySmile, IvSurface, SurfaceNode
+    from datetime import date, datetime, timezone
+
+    surface = IvSurface(
+        underlying="AAPL",
+        spot=210.0,
+        as_of=datetime.now(timezone.utc),
+        source="alpaca/chain",
+        smiles=[
+            ExpirySmile(
+                expiry=date(2026, 11, 20),
+                nodes=[SurfaceNode(strike=350, delta=0.25, iv=0.28)],
+            )
+        ],
+        quality={"accepted": 1, "rejected": 0},
+    )
+
+    class FakeRouter:
+        feed_name = "alpaca"
+
+        def get_spots(self, symbols):
+            return {}
+
+    with (
+        patch("optionda.cli.MarketRouter", return_value=FakeRouter()),
+        patch(
+            "optionda.cli.calibrate_surfaces",
+            return_value=CalibrationResult(surfaces={"AAPL": surface}, errors={}),
+        ) as calibrate,
+        patch("optionda.cli.apply_surface_reference_ivs", side_effect=lambda pos, *a, **k: pos),
+    ):
+        result = runner.invoke(app, ["refresh-iv"])
+
+    assert result.exit_code == 0, result.output
+    calibrate.assert_called_once()
+    assert "ok AAPL" in result.output
+    assert "close" in result.output.lower()
+    from datetime import timedelta
+
+    assert calibrate.call_args.kwargs["max_quote_age"] == timedelta(hours=18)
+
+
+def test_refresh_iv_fresh_uses_tight_age(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("OPTIONDA_HOME", str(tmp_path))
+    monkeypatch.setenv("OPTIONDA_ACTIVE", "demo")
+    assert runner.invoke(app, ["create", "demo"]).exit_code == 0
+
+    from datetime import timedelta
+
+    from optionda.engine import CalibrationResult
+
+    class FakeRouter:
+        feed_name = "alpaca"
+
+        def get_spots(self, symbols):
+            return {}
+
+    with (
+        patch("optionda.cli.MarketRouter", return_value=FakeRouter()),
+        patch(
+            "optionda.cli.calibrate_surfaces",
+            return_value=CalibrationResult(surfaces={}, errors={"AAPL": "stale"}),
+        ) as calibrate,
+    ):
+        result = runner.invoke(app, ["refresh-iv", "--fresh"])
+
+    assert result.exit_code == 1, result.output
+    assert calibrate.call_args.kwargs["max_quote_age"] == timedelta(minutes=20)
+    assert "fresh" in result.output.lower()
+
+
+def test_refresh_iv_all_stale_hints_retry(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("OPTIONDA_HOME", str(tmp_path))
+    monkeypatch.setenv("OPTIONDA_ACTIVE", "demo")
+    assert runner.invoke(app, ["create", "demo"]).exit_code == 0
+
+    from optionda.engine import CalibrationResult
+
+    class FakeRouter:
+        feed_name = "alpaca"
+
+        def get_spots(self, symbols):
+            return {}
+
+    with (
+        patch("optionda.cli.MarketRouter", return_value=FakeRouter()),
+        patch(
+            "optionda.cli.calibrate_surfaces",
+            return_value=CalibrationResult(
+                surfaces={}, errors={"AAPL": "no usable surface nodes"}
+            ),
+        ),
+    ):
+        result = runner.invoke(app, ["refresh-iv"])
+
+    assert result.exit_code == 1, result.output
+    assert "no surfaces calibrated" in result.output.lower()
 
 
 def test_cli_create_add_export(tmp_path, monkeypatch) -> None:
@@ -53,7 +207,16 @@ def test_cli_create_add_export(tmp_path, monkeypatch) -> None:
         with patch("optionda.cli.freeze_iv_for_position", side_effect=lambda p, **kw: p.model_copy(update={"iv_frozen": 0.28})):
             add = runner.invoke(
                 app,
-                ["add", "AAPL250117C00200000", "--qty", "2", "--iv", "0.28"],
+                [
+                    "add",
+                    "AAPL250117C00200000",
+                    "--qty",
+                    "2",
+                    "--iv",
+                    "0.28",
+                    "--entry",
+                    "5.20",
+                ],
             )
         assert add.exit_code == 0, add.output
 
@@ -70,6 +233,7 @@ def test_cli_create_add_export(tmp_path, monkeypatch) -> None:
                 side="long",
                 iv_frozen=0.28,
                 iv_as_of=datetime.now(timezone.utc),
+                entry_premium=5.20,
             )
             mark.return_value = [
                 RowMark(
@@ -79,6 +243,8 @@ def test_cli_create_add_export(tmp_path, monkeypatch) -> None:
                     delta=0.62,
                     dte=120.0,
                     notional=3700.0,
+                    cost=5.20,
+                    upnl=2660.0,
                 )
             ]
             exported = runner.invoke(app, ["export"])
@@ -88,6 +254,7 @@ def test_cli_create_add_export(tmp_path, monkeypatch) -> None:
             assert "demo" in out
             assert "MODEL" in out
             assert "Model$" in out or "Model" in out
+            assert "IVsrc" in out
 
 
 def test_key_status(tmp_path, monkeypatch) -> None:

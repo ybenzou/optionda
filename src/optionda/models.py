@@ -9,6 +9,9 @@ from pydantic import BaseModel, Field, field_validator
 OptionType = Literal["call", "put"]
 Side = Literal["long", "short"]
 Feed = Literal["yahoo", "alpaca"]
+AlpacaOptionsFeed = Literal["auto", "opra", "indicative"]
+# mid = invert IV from option mid/last; vendor = provider's IV field; auto = mid then vendor
+IvMode = Literal["mid", "vendor", "auto"]
 
 
 class Position(BaseModel):
@@ -43,6 +46,13 @@ class Position(BaseModel):
             raise ValueError("iv_frozen must be > 0")
         return value
 
+    @field_validator("entry_premium")
+    @classmethod
+    def non_negative_entry(cls, value: float | None) -> float | None:
+        if value is not None and value <= 0:
+            raise ValueError("entry_premium must be > 0")
+        return value
+
 
 class Account(BaseModel):
     name: str
@@ -57,12 +67,29 @@ class Account(BaseModel):
         return cleaned
 
 
+ExerciseStyle = Literal["american", "european"]
+OvernightIvMode = Literal["hybrid", "sticky_delta", "sticky_strike"]
+
+
 class AppConfig(BaseModel):
     default_account: str | None = None
     r: float = 0.045
     q: float = 0.0
     feed: Feed = "yahoo"
     poll_interval_sec: int = 60
+    # Alpaca options snapshot feed: auto tries OPRA then free indicative.
+    alpaca_options_feed: AlpacaOptionsFeed = "auto"
+    # Prefer mid-implied IV (closer to broker desks) over vendor indicative IV.
+    iv_mode: IvMode = "mid"
+    # US equity/ETF options are American; european keeps closed-form BS.
+    option_style: ExerciseStyle = "american"
+    # Frozen-surface dynamics used when the underlying keeps trading overnight.
+    overnight_iv_mode: OvernightIvMode = "hybrid"
+    sticky_delta_weight: float = 0.5
+    # Optional simple term structure: [{"days": 30, "rate": 0.04}, ...].
+    rate_curve: list[tuple[int, float]] = Field(default_factory=list)
+    # Per-ticker continuous dividend yields. Values absent here fall back to q.
+    dividend_yields: dict[str, float] = Field(default_factory=dict)
 
 
 class SpotQuote(BaseModel):
@@ -86,4 +113,22 @@ class RowMark(BaseModel):
     delta: float | None
     dte: float | None
     notional: float | None
+    cost: float | None = None  # avg entry premium / share
+    upnl: float | None = None  # $ vs cost: (theo - cost) * mult * qty * sign
+    live: float | None = None  # live option mid / last (not Model$)
+    valuation_mode: Literal["surface", "frozen"] = "frozen"
+    surface_iv: float | None = None
+    surface_as_of: datetime | None = None
+    surface_source: str | None = None
+    model_low: float | None = None
+    model_high: float | None = None
+    iv_dynamics: str | None = None
+    sticky_strike_iv: float | None = None
+    sticky_delta_iv: float | None = None
+    sticky_strike_model: float | None = None
+    sticky_delta_model: float | None = None
+    rate_used: float | None = None
+    dividend_used: float | None = None
+    spot_as_of: datetime | None = None
+    spot_source: str | None = None
     error: str | None = None

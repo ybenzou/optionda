@@ -5,7 +5,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-from optionda.paths import default_home, ensure_home
+from optionda.paths import ensure_home
 
 
 @dataclass(frozen=True)
@@ -34,7 +34,7 @@ def _chmod_private(path: Path) -> None:
 
 
 def load_alpaca(home: Path | None = None) -> AlpacaCredentials | None:
-    root = ensure_home(home or default_home())
+    root = ensure_home(home)
     path = _credentials_path(root)
     if not path.exists():
         return None
@@ -49,7 +49,7 @@ def load_alpaca(home: Path | None = None) -> AlpacaCredentials | None:
 
 
 def save_alpaca(key_id: str, secret: str, home: Path | None = None) -> Path:
-    root = ensure_home(home or default_home())
+    root = ensure_home(home)
     path = _credentials_path(root)
     creds = AlpacaCredentials(key_id=key_id.strip(), secret=secret.strip())
     if not creds.key_id or not creds.secret:
@@ -60,7 +60,7 @@ def save_alpaca(key_id: str, secret: str, home: Path | None = None) -> Path:
 
 
 def clear_alpaca(home: Path | None = None) -> bool:
-    root = ensure_home(home or default_home())
+    root = ensure_home(home)
     path = _credentials_path(root)
     if not path.exists():
         return False

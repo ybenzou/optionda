@@ -59,7 +59,29 @@ END_MARK = "# <<< optionda initialize <<<"
 
 RC_BLOCK = f"""{BEGIN_MARK}
 # Managed by `optionda init` (like conda init). Remove with: optionda init --reverse
-eval "$(optionda shellenv)"
+# Safe when optionda is not on PATH (e.g. conda base): no error, loads later if available.
+__optionda_maybe_init() {{
+  if [ -n "${{OPTIONDA_SHELL_HOOK:-}}" ]; then
+    return 0
+  fi
+  if command -v optionda >/dev/null 2>&1; then
+    eval "$(command optionda shellenv)"
+  fi
+}}
+__optionda_maybe_init
+if [ -n "${{ZSH_VERSION:-}}" ]; then
+  if typeset -f add-zsh-hook >/dev/null 2>&1 || autoload -Uz add-zsh-hook 2>/dev/null; then
+    add-zsh-hook precmd __optionda_maybe_init 2>/dev/null || true
+  elif [[ " ${{precmd_functions[*]-}} " != *" __optionda_maybe_init "* ]]; then
+    precmd_functions+=(__optionda_maybe_init)
+  fi
+else
+  case "${{PROMPT_COMMAND:-}}" in
+    *__optionda_maybe_init*) ;;
+    "") PROMPT_COMMAND=__optionda_maybe_init ;;
+    *) PROMPT_COMMAND="__optionda_maybe_init;${{PROMPT_COMMAND}}" ;;
+  esac
+fi
 {END_MARK}
 """
 

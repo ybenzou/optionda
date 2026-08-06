@@ -13,7 +13,7 @@ from rich.text import Text
 
 from optionda.engine import freeze_iv_for_position
 from optionda.models import Position, Side
-from optionda.occ import OccError, parse_position_line
+from optionda.occ import OccError, parse_leg_line, require_entry, resolve_qty
 from optionda.store import AccountStore, StoreError
 
 
@@ -62,6 +62,30 @@ def short_path(path: Path) -> str:
     except (OSError, ValueError):
         pass
     return str(path)
+
+
+def merge_detail(outcome) -> str:
+    pos = outcome.position
+    bits = [f"qty {outcome.previous_qty:g}→{pos.qty:g}"]
+    if (
+        outcome.previous_entry is not None
+        and pos.entry_premium is not None
+    ):
+        bits.append(
+            f"cost {outcome.previous_entry:g}→{pos.entry_premium:g}"
+        )
+    elif pos.entry_premium is not None:
+        bits.append(f"cost={pos.entry_premium:g}")
+    return " ".join(bits)
+
+
+def ok_detail(pos: Position) -> str:
+    cost = (
+        f" cost={pos.entry_premium:g}"
+        if pos.entry_premium is not None
+        else ""
+    )
+    return f"qty={pos.qty:g}{cost}"
 
 
 def render_batch_summary(result: BatchResult, *, book: Path | None = None) -> Panel:
@@ -127,6 +151,7 @@ def add_batch(
     qty: float = 1.0,
     side: Side = "long",
     iv: float | None = None,
+    entry: float | None = None,
     home: Path | None = None,
     console: Console | None = None,
 ) -> BatchResult:
@@ -151,17 +176,21 @@ def add_batch(
             short = line if len(line) <= 36 else line[:33] + "…"
             progress.update(task, description=f"adding {index}/{total}  {short}")
             try:
-                parts = parse_position_line(line)
+                leg = parse_leg_line(line)
+                cost = require_entry(leg.entry, entry)
+                line_qty = resolve_qty(leg.qty, qty)
+                parts = leg.parts
                 draft = Position(
                     occ_symbol=parts.occ_symbol,
                     underlying=parts.underlying,
                     expiry=parts.expiry,
                     strike=parts.strike,
                     option_type=parts.option_type,
-                    qty=qty,
+                    qty=line_qty,
                     side=side,
                     iv_frozen=iv if iv is not None else 0.01,
                     iv_as_of=datetime.now(timezone.utc),
+                    entry_premium=cost,
                 )
                 draft = freeze_iv_for_position(draft, iv=iv, home=home)
                 outcome = store.add_position(None, draft)
@@ -175,9 +204,7 @@ def add_batch(
                             occ=pos.occ_symbol,
                             iv=pos.iv_frozen,
                             source=pos.iv_source or "market",
-                            detail=(
-                                f"qty {outcome.previous_qty:g}→{pos.qty:g}"
-                            ),
+                            detail=merge_detail(outcome),
                         )
                     )
                 else:
@@ -189,7 +216,7 @@ def add_batch(
                             occ=pos.occ_symbol,
                             iv=pos.iv_frozen,
                             source=pos.iv_source or "market",
-                            detail=f"qty={pos.qty:g}",
+                            detail=ok_detail(pos),
                         )
                     )
             except StoreError as exc:

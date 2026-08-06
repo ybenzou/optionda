@@ -12,44 +12,65 @@ pip install -e ./optionda
 
 ## Quick start (no API key)
 
-Requires Python 3.11+.
+Requires Python 3.11+ (conda `base` on 3.9 will fail — use a fresh env).
 
 ```bash
+# recommended: project venv
 py -3.11 -m venv .venv
-source .venv/Scripts/activate
+source .venv/Scripts/activate   # Windows Git Bash
+python -m pip install -U pip setuptools wheel
 pip install -e .
 
-# one-time (like conda init)
-optionda init
-eval "$(optionda shellenv)"   # or open a new shell — default prompt: [optionda] (cyan)
+# or conda
+# conda create -n optionda python=3.12 -y
+# conda activate optionda
+# python -m pip install -U pip setuptools wheel
+# pip install -e .
 
 optionda create demo
-optionda activate demo        # prompt → [demo]
-optionda deactivate           # prompt → [optionda]
-optionda activate hedge       # prompt → [hedge]
+optionda activate demo        # remembers the active book (no shell config changes)
 
-optionda add AAPL270115C00200000 --qty 2
+optionda add AAPL270115C00200000 --qty 2 --entry 5.20
+
+# per-line qty + cost (semicolon batch):
+optionda add "INTC 261016 140 C x10 @ 3.482; SKHY 261016 200 C x1 @ 9.5"
 
 # easiest batch: bare add → paste lines → blank line to finish
 optionda add
-# INTC 261016 140 C
-# TSLA 261218 500 C
+# INTC 261016 140 C x10 @ 3.482
+# TSLA 261218 500 C x2 @ 5.75
 # <empty line>
-
-# or one line with semicolons:
-optionda add "INTC 261016 140 C; TSLA 261218 500 C"
 
 optionda export
 optionda run
 ```
 
-`pip install` cannot safely edit your shell config (unlike the Conda installer). Run **`optionda init` once**, then **`optionda activate <name>`** each session (like `conda activate`). Undo init with `optionda init --reverse`.
+`optionda activate <name>` writes the active account into this environment’s data directory — **no `.bashrc` required**. Without an active account, `export` / `run` / `add` / `delete` are blocked.
 
-Without `activate`, `export` / `run` / `add` / `delete` cannot read or change any account book — only the session-active account is visible.
+**Prompt prefix (optional):** does **not** edit `~/.bashrc`.
+
+```bash
+# venv
+optionda prompt install --target venv
+source .venv/Scripts/activate
+
+# conda (writes $CONDA_PREFIX/etc/conda/activate.d/…)
+conda activate myenv
+optionda prompt install --target conda
+conda deactivate && conda activate myenv
+
+optionda activate demo           # next prompt → cyan [demo]
+```
+
+If both `(venv)` and `(base)` are active, use `--target` explicitly. Tab title is always updated by `activate` / `deactivate`. Remove with `optionda prompt uninstall`.
+
+If an older install added a global shell hook, clean it with: `optionda init`.
+
+**Cost is required on every `add`**: use `@ 5.20` on the line or `--entry 5.20`. Re-adding the same OCC+side merges qty and sets cost to the quantity-weighted average `(q1·c1 + q2·c2) / (q1+q2)`.
 
 `add` **without** `--iv` pulls IV from Alpaca (if key configured) or Yahoo. Use `--iv` only as fallback.
 
-In the table, **`Model$`** is the Black–Scholes theoretical premium (per share). It is not a live option bid/ask.
+In the table, **`Model$`** is the theoretical premium (per share) from an **American** CRR tree (US equity/ETF default; set `option_style = "european"` in config for closed-form BS). **`Cost`** is your avg entry, and **`uPnL$`** compares them. Not a live option bid/ask.
 
 UI uses **Rich** (`Panel`, `Rule`, `Table`, `Live` spinner). No `tqdm` / `popen` required for the desk view.
 
@@ -64,33 +85,85 @@ optionda key clear alpaca
 
 `key alpaca` probes `data.alpaca.markets` (SPY latest trade). Invalid keys are **not** saved.
 
-Credentials live in `~/.optionda/credentials.toml` (mode `0600` when the OS allows). Override the data root with `OPTIONDA_HOME`.
+### Where data lives (automatic)
 
-Per-account tracking files (under the optionda data library, **not** your shell cwd):
+No extra setup. Books / keys / logs follow the active environment:
 
-| Path | Role |
-|------|------|
-| `~/.optionda/books/<account>.txt` | Human book; created/updated on `add` / `delete` |
-| `~/.optionda/logs/<account>.log` | Append-only snapshots from `export` and each `run` refresh |
+| Situation | Data directory |
+|-----------|----------------|
+| `conda activate …` or a venv | `<env>/share/optionda` (isolated) |
+| No virtual env | `~/.optionda` |
+| `OPTIONDA_HOME=…` set | that path (manual override) |
 
 ```bash
-optionda add …          # refreshes books/demo.txt
-optionda export         # prints table + appends logs/demo.log
-optionda run            # every refresh appends a `run` block to the same log
+optionda home    # show the path used right now
 ```
+
+Credentials are `credentials.toml` inside that directory (mode `0600` when the OS allows).
+
+Per-account tracking files (under the data library above, **not** your shell cwd):
+
+Two separate write paths:
+
+| Path | Role | Write mode |
+|------|------|------------|
+| `<data>/books/<account>.txt` | Current book only (human snapshot) | **Overwrite** on add/delete/refresh |
+| `<data>/logs/<account>.jsonl` | Full event stream for charts / history | **Append only** |
+| `<data>/surfaces/<underlying>.json` | Last valid Alpaca IV smile | **Overwrite** only on successful `refresh-iv` |
+
+JSONL `event` types: `add`, `merge`, `delete`, `refresh_iv`, `export`, `run`.  
+`refresh_iv` records calibrated surface metadata. `export`/`run` rows include `valuation_mode`, `surface_iv`, and `surface_as_of`.
+
+```bash
+optionda add …          # rewrite book + append add/merge event
+optionda delete …       # rewrite book + append delete event
+optionda refresh-iv     # freeze last-session Alpaca smiles (default ≤18h); --fresh for RTH
+optionda export         # print surface/frozen Model$ + append export mark
+optionda run            # each tick appends a run mark
+```
+
+**Spot (24/5):** Alpaca stock spots query `overnight` → `boats` → `delayed_sip` → `iex` and keep the **newest** trade/quote. Basic plans usually get `overnight` (≈Futu night session); `boats` needs a higher data tier.
+
+### Local overnight IV surface
+
+Run `optionda refresh-iv` anytime after the US close (default): it freezes the **last session** smile from Alpaca chain quotes up to **18 hours** old. Use `optionda refresh-iv --fresh` only when you want live RTH quotes (≤20 minutes).
+
+Then `run` / `export` update the 24/5 stock Spot, evaluate both **sticky-strike** and **sticky-delta** scenarios on the saved smile, and reprice with the configured exercise style (American by default). The default Base Model is their 50/50 hybrid; its low/high scenario bounds and all inputs are recorded in JSONL. The terminal remains compact, while `optionda backtest` summarizes logged mark error and suggests a hybrid weight.
+
+Surface calibration uses timestamped bid/ask mids to derive the market-standard European IV convention, then recomputes Delta with the same configured American model used for marks. Put and call wings are always kept separate. A Friday surface remains usable through the weekend; stale/missing-timestamp quotes are rejected.
+
+This is a local, auditable model—not a copy of Futu's proprietary IV surface. Alpaca's free `indicative` chain is still the calibration input; OPRA improves the input only when the user has a subscription. optionda deliberately does **not** infer a new IV from frozen overnight option quotes.
+
+**Visualization:** IV surfaces are not drawn in the terminal (ASCII heatmaps are too noisy for Live). Inspect in the browser: `pip install 'optionda[viz]'` then `optionda surface SPCX` (Plotly 3D).
+
+```toml
+# ~/.optionda/config.toml
+alpaca_options_feed = "auto"       # try opra, then indicative
+option_style = "american"          # US stock / ETF default
+overnight_iv_mode = "hybrid"       # hybrid | sticky_delta | sticky_strike
+sticky_delta_weight = 0.5
+# Optional term rates and per-symbol continuous dividend yields:
+rate_curve = [[30, 0.04], [90, 0.042]]
+dividend_yields = { XOM = 0.035 }
+```
+
+For a paid match to exchange IV, subscribe to Alpaca OPRA.
 
 ## Commands
 
 | Command | Purpose |
 |---------|---------|
 | `optionda create <name>` | Create account |
-| `optionda list` | List accounts (`*` = session-active) |
-| `optionda activate <name>` | Session-activate (prompt → cyan `[name]`) |
-| `optionda deactivate` | Back to cyan `[optionda]` |
-| `optionda init` | Persist hook in shell rc (like `conda init`) |
-| `optionda add …` | Add one or many; same OCC+side merges qty (1+2→3) |
+| `optionda list` | List accounts (`*` = active) |
+| `optionda book` | Show current positions (no fetch / no log write) |
+| `optionda activate <name>` | Set active account (persisted in data home) |
+| `optionda deactivate` | Clear active account |
+| `optionda home` | Show data directory for this environment |
+| `optionda surface [TICKER]` | Open Plotly 3D IV surface in the browser (`optionda[viz]`) |
+| `optionda init` | Remove leftover shell hook only (optional cleanup) |
+| `optionda add …` | Add with required cost; same OCC+side merges qty + avg cost |
 | `optionda delete <id\|OCC>` | Remove position |
-| `optionda refresh-iv` | Re-freeze IV from market |
+| `optionda refresh-iv` | Calibrate local Alpaca IV smiles and refresh fallback IVs |
 | `optionda run` | Live table until Ctrl+C |
 | `optionda export` | One-shot snapshot |
 | `optionda key …` | Configure Alpaca credentials |

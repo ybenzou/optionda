@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from optionda.batch import read_batch_lines
-from optionda.occ import OccError, parse_position_line
+from optionda.occ import OccError, parse_leg_line
 
 
 def split_semi_separated(text: str) -> list[str]:
@@ -18,7 +18,7 @@ def read_interactive_lines(
     line_input=input,
 ) -> list[str]:
     """Read pasted lines until a blank line or EOF (Ctrl+Z Enter on Windows)."""
-    prompt_print("Paste positions (one per line).")
+    prompt_print("Paste positions (one per line): ROOT YYMMDD STRIKE C|P xQTY @ cost")
     prompt_print("Finish with an empty line, or Ctrl+Z then Enter (Windows).")
     prompt_print("")
     lines: list[str] = []
@@ -35,14 +35,22 @@ def read_interactive_lines(
     return lines
 
 
+def _validated_line(token: str) -> str:
+    """Validate parseability but keep the original text (preserves @ cost)."""
+    parse_leg_line(token)
+    return token.strip()
+
+
 def resolve_add_lines(items: list[str]) -> list[str]:
     """Normalize CLI tokens into one or more position lines.
 
     Supports:
-      - single/multiple OCC symbols
-      - one human line split across argv: INTC 261016 140 C
-      - semicolon-separated in one argv: "INTC 261016 140 C; TSLA 261218 500 C"
+      - single/multiple OCC symbols (with optional @ cost)
+      - one human line split across argv: INTC 261016 140 C @ 5.20
+      - semicolon-separated in one argv
       - file path or '-' (stdin) for multi-line batch
+
+    Original line text is preserved so trailing '@ cost' survives.
     """
     if not items:
         raise ValueError("no positions provided")
@@ -60,7 +68,7 @@ def resolve_add_lines(items: list[str]) -> list[str]:
                 raise ValueError("no positions to add")
             return parts
         try:
-            return [parse_position_line(token).occ_symbol]
+            return [_validated_line(token)]
         except OccError as exc:
             raise ValueError(str(exc)) from exc
 
@@ -72,14 +80,14 @@ def resolve_add_lines(items: list[str]) -> list[str]:
             return parts
 
     try:
-        return [parse_position_line(joined).occ_symbol]
+        return [_validated_line(joined)]
     except OccError:
         pass
 
     lines: list[str] = []
     for token in items:
         try:
-            lines.append(parse_position_line(token).occ_symbol)
+            lines.append(_validated_line(token))
         except OccError as exc:
             raise ValueError(
                 f"could not parse {token!r} (also not a single human line: {joined!r})"
