@@ -1278,19 +1278,19 @@ def export_cmd() -> None:
         rows = mark_account(acc, home=home, on_progress=on_progress)
         progress.update(task, description="writing book & log…", completed=total)
         sync_book(acc, home)
-        log_file = append_export_log(acc, rows, feed=feed, home=home, source="export")
+        append_export_log(acc, rows, feed=feed, home=home, source="export")
 
+    realized = float(realized_pnl_summary(acc.name, home)["realized"])
     console.print(
         render_snapshot(
             account=acc.name,
             feed=feed,
             refresh_sec=refresh,
             rows=rows,
+            realized=realized,
             continuous=False,
         )
     )
-    _ok(f"book: {book_path(acc.name, home)}")
-    _ok(f"log:  {log_file}  (appended)")
 
 
 @app.command("run")
@@ -1313,9 +1313,6 @@ def run_cmd() -> None:
     tick = 0
     flash_hot_sec = 0.55
     flash_warm_sec = 0.85
-    log_file = log_path(store.require_current().name, home)
-    _ok(f"logging each refresh → {log_file}")
-
     def _panel(
         acc,
         router,
@@ -1329,6 +1326,7 @@ def run_cmd() -> None:
     ):
         nonlocal tick
         tick += 1
+        realized = float(realized_pnl_summary(acc.name, home)["realized"])
         return render_snapshot(
             account=acc.name,
             feed=router.feed_name,
@@ -1339,6 +1337,7 @@ def run_cmd() -> None:
             prev_notionals=prev_notionals or None,
             prev_lives=prev_lives or None,
             prev_upnls=prev_upnls or None,
+            realized=realized,
             continuous=True,
             spin=spinner_frame(tick),
             eta_sec=eta,

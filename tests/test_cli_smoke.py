@@ -252,9 +252,10 @@ def test_cli_create_add_export(tmp_path, monkeypatch) -> None:
             # Rich box chars can mangle under some Windows consoles; assert stable tokens.
             out = exported.output
             assert "demo" in out
-            assert "MODEL" in out
             assert "Model$" in out or "Model" in out
-            assert "IVsrc" in out
+            assert "Σ rPnL$" in out or "rPnL" in out
+            assert "IVsrc" not in out
+            assert "Chg$" not in out
 
 
 def test_key_status(tmp_path, monkeypatch) -> None:
