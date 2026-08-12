@@ -75,6 +75,10 @@ In the table, **`Model$`** is the theoretical premium (per share) from an **Amer
 ```bash
 optionda sell SPCX260918P00100000 x1 @ 8.50   # partial or full close
 optionda realized                              # sum of sell events
+
+# multi-machine clipboard sync (no journal / no surface files in the code)
+optionda pack                                  # print oda1.… + sha256
+optionda unpack 'oda1.…' --yes                 # overwrite, restore keys, refresh-iv
 ```
 
 Long close: `(exit − avg_cost) × multiplier × qty`. Short cover: `(avg_cost − exit) × multiplier × qty`. `delete` still removes a row without recording exit premium.
@@ -126,6 +130,8 @@ optionda add …          # rewrite book + append add/merge event
 optionda sell … @ …     # reduce/close qty + append sell (realized)
 optionda delete …       # rewrite book + append delete event (no exit PnL)
 optionda realized       # sum realized from sell events
+optionda pack           # clipboard sync code (book+config+keys; no journal/surfaces)
+optionda unpack …       # replace account, restore keys, auto refresh-iv
 optionda refresh-iv     # freeze last-session Alpaca smiles (default ≤18h); --fresh for RTH
 optionda export         # print surface/frozen Model$ + append export mark
 optionda run            # each tick appends a run mark

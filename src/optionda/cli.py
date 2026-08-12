@@ -96,6 +96,7 @@ from optionda.shellenv import (
     render_shellenv,
 )
 from optionda.store import AccountStore, StoreError, realized_pnl_summary
+from optionda.sync import SyncError, pack_account, unpack_code
 
 app = typer.Typer(
     name="optionda",
@@ -776,6 +777,130 @@ def realized_cmd() -> None:
     )
     for occ, pnl in sorted(summary["by_occ"].items()):
         console.print(f"  {occ}  ${pnl:,.2f}")
+
+
+@app.command("pack")
+def pack_cmd() -> None:
+    """Export active account + config + keys as a pasteable sync code (no journal/surfaces)."""
+    store = _store()
+    try:
+        packed = pack_account(store, home=_home_opt())
+    except SyncError as exc:
+        _err(str(exc))
+        raise typer.Exit(1) from exc
+    console.print(packed.code)
+    console.print(f"sha256:{packed.sha256}")
+    console.print(
+        f"[dim]packed {packed.account}  positions={packed.n_positions}  "
+        f"creds={'yes' if packed.has_creds else 'no'}[/dim]"
+    )
+
+
+@app.command("unpack")
+def unpack_cmd(
+    code: Optional[str] = typer.Argument(
+        None,
+        help="oda1.… sync code (omit to paste one line on stdin)",
+    ),
+    sha256: Optional[str] = typer.Option(
+        None,
+        "--sha256",
+        help="optional hex digest to verify the code was not truncated",
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="overwrite existing same-name account without prompting",
+    ),
+    no_refresh: bool = typer.Option(
+        False,
+        "--no-refresh",
+        help="skip automatic refresh-iv after import",
+    ),
+) -> None:
+    """Import a pack code: replace account, restore config/keys, then refresh-iv."""
+    store = _store()
+    home = _home_opt()
+    block = (code or "").strip()
+    if not block:
+        if not sys.stdin.isatty():
+            block = sys.stdin.read().strip()
+        else:
+            console.print("[dim]paste sync code, then Enter[/dim]")
+            block = input().strip()
+    raw = ""
+    sha_from_block: str | None = None
+    for line in block.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("oda1.") and not raw:
+            raw = line
+        elif line.lower().startswith("sha256:") and sha_from_block is None:
+            sha_from_block = line.split(":", 1)[1].strip()
+    if not raw and block.startswith("oda1."):
+        raw = block.splitlines()[0].strip()
+    if not raw:
+        _err("no sync code provided")
+        raise typer.Exit(1)
+    if sha256 is None and sha_from_block:
+        sha256 = sha_from_block
+
+    # Peek account name for overwrite prompt without applying yet.
+    from optionda.sync import decode_code
+
+    try:
+        peek = decode_code(raw)
+    except SyncError as exc:
+        _err(str(exc))
+        raise typer.Exit(1) from exc
+
+    overwrite = yes
+    if store.exists(peek.account.name) and not overwrite:
+        if sys.stdin.isatty():
+            overwrite = typer.confirm(
+                f"overwrite account '{peek.account.name}'?",
+                default=False,
+            )
+        if not overwrite:
+            _err(
+                f"account '{peek.account.name}' already exists — "
+                "re-run with --yes to overwrite"
+            )
+            raise typer.Exit(1)
+
+    try:
+        bundle = unpack_code(
+            store,
+            raw,
+            home=home,
+            sha256=sha256,
+            overwrite=True,
+        )
+    except SyncError as exc:
+        _err(str(exc))
+        raise typer.Exit(1) from exc
+
+    _ok(
+        f"unpacked {bundle.account.name}  "
+        f"positions={len(bundle.account.positions)}  "
+        f"creds={'restored' if bundle.key_id else 'unchanged'}"
+    )
+    set_terminal_title(bundle.account.name)
+
+    if no_refresh:
+        console.print("[dim]skipped refresh-iv (--no-refresh)[/dim]")
+        return
+
+    # Auto-rebuild surfaces on the receiving machine.
+    try:
+        refresh_iv_cmd(fresh=False, allow_stale=False)
+    except typer.Exit:
+        console.print(
+            "[yellow]account imported, but refresh-iv failed — "
+            "run: optionda refresh-iv[/yellow]"
+        )
 
 
 @app.command("refresh-iv")
