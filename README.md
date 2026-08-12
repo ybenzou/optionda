@@ -45,7 +45,7 @@ optionda export
 optionda run
 ```
 
-`optionda activate <name>` writes the active account into this environment’s data directory — **no `.bashrc` required**. Without an active account, `export` / `run` / `add` / `delete` are blocked.
+`optionda activate <name>` writes the active account into this environment’s data directory — **no `.bashrc` required**. Without an active account, `export` / `run` / `add` / `sell` / `delete` are blocked.
 
 **Prompt prefix (optional):** does **not** edit `~/.bashrc`.
 
@@ -70,7 +70,14 @@ If an older install added a global shell hook, clean it with: `optionda init`.
 
 `add` **without** `--iv` pulls IV from Alpaca (if key configured) or Yahoo. Use `--iv` only as fallback.
 
-In the table, **`Model$`** is the theoretical premium (per share) from an **American** CRR tree (US equity/ETF default; set `option_style = "european"` in config for closed-form BS). **`Cost`** is your avg entry, and **`uPnL$`** compares them. Not a live option bid/ask.
+In the table, **`Model$`** is the theoretical premium (per share) from an **American** CRR tree (US equity/ETF default; set `option_style = "european"` in config for closed-form BS). **`Cost`** is your avg entry, and **`uPnL$`** compares them (unrealized). To lock in cash PnL, close with `sell` and check `realized`.
+
+```bash
+optionda sell SPCX260918P00100000 x1 @ 8.50   # partial or full close
+optionda realized                              # sum of sell events
+```
+
+Long close: `(exit − avg_cost) × multiplier × qty`. Short cover: `(avg_cost − exit) × multiplier × qty`. `delete` still removes a row without recording exit premium.
 
 UI uses **Rich** (`Panel`, `Rule`, `Table`, `Live` spinner). No `tqdm` / `popen` required for the desk view.
 
@@ -107,16 +114,18 @@ Two separate write paths:
 
 | Path | Role | Write mode |
 |------|------|------------|
-| `<data>/books/<account>.txt` | Current book only (human snapshot) | **Overwrite** on add/delete/refresh |
+| `<data>/books/<account>.txt` | Current book only (human snapshot) | **Overwrite** on add/sell/delete/refresh |
 | `<data>/logs/<account>.jsonl` | Full event stream for charts / history | **Append only** |
 | `<data>/surfaces/<underlying>.json` | Last valid Alpaca IV smile | **Overwrite** only on successful `refresh-iv` |
 
-JSONL `event` types: `add`, `merge`, `delete`, `refresh_iv`, `export`, `run`.  
-`refresh_iv` records calibrated surface metadata. `export`/`run` rows include `valuation_mode`, `surface_iv`, and `surface_as_of`.
+JSONL `event` types: `add`, `merge`, `sell`, `delete`, `refresh_iv`, `export`, `run`.  
+`sell` records exit premium and realized cash PnL. `refresh_iv` records calibrated surface metadata. `export`/`run` rows include `valuation_mode`, `surface_iv`, and `surface_as_of`.
 
 ```bash
 optionda add …          # rewrite book + append add/merge event
-optionda delete …       # rewrite book + append delete event
+optionda sell … @ …     # reduce/close qty + append sell (realized)
+optionda delete …       # rewrite book + append delete event (no exit PnL)
+optionda realized       # sum realized from sell events
 optionda refresh-iv     # freeze last-session Alpaca smiles (default ≤18h); --fresh for RTH
 optionda export         # print surface/frozen Model$ + append export mark
 optionda run            # each tick appends a run mark

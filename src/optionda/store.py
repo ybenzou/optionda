@@ -6,11 +6,15 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from typing import Any
+
 from optionda.config import load_config, save_config
 from optionda.journal import (
     append_add_event,
     append_delete_event,
     append_refresh_iv_event,
+    append_sell_event,
+    log_path,
     sync_book,
 )
 from optionda.models import Account, Position
@@ -41,6 +45,20 @@ class AddOutcome:
 class DeleteOutcome:
     account: Account
     removed: list[Position]
+
+
+@dataclass
+class SellOutcome:
+    account: Account
+    position: Position | None
+    qty_sold: float
+    exit_premium: float
+    avg_cost: float
+    realized: float
+    closed: bool
+    side: str
+    occ_symbol: str
+    multiplier: int = 100
 
 
 def weighted_avg_cost(
@@ -260,6 +278,87 @@ class AccountStore:
         append_delete_event(account, removed, home=self.home)
         return DeleteOutcome(account=account, removed=removed)
 
+    def sell_position(
+        self,
+        account_name: str | None,
+        key: str,
+        *,
+        qty: float,
+        exit_premium: float,
+    ) -> SellOutcome:
+        """Close qty at an exit premium; records realized cash PnL in the journal.
+
+        Long close:  (exit - avg_cost) * multiplier * qty
+        Short cover: (avg_cost - exit) * multiplier * qty
+        """
+        if qty <= 0:
+            raise StoreError("sell qty must be > 0")
+        if exit_premium <= 0:
+            raise StoreError("exit premium must be > 0 — use '@ 8.50'")
+        account = self.require_current(account_name)
+        key_u = key.strip().upper()
+        index = next(
+            (
+                i
+                for i, pos in enumerate(account.positions)
+                if pos.id == key or pos.occ_symbol.upper() == key_u
+            ),
+            None,
+        )
+        if index is None:
+            raise StoreError(f"position not found: {key}")
+        position = account.positions[index]
+        if qty > position.qty + 1e-12:
+            raise StoreError(
+                f"sell qty {qty:g} exceeds open qty {position.qty:g} "
+                f"for {position.occ_symbol}"
+            )
+        avg_cost = position.entry_premium
+        if avg_cost is None or avg_cost <= 0:
+            raise StoreError(
+                f"{position.occ_symbol} has no entry cost — cannot realize PnL"
+            )
+        sign = 1.0 if position.side == "long" else -1.0
+        realized = (exit_premium - avg_cost) * position.multiplier * qty * sign
+        remaining = position.qty - qty
+        closed = remaining <= 1e-12
+        if closed:
+            account.positions.pop(index)
+            after: Position | None = None
+            qty_remaining = 0.0
+        else:
+            after = position.model_copy(update={"qty": remaining})
+            account.positions[index] = after
+            qty_remaining = remaining
+        self.save(account)
+        sync_book(account, self.home)
+        append_sell_event(
+            account,
+            position_id=position.id,
+            occ_symbol=position.occ_symbol,
+            side=position.side,
+            qty_sold=qty,
+            exit_premium=exit_premium,
+            avg_cost=avg_cost,
+            realized=realized,
+            qty_remaining=qty_remaining,
+            closed=closed,
+            multiplier=position.multiplier,
+            home=self.home,
+        )
+        return SellOutcome(
+            account=account,
+            position=after,
+            qty_sold=qty,
+            exit_premium=exit_premium,
+            avg_cost=avg_cost,
+            realized=realized,
+            closed=closed,
+            side=position.side,
+            occ_symbol=position.occ_symbol,
+            multiplier=position.multiplier,
+        )
+
     def update_positions(
         self,
         account: Account,
@@ -275,3 +374,34 @@ class AccountStore:
                 home=self.home,
                 surfaces=surface_summary,
             )
+
+
+def realized_pnl_summary(
+    account: str,
+    home: Path | None = None,
+) -> dict[str, Any]:
+    """Sum realized cash PnL from journal ``sell`` events for one account."""
+    path = log_path(account, home)
+    total = 0.0
+    n_sells = 0
+    by_occ: dict[str, float] = {}
+    if not path.exists():
+        return {"realized": 0.0, "n_sells": 0, "by_occ": {}}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("event") != "sell":
+            continue
+        try:
+            realized = float(event.get("realized", 0.0))
+        except (TypeError, ValueError):
+            continue
+        occ = str(event.get("occ") or "?").upper()
+        total += realized
+        n_sells += 1
+        by_occ[occ] = by_occ.get(occ, 0.0) + realized
+    return {"realized": total, "n_sells": n_sells, "by_occ": by_occ}

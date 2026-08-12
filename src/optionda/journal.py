@@ -158,6 +158,42 @@ def append_delete_event(
     )
 
 
+def append_sell_event(
+    account: Account,
+    *,
+    position_id: str,
+    occ_symbol: str,
+    side: str,
+    qty_sold: float,
+    exit_premium: float,
+    avg_cost: float,
+    realized: float,
+    qty_remaining: float,
+    closed: bool,
+    multiplier: int = 100,
+    home: Path | None = None,
+) -> Path:
+    """Append a realized close / partial-close trade."""
+    return append_event(
+        account.name,
+        {
+            "event": "sell",
+            "id": position_id,
+            "occ": occ_symbol,
+            "side": side,
+            "qty_sold": qty_sold,
+            "exit": exit_premium,
+            "avg_cost": avg_cost,
+            "multiplier": multiplier,
+            "realized": realized,
+            "qty_remaining": qty_remaining,
+            "closed": closed,
+            "book": _book_snapshot(account),
+        },
+        home=home,
+    )
+
+
 def append_refresh_iv_event(
     account: Account,
     *,

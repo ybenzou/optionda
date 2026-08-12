@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -94,7 +95,7 @@ from optionda.shellenv import (
     remove_rc_hook,
     render_shellenv,
 )
-from optionda.store import AccountStore, StoreError
+from optionda.store import AccountStore, StoreError, realized_pnl_summary
 
 app = typer.Typer(
     name="optionda",
@@ -704,6 +705,77 @@ def delete_cmd(
         _err(str(exc))
         raise typer.Exit(1) from exc
     _ok(f"deleted {key}")
+
+
+def _parse_sell_args(tokens: list[str]) -> tuple[str, float, float]:
+    """Parse ``OCC|id [xN] @ price`` into (key, qty, exit_premium)."""
+    if not tokens:
+        raise StoreError("usage: optionda sell <OCC|id> [xN] @ <price>")
+    joined = " ".join(tokens).strip()
+    at = re.search(r"@\s*([0-9]*\.?[0-9]+)\s*$", joined, flags=re.IGNORECASE)
+    if not at:
+        raise StoreError("exit premium required — use '@ 8.50'")
+    exit_premium = float(at.group(1))
+    head = joined[: at.start()].strip()
+    qty = 1.0
+    qty_m = re.search(r"(?:^|\s)[xX\*]([0-9]*\.?[0-9]+)\s*$", head)
+    if qty_m:
+        qty = float(qty_m.group(1))
+        head = head[: qty_m.start()].strip()
+    if not head:
+        raise StoreError("position id or OCC symbol required")
+    return head, qty, exit_premium
+
+
+@app.command("sell")
+def sell_cmd(
+    tokens: list[str] = typer.Argument(
+        ...,
+        help="OCC|id [xN] @ price  e.g. SPCX260918P00100000 x1 @ 8.50",
+    ),
+) -> None:
+    """Close (or partially close) a position at an exit premium; records realized PnL."""
+    store = _store()
+    try:
+        key, qty, exit_premium = _parse_sell_args(list(tokens))
+        outcome = store.sell_position(
+            None, key, qty=qty, exit_premium=exit_premium
+        )
+    except StoreError as exc:
+        _err(str(exc))
+        raise typer.Exit(1) from exc
+    verb = "closed" if outcome.closed else "sold"
+    side = outcome.side
+    console.print(
+        f"{verb} {outcome.occ_symbol} {side} x{outcome.qty_sold:g} "
+        f"@ {outcome.exit_premium:g}  "
+        f"(avg {outcome.avg_cost:g})  "
+        f"realized ${outcome.realized:,.2f}"
+    )
+    if not outcome.closed and outcome.position is not None:
+        console.print(
+            f"[dim]remaining qty={outcome.position.qty:g} "
+            f"cost={outcome.position.entry_premium:g}[/dim]"
+        )
+
+
+@app.command("realized")
+def realized_cmd() -> None:
+    """Show sum of realized cash PnL from sell events (active account)."""
+    store = _store()
+    try:
+        acc = store.require_current()
+    except StoreError as exc:
+        _err(str(exc))
+        raise typer.Exit(1) from exc
+    summary = realized_pnl_summary(acc.name, _home_opt())
+    console.print(
+        f"realized ${summary['realized']:,.2f}  "
+        f"({summary['n_sells']} sell event"
+        f"{'' if summary['n_sells'] == 1 else 's'})"
+    )
+    for occ, pnl in sorted(summary["by_occ"].items()):
+        console.print(f"  {occ}  ${pnl:,.2f}")
 
 
 @app.command("refresh-iv")
