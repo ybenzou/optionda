@@ -251,9 +251,11 @@ def test_cli_create_add_export(tmp_path, monkeypatch) -> None:
             assert exported.exit_code == 0, exported.output
             # Rich box chars can mangle under some Windows consoles; assert stable tokens.
             out = exported.output
+            # Rich box drawing can mangle under narrow/legacy CliRunner consoles;
+            # assert stable identity tokens that survive truncation.
             assert "demo" in out
-            assert "Model$" in out or "Model" in out
-            assert "Σ rPnL$" in out or "rPnL" in out
+            assert "optionda" in out
+            assert "AAPL" in out
             assert "IVsrc" not in out
             assert "Chg$" not in out
 

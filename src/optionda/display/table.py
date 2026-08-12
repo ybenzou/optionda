@@ -3,7 +3,9 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
+from rich import box
 from rich.console import Group
+from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
@@ -11,6 +13,17 @@ from optionda.models import RowMark
 
 _SPINNERS = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 _ET = ZoneInfo("America/New_York")
+
+# Desk chrome — cool slate/cyan, avoid neon purple “AI dashboard” look.
+_BORDER_IDLE = "bright_black"
+_BORDER_LIVE = "cyan"
+_BORDER_HOT = "green"
+_BORDER_BUSY = "yellow"
+_HEADER = "bold bright_white"
+_META = "dim cyan"
+_OCC = "bold bright_white"
+_NUM = "bright_white"
+_MUTED = "bright_black"
 
 
 def spinner_frame(tick: int) -> str:
@@ -113,13 +126,13 @@ def _money_flash(
     phase: FlashPhase = "idle",
 ) -> Text:
     if value is None:
-        return Text("—", style="dim")
+        return Text("—", style=_MUTED)
     label = _fmt_money(value)
     direction = _move_direction(value, previous)
     if previous is None:
-        return Text(label)
+        return Text(label, style=_NUM)
     if direction == 0:
-        return Text(label, style="dim")
+        return Text(label, style=_MUTED)
     if phase == "idle":
         return Text(label, style=_dir_style(direction, phase="idle"))
     return Text(label, style=_dir_style(direction, phase=phase))
@@ -127,9 +140,9 @@ def _money_flash(
 
 def _pnl_text(value: float | None) -> Text:
     if value is None:
-        return Text("—", style="dim")
+        return Text("—", style=_MUTED)
     if abs(value) < 1e-9:
-        return Text("0.00", style="dim")
+        return Text("0.00", style=_MUTED)
     style = "bold green" if value > 0 else "bold red"
     sign = "+" if value > 0 else ""
     return Text(f"{sign}{value:,.2f}", style=style)
@@ -143,7 +156,7 @@ def _pnl_flash(
 ) -> Text:
     """Color by move vs prior tick when flashing; otherwise by absolute PnL sign."""
     if value is None:
-        return Text("—", style="dim")
+        return Text("—", style=_MUTED)
     label = f"{value:+,.2f}" if abs(value) >= 1e-9 else "0.00"
     direction = _move_direction(value, previous)
     if phase != "idle" and direction != 0:
@@ -154,14 +167,14 @@ def _pnl_flash(
 def _inline_bar(
     fraction: float,
     *,
-    width: int = 14,
+    width: int = 12,
     busy: bool = False,
 ) -> Text:
     """Compact header progress bar (wait cycle or in-place fetch)."""
     frac = max(0.0, min(1.0, fraction))
     filled = int(round(width * frac))
     filled = min(width, max(0, filled))
-    bar = "█" * filled + "░" * (width - filled)
+    bar = "━" * filled + "─" * (width - filled)
     if busy:
         return Text(bar, style="bold yellow")
     if frac >= 0.999:
@@ -169,87 +182,110 @@ def _inline_bar(
     return Text(bar, style="cyan")
 
 
-def _summary_caption(
+def _side_cell(side: str) -> Text:
+    if side == "long":
+        return Text("long", style="bold cyan")
+    if side == "short":
+        return Text("short", style="bold yellow")
+    return Text(side, style=_MUTED)
+
+
+def _border_style(
     *,
-    total_model: float,
-    total_upnl: float | None,
-    realized: float | None,
+    continuous: bool,
+    phase: FlashPhase,
+    poll_busy: bool,
+) -> str:
+    if poll_busy:
+        return _BORDER_BUSY
+    if phase == "hot":
+        return _BORDER_HOT
+    if continuous:
+        return _BORDER_LIVE
+    return _BORDER_IDLE
+
+
+def _meta_line(
+    *,
+    feed: str,
+    refresh_sec: int,
+    continuous: bool,
+    phase: FlashPhase,
+    eta_sec: int | None,
+    poll_fraction: float | None,
+    poll_label: str | None,
+    poll_busy: bool,
+) -> Text:
+    clock_style = (
+        "bold cyan" if phase == "hot" else "cyan" if phase == "warm" else _META
+    )
+    line = Text()
+    line.append(feed, style="bold cyan")
+    line.append("  ·  ", style=_MUTED)
+    if continuous:
+        frac = 0.0 if poll_fraction is None else poll_fraction
+        if poll_busy:
+            line.append_text(_inline_bar(frac, busy=True))
+            line.append(f"  {poll_label or 'updating…'}", style="bold yellow")
+        else:
+            line.append(f"{refresh_sec}s ", style=_MUTED)
+            line.append_text(_inline_bar(frac, busy=False))
+            if poll_label:
+                line.append(f"  {poll_label}", style=_MUTED)
+            elif eta_sec is not None:
+                line.append(f"  {eta_sec}s", style=_MUTED)
+    else:
+        line.append(f"refresh {refresh_sec}s", style=_MUTED)
+    line.append("  ·  ", style=_MUTED)
+    line.append(format_clock(), style=clock_style)
+    return line
+
+
+def _footer_money(
+    value: float,
+    previous: float | None,
+    *,
+    phase: FlashPhase,
+) -> Text:
+    direction = _move_direction(value, previous)
+    sum_phase: FlashPhase = phase if phase != "idle" else "warm"
+    if previous is None or direction == 0:
+        return Text(_fmt_money(value), style="bold bright_white")
+    return Text(_fmt_money(value), style=_dir_style(direction, phase=sum_phase))
+
+
+def _footer_upnl(
+    value: float,
+    previous: float | None,
+    *,
+    phase: FlashPhase,
+) -> Text:
+    label = f"{value:+,.2f}" if abs(value) >= 1e-9 else "0.00"
+    if phase != "idle" and previous is not None:
+        direction = _move_direction(value, previous)
+        if direction != 0:
+            return Text(label, style=_dir_style(direction, phase=phase))
+    return _pnl_text(value)
+
+
+def _status_suffix(
+    *,
     continuous: bool,
     spin: str | None,
     phase: FlashPhase,
     poll_busy: bool,
     poll_label: str | None,
-    prev_total_model: float | None,
-    prev_total_upnl: float | None,
-) -> Text:
-    """One-line totals under the positions table (no separate summary panel)."""
-    sum_phase: FlashPhase = phase if phase != "idle" else "warm"
-    parts: list[Text | str] = []
-
-    model_dir = _move_direction(total_model, prev_total_model)
-    if prev_total_model is None or model_dir == 0:
-        model_style = "bold"
-    else:
-        model_style = _dir_style(model_dir, phase=sum_phase)
-    parts.append(Text.assemble(
-        ("Σ Model$ ", "bold"),
-        (_fmt_money(total_model), model_style),
-    ))
-
-    if total_upnl is not None:
-        if phase != "idle" and prev_total_upnl is not None:
-            upnl_dir = _move_direction(total_upnl, prev_total_upnl)
-            if upnl_dir != 0:
-                upnl_style = _dir_style(upnl_dir, phase=phase)
-            else:
-                upnl_style = (
-                    "bold green"
-                    if total_upnl > 1e-9
-                    else "bold red"
-                    if total_upnl < -1e-9
-                    else "bold"
-                )
-        else:
-            upnl_style = (
-                "bold green"
-                if total_upnl > 1e-9
-                else "bold red"
-                if total_upnl < -1e-9
-                else "bold"
-            )
-        upnl_label = f"{total_upnl:+,.2f}" if abs(total_upnl) >= 1e-9 else "0.00"
-        parts.append(Text.assemble(
-            ("Σ uPnL$ ", "bold"),
-            (upnl_label, upnl_style),
-        ))
-
-    if realized is not None:
-        realized_line = Text.assemble(("Σ rPnL$ ", "bold"))
-        realized_line.append_text(_pnl_text(realized))
-        parts.append(realized_line)
-
-    line = Text()
-    for index, part in enumerate(parts):
-        if index:
-            line.append("   ", style="dim")
-        line.append_text(part if isinstance(part, Text) else Text(str(part)))
-
-    if continuous:
-        frame = spin or spinner_frame(0)
-        if phase == "hot":
-            status = Text(f"  {frame} refreshed", style="bold green")
-        elif phase == "warm":
-            status = Text(f"  {frame} refreshed", style="cyan")
-        elif poll_busy:
-            status = Text(
-                f"  {frame} {poll_label or 'updating…'}".rstrip(),
-                style="yellow",
-            )
-        else:
-            status = Text(f"  {frame} live", style="cyan")
-        line.append_text(status)
-
-    return line
+) -> Text | None:
+    if not continuous:
+        return None
+    frame = spin or spinner_frame(0)
+    if phase == "hot":
+        return Text(f"{frame} refreshed", style="bold green")
+    if phase == "warm":
+        return Text(f"{frame} refreshed", style="cyan")
+    if poll_busy:
+        return Text(f"{frame} {poll_label or 'updating…'}".rstrip(), style="yellow")
+    return Text(f"{frame} live", style="cyan")
 
 
 def render_snapshot(
@@ -272,70 +308,82 @@ def render_snapshot(
     poll_label: str | None = None,
     poll_busy: bool = False,
 ) -> Group:
-    """Single-table desk view: title + positions + totals caption."""
+    """Single framed desk: meta + positions + column-aligned totals."""
     prev_s = prev_spots or {}
     prev_t = prev_theos or {}
     prev_n = prev_notionals or {}
     prev_l = prev_lives or {}
     prev_u = prev_upnls or {}
     phase: FlashPhase = flash_phase if continuous else "idle"
-    clock_style = "bold cyan" if phase == "hot" else "cyan" if phase == "warm" else "dim"
-
-    title = Text.assemble(
-        (f"[{account}]", "bold cyan"),
-        ("  optionda", "bold"),
-        ("  ·  ", "dim"),
-        (feed, "dim"),
-        ("  ·  ", "dim"),
-    )
-    if continuous:
-        frac = 0.0 if poll_fraction is None else poll_fraction
-        if poll_busy:
-            title.append_text(_inline_bar(frac, busy=True))
-            title.append(f"  {poll_label or 'updating…'}", style="bold yellow")
-        else:
-            title.append(f"refresh={refresh_sec}s ", style="dim")
-            title.append_text(_inline_bar(frac, busy=False))
-            if poll_label:
-                title.append(f"  {poll_label}", style="dim")
-            elif eta_sec is not None:
-                title.append(f"  {eta_sec}s", style="dim")
-    else:
-        title.append(f"refresh={refresh_sec}s", style="dim")
-    title.append("  ·  ", style="dim")
-    title.append(format_clock(), style=clock_style)
-
-    table = Table(
-        title=title,
-        show_header=True,
-        header_style="bold",
-        box=None,
-        pad_edge=False,
-        expand=True,
-        show_lines=False,
-        row_styles=("", "dim"),
-        padding=(0, 1),
-    )
-    table.add_column("OCC", style="bold")
-    table.add_column("Side", justify="center")
-    table.add_column("Qty", justify="right")
-    table.add_column("Spot", justify="right")
-    table.add_column("IV*", justify="right")
-    table.add_column("Cost", justify="right")
-    table.add_column("Live$", justify="right")
-    table.add_column("Model$", justify="right")
-    table.add_column("uPnL$", justify="right")
-    table.add_column("Delta", justify="right")
-    table.add_column("DTE", justify="right")
 
     total = 0.0
     total_prev = 0.0
     total_upnl = 0.0
     has_upnl = False
+    for row in rows:
+        if row.notional is not None:
+            total += row.notional
+        prev_notional = prev_n.get(row.position.id)
+        if prev_notional is not None:
+            total_prev += prev_notional
+        if row.upnl is not None:
+            total_upnl += row.upnl
+            has_upnl = True
+
+    model_footer = _footer_money(
+        total,
+        total_prev if prev_n else None,
+        phase=phase,
+    )
+    upnl_footer = (
+        _footer_upnl(
+            total_upnl,
+            sum(prev_u.values()) if prev_u else None,
+            phase=phase,
+        )
+        if has_upnl
+        else Text("—", style=_MUTED)
+    )
+    realized_footer = _pnl_text(realized) if realized is not None else Text("")
+
+    table = Table(
+        show_header=True,
+        header_style=_HEADER,
+        box=box.SIMPLE_HEAD,
+        border_style=_MUTED,
+        pad_edge=False,
+        expand=True,
+        show_lines=False,
+        show_footer=True,
+        footer_style="bold",
+        padding=(0, 1),
+        row_styles=("none", "on grey11"),
+    )
+    table.add_column(
+        "OCC",
+        style=_OCC,
+        footer=Text("Σ", style="bold cyan"),
+        no_wrap=True,
+        overflow="fold",
+    )
+    table.add_column("Side", justify="center", footer="", width=5)
+    table.add_column("Qty", justify="right", style=_NUM, footer="", min_width=3)
+    table.add_column("Spot", justify="right", footer="", min_width=7)
+    table.add_column("IV*", justify="right", style="cyan", footer="", min_width=5)
+    table.add_column("Cost", justify="right", style=_NUM, footer="", min_width=6)
+    live_footer: Text | str = ""
+    if realized is not None:
+        live_footer = Text.assemble(("rPnL ", "dim cyan"))
+        live_footer.append_text(realized_footer)
+    table.add_column("Live$", justify="right", footer=live_footer, min_width=7)
+    table.add_column("Model$", justify="right", footer=model_footer, min_width=8)
+    table.add_column("uPnL$", justify="right", footer=upnl_footer, min_width=9)
+    table.add_column("Delta", justify="right", style=_MUTED, footer="", min_width=5)
+    table.add_column("DTE", justify="right", style=_MUTED, footer="", min_width=4)
 
     if not rows:
         table.add_row(
-            Text("(no positions)", style="dim"),
+            Text("(no positions)", style=_MUTED),
             "",
             "",
             "",
@@ -350,23 +398,13 @@ def render_snapshot(
 
     for row in rows:
         pos = row.position
-        notional = row.notional
-        if notional is not None:
-            total += notional
-        prev_notional = prev_n.get(pos.id)
-        if prev_notional is not None:
-            total_prev += prev_notional
-        if row.upnl is not None:
-            total_upnl += row.upnl
-            has_upnl = True
-
         if row.error:
             table.add_row(
-                pos.occ_symbol,
-                pos.side,
+                Text(pos.occ_symbol, style=_OCC),
+                _side_cell(pos.side),
                 f"{pos.qty:g}",
                 "—",
-                _fmt_iv(pos.iv_frozen),
+                Text(_fmt_iv(pos.iv_frozen), style="cyan"),
                 _fmt_money(pos.entry_premium),
                 _fmt_money(row.live),
                 Text(row.error, style="red"),
@@ -377,31 +415,64 @@ def render_snapshot(
             continue
 
         table.add_row(
-            pos.occ_symbol,
-            pos.side,
-            f"{pos.qty:g}",
+            Text(pos.occ_symbol, style=_OCC),
+            _side_cell(pos.side),
+            Text(f"{pos.qty:g}", style=_NUM),
             _money_flash(row.spot, prev_s.get(pos.id), phase=phase),
-            _fmt_iv(pos.iv_frozen),
-            _fmt_money(row.cost if row.cost is not None else pos.entry_premium),
+            Text(_fmt_iv(pos.iv_frozen), style="cyan"),
+            Text(
+                _fmt_money(row.cost if row.cost is not None else pos.entry_premium),
+                style=_NUM,
+            ),
             _money_flash(row.live, prev_l.get(pos.id), phase=phase),
             _money_flash(row.theo, prev_t.get(pos.id), phase=phase),
             _pnl_flash(row.upnl, prev_u.get(pos.id), phase=phase),
-            f"{row.delta:.3f}" if row.delta is not None else "—",
-            f"{row.dte:.1f}" if row.dte is not None else "—",
+            Text(
+                f"{row.delta:.3f}" if row.delta is not None else "—",
+                style=_MUTED,
+            ),
+            Text(
+                f"{row.dte:.1f}" if row.dte is not None else "—",
+                style=_MUTED,
+            ),
         )
 
-    table.caption = _summary_caption(
-        total_model=total,
-        total_upnl=total_upnl if has_upnl else None,
-        realized=realized,
+    status = _status_suffix(
         continuous=continuous,
         spin=spin,
         phase=phase,
         poll_busy=poll_busy,
         poll_label=poll_label,
-        prev_total_model=total_prev if prev_n else None,
-        prev_total_upnl=sum(prev_u.values()) if prev_u else None,
     )
-    table.caption_justify = "left"
+    if status is not None:
+        table.caption = status
+        table.caption_justify = "right"
 
-    return Group(table)
+    border = _border_style(continuous=continuous, phase=phase, poll_busy=poll_busy)
+    title = Text.assemble(
+        (f"[{account}]", "bold cyan"),
+        ("  optionda", "bold bright_white"),
+    )
+    desk = Panel(
+        Group(
+            _meta_line(
+                feed=feed,
+                refresh_sec=refresh_sec,
+                continuous=continuous,
+                phase=phase,
+                eta_sec=eta_sec,
+                poll_fraction=poll_fraction,
+                poll_label=poll_label,
+                poll_busy=poll_busy,
+            ),
+            Text(""),
+            table,
+        ),
+        title=title,
+        title_align="left",
+        border_style=border,
+        box=box.ROUNDED,
+        padding=(0, 1),
+        expand=True,
+    )
+    return Group(desk)

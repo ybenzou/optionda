@@ -44,6 +44,6 @@ def test_inline_bar_fills():
     empty = _inline_bar(0.0, width=10)
     full = _inline_bar(1.0, width=10)
     busy = _inline_bar(0.5, width=10, busy=True)
-    assert empty.plain == "░" * 10
-    assert full.plain == "█" * 10
+    assert empty.plain == "─" * 10
+    assert full.plain == "━" * 10
     assert "yellow" in str(busy.style)
