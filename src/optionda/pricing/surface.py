@@ -84,6 +84,7 @@ def build_surface(
     snapshots: dict[str, dict[str, Any]],
     as_of: datetime,
     source: str,
+    quote_as_of: datetime | None = None,
     max_quote_spread_ratio: float = MAX_QUOTE_SPREAD_RATIO,
     max_quote_age: timedelta = MAX_CALIBRATION_QUOTE_AGE,
     rate: float | Callable[[float], float] = 0.045,
@@ -94,6 +95,7 @@ def build_surface(
     if spot <= 0:
         raise ValueError("surface spot must be > 0")
     symbol = underlying.strip().upper()
+    calibration_time = quote_as_of or as_of
     by_expiry: dict[date, list[SurfaceNode]] = {}
     accepted = 0
     rejected = 0
@@ -120,7 +122,7 @@ def build_surface(
         ask = float(quote.get("ap", quote.get("ask")))
         premium = 0.5 * (bid + ask)
         vendor_iv = _extract_iv(node)
-        years = years_to_expiry(parts.expiry, as_of)
+        years = years_to_expiry(parts.expiry, calibration_time)
         node_rate = rate(years * 365.0) if callable(rate) else rate
         node_dividend = (
             dividend(parts.underlying) if callable(dividend) else dividend
@@ -183,7 +185,7 @@ def build_surface(
     return IvSurface(
         underlying=symbol,
         spot=spot,
-        as_of=_utc(as_of),
+        as_of=_utc(calibration_time),
         source=source,
         smiles=smiles,
         quality={"accepted": accepted, "rejected": rejected},

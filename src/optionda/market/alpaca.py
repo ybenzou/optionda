@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
 import httpx
@@ -142,6 +142,61 @@ class AlpacaClient:
                 source=best_src,
             )
         return out
+
+    def get_spot_at(self, symbol: str, as_of: datetime) -> SpotQuote:
+        """Latest underlying trade at/before an option quote timestamp."""
+        ticker = symbol.strip().upper()
+        instant = as_of
+        if instant.tzinfo is None:
+            instant = instant.replace(tzinfo=timezone.utc)
+        instant = instant.astimezone(timezone.utc)
+        start = instant - timedelta(hours=8)
+        params_base = {
+            "start": start.isoformat(),
+            "end": instant.isoformat(),
+            "limit": "1",
+            "sort": "desc",
+        }
+        errors: list[str] = []
+        with httpx.Client(timeout=self.timeout, headers=self._headers()) as client:
+            # Historical SIP is available once sufficiently delayed on Basic;
+            # IEX remains a usable fallback.
+            for feed in ("sip", "iex"):
+                try:
+                    payload = self._get(
+                        client,
+                        f"{DATA_URL}/v2/stocks/{ticker}/trades",
+                        params={**params_base, "feed": feed},
+                    )
+                except AlpacaError as exc:
+                    errors.append(f"{feed}: {exc}")
+                    continue
+                trades = payload.get("trades")
+                if not isinstance(trades, list):
+                    errors.append(f"{feed}: unexpected trades shape")
+                    continue
+                for trade in trades:
+                    if not isinstance(trade, dict):
+                        continue
+                    price = trade.get("p")
+                    trade_time = _parse_ts(trade.get("t"))
+                    if (
+                        price is not None
+                        and float(price) > 0
+                        and trade_time is not None
+                        and trade_time <= instant
+                    ):
+                        return SpotQuote(
+                            symbol=ticker,
+                            price=float(price),
+                            as_of=trade_time,
+                            source=f"alpaca/{feed}/historical-trade",
+                        )
+                errors.append(f"{feed}: no trade before option quote")
+        detail = "; ".join(errors) if errors else "unknown"
+        raise AlpacaError(
+            f"no {ticker} spot at {instant.isoformat()} ({detail})"
+        )
 
     def get_option_mid(self, occ_symbol: str) -> float | None:
         symbol = occ_symbol.strip().upper()

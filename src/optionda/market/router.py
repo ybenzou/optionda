@@ -70,6 +70,14 @@ class MarketRouter:
                 out[symbol] = yq
         return out
 
+    def get_spot_at(self, symbol: str, as_of: datetime) -> SpotQuote:
+        """Underlying print contemporaneous with a frozen option quote."""
+        if self.feed_name == "alpaca" and self._alpaca is not None:
+            return self._alpaca.get_spot_at(symbol, as_of)
+        raise MarketDataError(
+            "historical spot alignment requires Alpaca market data"
+        )
+
     def get_option_iv(self, occ_symbol: str) -> OptionIvQuote:
         if self.feed_name == "alpaca" and self._alpaca is not None:
             try:

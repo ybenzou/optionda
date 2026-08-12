@@ -277,6 +277,70 @@ def test_calibrate_surfaces_persists_each_held_underlying(tmp_path) -> None:
     assert stored.source == "alpaca/chain"
 
 
+def test_calibrate_surface_uses_spot_at_option_quote_time(tmp_path) -> None:
+    quote_time = datetime(2026, 8, 11, 19, 59, 59, tzinfo=timezone.utc)
+    refresh_time = datetime(2026, 8, 12, 8, 13, 25, tzinfo=timezone.utc)
+    position = Position(
+        occ_symbol="SKHY261016C00200000",
+        underlying="SKHY",
+        expiry=date(2026, 10, 16),
+        strike=200.0,
+        option_type="call",
+        iv_frozen=0.70,
+        iv_as_of=quote_time,
+        entry_premium=6.925,
+    )
+
+    class Router:
+        feed_name = "alpaca"
+
+        def get_spots(self, symbols):
+            # This is the later pre-market price and must not anchor close IV.
+            return {
+                "SKHY": SpotQuote(
+                    symbol="SKHY",
+                    price=146.48,
+                    as_of=refresh_time,
+                    source="alpaca/overnight",
+                )
+            }
+
+        def get_spot_at(self, symbol, as_of):
+            assert symbol == "SKHY"
+            assert as_of == quote_time
+            return SpotQuote(
+                symbol="SKHY",
+                price=141.65,
+                as_of=quote_time,
+                source="alpaca/sip/bar",
+            )
+
+        def get_option_chain_snapshots(self, underlying):
+            assert underlying == "SKHY"
+            return {
+                "SKHY261016C00200000": {
+                    "impliedVolatility": 0.795,
+                    "latestQuote": {
+                        "bp": 4.22,
+                        "ap": 5.19,
+                        "t": "2026-08-11T19:59:59Z",
+                    },
+                }
+            }
+
+    result = calibrate_surfaces(
+        Account(name="main", positions=[position]),
+        router=Router(),
+        home=tmp_path,
+        now=refresh_time,
+    )
+
+    surface = result.surfaces["SKHY"]
+    assert surface.spot == pytest.approx(141.65)
+    assert surface.as_of == quote_time
+    assert surface.smiles[0].nodes[0].iv == pytest.approx(0.7946, abs=0.001)
+
+
 def test_calibrate_surfaces_skips_failed_underlying(tmp_path) -> None:
     as_of = datetime(2026, 8, 4, 20, 0, tzinfo=timezone.utc)
     positions = [

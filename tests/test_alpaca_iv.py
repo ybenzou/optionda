@@ -119,6 +119,35 @@ def test_get_spots_prefers_newest_overnight_feed() -> None:
     assert q.as_of == datetime(2026, 8, 5, 6, 10, 47, tzinfo=timezone.utc)
 
 
+def test_get_spot_at_uses_historical_trade_before_option_quote() -> None:
+    from datetime import datetime, timezone
+
+    client = _client("auto")
+    option_quote_time = datetime(2026, 8, 11, 19, 59, 59, tzinfo=timezone.utc)
+    seen: list[dict] = []
+
+    def fake_get(_client, url, params=None):
+        seen.append(dict(params or {}))
+        assert url.endswith("/v2/stocks/SKHY/trades")
+        return {
+            "trades": [
+                {"p": 141.65, "t": "2026-08-11T19:59:58Z"},
+            ]
+        }
+
+    with patch.object(client, "_get", side_effect=fake_get):
+        with patch("optionda.market.alpaca.httpx.Client") as cls:
+            cls.return_value.__enter__.return_value = MagicMock()
+            spot = client.get_spot_at("SKHY", option_quote_time)
+
+    assert spot.price == pytest.approx(141.65)
+    assert spot.as_of == datetime(2026, 8, 11, 19, 59, 58, tzinfo=timezone.utc)
+    assert spot.source == "alpaca/sip/historical-trade"
+    assert seen[0]["feed"] == "sip"
+    assert seen[0]["sort"] == "desc"
+    assert seen[0]["end"] == option_quote_time.isoformat()
+
+
 def test_get_option_iv_falls_back_to_indicative_vendor() -> None:
     client = _client("auto")
     client.iv_mode = "vendor"

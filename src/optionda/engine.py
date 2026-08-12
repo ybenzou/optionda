@@ -54,23 +54,41 @@ def calibrate_surfaces(
         if on_progress is not None:
             on_progress(label, done, total)
 
+    # Compatibility for lightweight test/dummy routers. The production router
+    # implements get_spot_at and must never pair stale option quotes with this
+    # later live/overnight snapshot.
+    fallback_spots = (
+        market.get_spots(underlyings)
+        if not hasattr(market, "get_spot_at")
+        else {}
+    )
     report("spots…", 0)
-    spots = market.get_spots(underlyings)
     result = CalibrationResult()
     for index, underlying in enumerate(underlyings):
         report(f"{underlying} chain…", index)
-        spot_q = spots.get(underlying)
-        if spot_q is None:
-            result.errors[underlying] = "no spot"
-            report(f"{underlying} skip", index + 1)
-            continue
         try:
             snapshots = market.get_option_chain_snapshots(underlying)
+            if not snapshots:
+                raise ValueError(
+                    f"no usable surface nodes for {underlying}"
+                )
+            quote_time = _representative_option_quote_time(snapshots)
+            if quote_time is None:
+                raise ValueError("option chain has no timestamped quotes")
+            if hasattr(market, "get_spot_at"):
+                spot_q = market.get_spot_at(underlying, quote_time)
+            else:
+                spot_q = fallback_spots.get(underlying)
+            if spot_q is None:
+                raise ValueError(
+                    f"no underlying spot at option quote time {quote_time.isoformat()}"
+                )
             surface = build_surface(
                 underlying,
                 spot=spot_q.price,
                 snapshots=snapshots,
                 as_of=current,
+                quote_as_of=quote_time,
                 source=f"{market.feed_name}/chain",
                 max_quote_age=age,
                 rate=lambda days: rate_for_days(cfg, days),
@@ -86,6 +104,31 @@ def calibrate_surfaces(
     if on_progress is not None:
         on_progress("done", total, total)
     return result
+
+
+def _representative_option_quote_time(
+    snapshots: dict[str, dict],
+) -> datetime | None:
+    """Median chain quote timestamp used to align the underlying anchor spot."""
+    times: list[datetime] = []
+    for node in snapshots.values():
+        quote = node.get("latestQuote") or node.get("quote") or {}
+        if not isinstance(quote, dict):
+            continue
+        raw = quote.get("t") or quote.get("timestamp")
+        if not raw:
+            continue
+        try:
+            parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        times.append(parsed.astimezone(timezone.utc))
+    if not times:
+        return None
+    times.sort()
+    return times[len(times) // 2]
 
 
 def apply_surface_reference_ivs(
