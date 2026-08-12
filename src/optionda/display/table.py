@@ -297,7 +297,6 @@ def render_snapshot(
     prev_spots: dict[str, float] | None = None,
     prev_theos: dict[str, float] | None = None,
     prev_notionals: dict[str, float] | None = None,
-    prev_lives: dict[str, float] | None = None,
     prev_upnls: dict[str, float] | None = None,
     realized: float | None = None,
     continuous: bool = False,
@@ -312,7 +311,6 @@ def render_snapshot(
     prev_s = prev_spots or {}
     prev_t = prev_theos or {}
     prev_n = prev_notionals or {}
-    prev_l = prev_lives or {}
     prev_u = prev_upnls or {}
     phase: FlashPhase = flash_phase if continuous else "idle"
 
@@ -366,16 +364,17 @@ def render_snapshot(
         no_wrap=True,
         overflow="fold",
     )
+    cost_footer: Text | str = ""
+    if realized is not None:
+        cost_footer = Text.assemble(("rPnL ", "dim cyan"))
+        cost_footer.append_text(realized_footer)
     table.add_column("Side", justify="center", footer="", width=5)
     table.add_column("Qty", justify="right", style=_NUM, footer="", min_width=3)
     table.add_column("Spot", justify="right", footer="", min_width=7)
-    table.add_column("IV*", justify="right", style="cyan", footer="", min_width=5)
-    table.add_column("Cost", justify="right", style=_NUM, footer="", min_width=6)
-    live_footer: Text | str = ""
-    if realized is not None:
-        live_footer = Text.assemble(("rPnL ", "dim cyan"))
-        live_footer.append_text(realized_footer)
-    table.add_column("Live$", justify="right", footer=live_footer, min_width=7)
+    table.add_column(
+        "Model IV", justify="right", style="cyan", footer="", min_width=8
+    )
+    table.add_column("Cost", justify="right", style=_NUM, footer=cost_footer, min_width=6)
     table.add_column("Model$", justify="right", footer=model_footer, min_width=8)
     table.add_column("uPnL$", justify="right", footer=upnl_footer, min_width=9)
     table.add_column("Delta", justify="right", style=_MUTED, footer="", min_width=5)
@@ -393,20 +392,19 @@ def render_snapshot(
             "",
             "",
             "",
-            "",
         )
 
     for row in rows:
         pos = row.position
+        model_iv = row.surface_iv if row.surface_iv is not None else pos.iv_frozen
         if row.error:
             table.add_row(
                 Text(pos.occ_symbol, style=_OCC),
                 _side_cell(pos.side),
                 f"{pos.qty:g}",
                 "—",
-                Text(_fmt_iv(pos.iv_frozen), style="cyan"),
+                Text(_fmt_iv(model_iv), style="cyan"),
                 _fmt_money(pos.entry_premium),
-                _fmt_money(row.live),
                 Text(row.error, style="red"),
                 "—",
                 "—",
@@ -419,12 +417,11 @@ def render_snapshot(
             _side_cell(pos.side),
             Text(f"{pos.qty:g}", style=_NUM),
             _money_flash(row.spot, prev_s.get(pos.id), phase=phase),
-            Text(_fmt_iv(pos.iv_frozen), style="cyan"),
+            Text(_fmt_iv(model_iv), style="cyan"),
             Text(
                 _fmt_money(row.cost if row.cost is not None else pos.entry_premium),
                 style=_NUM,
             ),
-            _money_flash(row.live, prev_l.get(pos.id), phase=phase),
             _money_flash(row.theo, prev_t.get(pos.id), phase=phase),
             _pnl_flash(row.upnl, prev_u.get(pos.id), phase=phase),
             Text(

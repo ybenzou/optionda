@@ -1308,11 +1308,11 @@ def run_cmd() -> None:
     prev_spots: dict[str, float] = {}
     prev_theos: dict[str, float] = {}
     prev_notionals: dict[str, float] = {}
-    prev_lives: dict[str, float] = {}
     prev_upnls: dict[str, float] = {}
     tick = 0
     flash_hot_sec = 0.55
     flash_warm_sec = 0.85
+
     def _panel(
         acc,
         router,
@@ -1335,7 +1335,6 @@ def run_cmd() -> None:
             prev_spots=prev_spots or None,
             prev_theos=prev_theos or None,
             prev_notionals=prev_notionals or None,
-            prev_lives=prev_lives or None,
             prev_upnls=prev_upnls or None,
             realized=realized,
             continuous=True,
@@ -1441,8 +1440,6 @@ def run_cmd() -> None:
                 prev_theos[pid] = row.theo
             if row.notional is not None:
                 prev_notionals[pid] = row.notional
-            if row.live is not None:
-                prev_lives[pid] = row.live
             if row.upnl is not None:
                 prev_upnls[pid] = row.upnl
 
