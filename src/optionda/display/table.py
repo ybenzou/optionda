@@ -190,6 +190,33 @@ def _side_cell(side: str) -> Text:
     return Text(side, style=_MUTED)
 
 
+def _spot_chg_pct(spot: float | None, close_spot: float | None) -> Text | None:
+    """Colored % move vs frozen close / surface anchor spot."""
+    if spot is None or close_spot is None or close_spot <= 0:
+        return None
+    pct = (spot / close_spot - 1.0) * 100.0
+    if abs(pct) < 0.05:
+        return Text(" (0.0%)", style=_MUTED)
+    if pct > 0:
+        return Text(f" (+{pct:.1f}%)", style="bold green")
+    return Text(f" ({pct:.1f}%)", style="bold red")
+
+
+def _spot_cell(
+    spot: float | None,
+    close_spot: float | None,
+    previous: float | None,
+    *,
+    phase: FlashPhase,
+) -> Text:
+    cell = Text()
+    cell.append_text(_money_flash(spot, previous, phase=phase))
+    chg = _spot_chg_pct(spot, close_spot)
+    if chg is not None:
+        cell.append_text(chg)
+    return cell
+
+
 def _border_style(
     *,
     continuous: bool,
@@ -370,7 +397,7 @@ def render_snapshot(
         cost_footer.append_text(realized_footer)
     table.add_column("Side", justify="center", footer="", width=5)
     table.add_column("Qty", justify="right", style=_NUM, footer="", min_width=3)
-    table.add_column("Spot", justify="right", footer="", min_width=7)
+    table.add_column("Spot", justify="right", footer="", min_width=14)
     table.add_column(
         "Model IV", justify="right", style="cyan", footer="", min_width=8
     )
@@ -416,7 +443,12 @@ def render_snapshot(
             Text(pos.occ_symbol, style=_OCC),
             _side_cell(pos.side),
             Text(f"{pos.qty:g}", style=_NUM),
-            _money_flash(row.spot, prev_s.get(pos.id), phase=phase),
+            _spot_cell(
+                row.spot,
+                row.close_spot,
+                prev_s.get(pos.id),
+                phase=phase,
+            ),
             Text(_fmt_iv(model_iv), style="cyan"),
             Text(
                 _fmt_money(row.cost if row.cost is not None else pos.entry_premium),

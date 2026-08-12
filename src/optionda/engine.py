@@ -238,11 +238,15 @@ def mark_account(
             )
             done += 1
             continue
+        close_spot = None
         try:
             t = years_to_expiry(pos.expiry, current)
             rate = rate_for_days(cfg, t * 365.0)
             dividend = dividend_for_symbol(cfg, pos.underlying)
             candidate_surface = surfaces.get(pos.underlying)
+            close_spot = (
+                candidate_surface.spot if candidate_surface is not None else None
+            )
             surface = (
                 candidate_surface
                 if candidate_surface is not None
@@ -391,6 +395,7 @@ def mark_account(
                     dividend_used=dividend,
                     spot_as_of=spot_q.as_of,
                     spot_source=spot_q.source,
+                    close_spot=close_spot,
                 )
             )
         except Exception as exc:  # noqa: BLE001
@@ -403,6 +408,7 @@ def mark_account(
                     dte=None,
                     notional=None,
                     live=live,
+                    close_spot=close_spot,
                     error=str(exc),
                 )
             )

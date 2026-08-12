@@ -4,6 +4,8 @@ from optionda.display.table import (
     _money_flash,
     _move_direction,
     _pnl_flash,
+    _spot_cell,
+    _spot_chg_pct,
 )
 
 
@@ -47,3 +49,19 @@ def test_inline_bar_fills():
     assert empty.plain == "─" * 10
     assert full.plain == "━" * 10
     assert "yellow" in str(busy.style)
+
+
+def test_spot_chg_pct_vs_close():
+    up = _spot_chg_pct(146.81, 141.65)
+    assert up is not None
+    assert "+3.6%" in up.plain
+    assert "green" in str(up.style)
+
+    down = _spot_chg_pct(140.0, 141.65)
+    assert down is not None
+    assert "-1.2%" in down.plain
+    assert "red" in str(down.style)
+
+    cell = _spot_cell(146.81, 141.65, None, phase="idle")
+    assert "146.81" in cell.plain
+    assert "+3.6%" in cell.plain

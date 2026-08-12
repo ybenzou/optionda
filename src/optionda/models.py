@@ -131,4 +131,6 @@ class RowMark(BaseModel):
     dividend_used: float | None = None
     spot_as_of: datetime | None = None
     spot_source: str | None = None
+    # Underlying print used when the IV surface was frozen (close / quote-time spot).
+    close_spot: float | None = None
     error: str | None = None
