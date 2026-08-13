@@ -1513,6 +1513,9 @@ def run_cmd() -> None:
 
 
 def main() -> None:
+    from optionda.ssl_env import sanitize_ssl_env
+
+    sanitize_ssl_env()
     app()
 
 

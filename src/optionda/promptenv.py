@@ -7,10 +7,31 @@ from pathlib import Path
 BEGIN = "# >>> optionda prompt >>>"
 END = "# <<< optionda prompt <<<"
 
+# conda+Git Bash on Windows points SSL_CERT_FILE at a missing Unix-layout bundle.
+SSL_FIX_SNIPPET = r"""__optionda_fix_ssl_cert() {
+  local key path fallback
+  fallback=""
+  if [ -n "${CONDA_PREFIX:-}" ] && [ -f "${CONDA_PREFIX}/Library/ssl/cacert.pem" ]; then
+    fallback="${CONDA_PREFIX}/Library/ssl/cacert.pem"
+  fi
+  for key in SSL_CERT_FILE REQUESTS_CA_BUNDLE CURL_CA_BUNDLE; do
+    eval "path=\${$key-}"
+    if [ -n "$path" ] && [ ! -f "$path" ]; then
+      if [ -n "$fallback" ]; then
+        export "$key=$fallback"
+      else
+        unset "$key"
+      fi
+    fi
+  done
+}
+__optionda_fix_ssl_cert
+"""
+
 # Reads <data>/active each prompt. Lives in venv/conda activate only — never ~/.bashrc.
 PROMPT_SNIPPET = f"""{BEGIN}
 # optionda prompt (venv/conda scoped — not a global shell hook)
-__optionda_ps1_refresh() {{
+{SSL_FIX_SNIPPET}__optionda_ps1_refresh() {{
   local root name
   if [ -n "${{OPTIONDA_HOME:-}}" ]; then
     root="$OPTIONDA_HOME"
@@ -59,7 +80,7 @@ def set_terminal_title(title: str) -> None:
 def render_prompt_apply() -> str:
     """Shell code for the *current* session: eval \"$(optionda prompt apply)\"."""
     # Same logic as PROMPT_SNIPPET, without the mark comments (safe to re-eval).
-    return """__optionda_ps1_refresh() {
+    return SSL_FIX_SNIPPET + """__optionda_ps1_refresh() {
   local root name
   if [ -n "${OPTIONDA_HOME:-}" ]; then
     root="$OPTIONDA_HOME"
