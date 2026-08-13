@@ -1,9 +1,9 @@
 name: Publish to PyPI
 
+# Disabled automatic tag publishes. Releases go up with local twine.
+# Manual run only if trusted publishing is configured later.
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
 
 jobs:
   publish:
