@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from optionda.batch import read_batch_lines
-from optionda.occ import OccError, parse_leg_line
+from optionda.occ import OccError, as_sell_line, parse_leg_line
 
 
 def split_semi_separated(text: str) -> list[str]:
@@ -37,7 +37,8 @@ def read_interactive_lines(
 
 def _validated_line(token: str) -> str:
     """Validate parseability but keep the original text (preserves @ cost)."""
-    parse_leg_line(token)
+    sell_rest = as_sell_line(token)
+    parse_leg_line(sell_rest if sell_rest is not None else token)
     return token.strip()
 
 

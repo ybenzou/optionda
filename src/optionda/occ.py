@@ -25,6 +25,7 @@ _QTY_RE = re.compile(
     r"(?:\s|^)(?:x|×|\*)\s*(?P<qty>[0-9]+(?:\.[0-9]+)?)\s*$",
     re.IGNORECASE,
 )
+_SELL_PREFIX = re.compile(r"(?i)^sell\s+")
 
 
 @dataclass(frozen=True)
@@ -82,6 +83,15 @@ _COMPACT_RE = re.compile(
     r"(?P<yymmdd>\d{6})"
     r"$"
 )
+
+
+def as_sell_line(line: str) -> str | None:
+    """If ``sell SKHY 261016 200 C x6 @ 7.3``, return the contract rest."""
+    raw = line.strip()
+    if not _SELL_PREFIX.match(raw):
+        return None
+    rest = _SELL_PREFIX.sub("", raw, count=1).strip()
+    return rest or None
 
 
 def split_cost_qty(line: str) -> tuple[str, float | None, float | None]:

@@ -5,6 +5,7 @@ import pytest
 from optionda.add_resolve import resolve_add_lines
 from optionda.occ import (
     OccError,
+    as_sell_line,
     parse_leg_line,
     parse_position_line,
     require_entry,
@@ -51,6 +52,24 @@ def test_semi_separated_preserves_qty_and_cost() -> None:
     assert legs[0].qty == 10 and legs[0].entry == pytest.approx(3.482)
     assert legs[1].qty == 1 and legs[1].entry == pytest.approx(9.5)
     assert legs[2].qty == 2 and legs[2].entry == pytest.approx(6.7)
+
+
+def test_semi_separated_keeps_sell_segments() -> None:
+    lines = resolve_add_lines(
+        [
+            "AAPL 261120 350 C x1 @ 3.4; "
+            "sell SKHY 261016 200 C x6 @ 7.3"
+        ]
+    )
+    assert lines[0] == "AAPL 261120 350 C x1 @ 3.4"
+    assert lines[1].lower().startswith("sell ")
+    assert "SKHY 261016 200 C" in lines[1]
+    rest = as_sell_line(lines[1])
+    assert rest is not None
+    leg = parse_leg_line(rest)
+    assert leg.parts.occ_symbol == "SKHY261016C00200000"
+    assert leg.qty == 6
+    assert leg.entry == pytest.approx(7.3)
 
 
 def test_parse_occ_with_cost() -> None:

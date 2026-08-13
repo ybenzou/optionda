@@ -13,7 +13,7 @@ from rich.text import Text
 
 from optionda.engine import freeze_iv_for_position
 from optionda.models import Position, Side
-from optionda.occ import OccError, parse_leg_line, require_entry, resolve_qty
+from optionda.occ import OccError, as_sell_line, parse_leg_line, require_entry, resolve_qty
 from optionda.store import AccountStore, StoreError
 
 
@@ -33,6 +33,7 @@ class BatchResult:
     merged: int = 0
     failed: int = 0
     skipped: int = 0
+    sold: int = 0
     errors: list[str] = field(default_factory=list)
     rows: list[BatchRow] = field(default_factory=list)
 
@@ -88,6 +89,45 @@ def ok_detail(pos: Position) -> str:
     return f"qty={pos.qty:g}{cost}"
 
 
+def sell_detail(outcome) -> str:
+    left = (
+        "closed"
+        if outcome.closed
+        else f"left {outcome.position.qty:g}"
+    )
+    return (
+        f"sold x{outcome.qty_sold:g} @ {outcome.exit_premium:g}  "
+        f"realized ${outcome.realized:,.2f}  {left}"
+    )
+
+
+def sell_from_line(
+    store: AccountStore,
+    line: str,
+    *,
+    qty: float = 1.0,
+) -> BatchRow:
+    rest = as_sell_line(line)
+    if rest is None:
+        raise OccError(f"not a sell line: {line}")
+    leg = parse_leg_line(rest)
+    if leg.entry is None or leg.entry <= 0:
+        raise OccError("exit premium required — use '@ 7.3'")
+    line_qty = resolve_qty(leg.qty, qty)
+    outcome = store.sell_position(
+        None,
+        leg.parts.occ_symbol,
+        qty=line_qty,
+        exit_premium=leg.entry,
+    )
+    return BatchRow(
+        status="sell",
+        label=line,
+        occ=outcome.occ_symbol,
+        detail=sell_detail(outcome),
+    )
+
+
 def render_batch_summary(result: BatchResult, *, book: Path | None = None) -> Panel:
     table = Table(
         box=box.SIMPLE_HEAD,
@@ -112,6 +152,10 @@ def render_batch_summary(result: BatchResult, *, book: Path | None = None) -> Pa
             st = Text("merge", style="bold cyan")
             iv = f"{row.iv * 100:.1f}%" if row.iv is not None else "—"
             note = row.detail
+        elif row.status == "sell":
+            st = Text("sell", style="bold yellow")
+            iv = "—"
+            note = row.detail
         elif row.status == "skip":
             st = Text("skip", style="bold yellow")
             iv = "—"
@@ -127,6 +171,8 @@ def render_batch_summary(result: BatchResult, *, book: Path | None = None) -> Pa
         (str(result.ok), "bold green"),
         ("  merge ", "dim"),
         (str(result.merged), "bold cyan" if result.merged else "dim"),
+        ("  sell ", "dim"),
+        (str(result.sold), "bold yellow" if result.sold else "dim"),
         ("  fail ", "dim"),
         (str(result.failed), "bold red" if result.failed else "dim"),
     )
@@ -176,49 +222,54 @@ def add_batch(
             short = line if len(line) <= 36 else line[:33] + "…"
             progress.update(task, description=f"adding {index}/{total}  {short}")
             try:
-                leg = parse_leg_line(line)
-                cost = require_entry(leg.entry, entry)
-                line_qty = resolve_qty(leg.qty, qty)
-                parts = leg.parts
-                draft = Position(
-                    occ_symbol=parts.occ_symbol,
-                    underlying=parts.underlying,
-                    expiry=parts.expiry,
-                    strike=parts.strike,
-                    option_type=parts.option_type,
-                    qty=line_qty,
-                    side=side,
-                    iv_frozen=iv if iv is not None else 0.01,
-                    iv_as_of=datetime.now(timezone.utc),
-                    entry_premium=cost,
-                )
-                draft = freeze_iv_for_position(draft, iv=iv, home=home)
-                outcome = store.add_position(None, draft)
-                pos = outcome.position
-                if outcome.merged:
-                    out.merged += 1
-                    out.rows.append(
-                        BatchRow(
-                            status="merge",
-                            label=line,
-                            occ=pos.occ_symbol,
-                            iv=pos.iv_frozen,
-                            source=pos.iv_source or "market",
-                            detail=merge_detail(outcome),
-                        )
-                    )
+                if as_sell_line(line) is not None:
+                    row = sell_from_line(store, line, qty=qty)
+                    out.sold += 1
+                    out.rows.append(row)
                 else:
-                    out.ok += 1
-                    out.rows.append(
-                        BatchRow(
-                            status="ok",
-                            label=line,
-                            occ=pos.occ_symbol,
-                            iv=pos.iv_frozen,
-                            source=pos.iv_source or "market",
-                            detail=ok_detail(pos),
-                        )
+                    leg = parse_leg_line(line)
+                    cost = require_entry(leg.entry, entry)
+                    line_qty = resolve_qty(leg.qty, qty)
+                    parts = leg.parts
+                    draft = Position(
+                        occ_symbol=parts.occ_symbol,
+                        underlying=parts.underlying,
+                        expiry=parts.expiry,
+                        strike=parts.strike,
+                        option_type=parts.option_type,
+                        qty=line_qty,
+                        side=side,
+                        iv_frozen=iv if iv is not None else 0.01,
+                        iv_as_of=datetime.now(timezone.utc),
+                        entry_premium=cost,
                     )
+                    draft = freeze_iv_for_position(draft, iv=iv, home=home)
+                    outcome = store.add_position(None, draft)
+                    pos = outcome.position
+                    if outcome.merged:
+                        out.merged += 1
+                        out.rows.append(
+                            BatchRow(
+                                status="merge",
+                                label=line,
+                                occ=pos.occ_symbol,
+                                iv=pos.iv_frozen,
+                                source=pos.iv_source or "market",
+                                detail=merge_detail(outcome),
+                            )
+                        )
+                    else:
+                        out.ok += 1
+                        out.rows.append(
+                            BatchRow(
+                                status="ok",
+                                label=line,
+                                occ=pos.occ_symbol,
+                                iv=pos.iv_frozen,
+                                source=pos.iv_source or "market",
+                                detail=ok_detail(pos),
+                            )
+                        )
             except StoreError as exc:
                 msg = str(exc)
                 out.failed += 1

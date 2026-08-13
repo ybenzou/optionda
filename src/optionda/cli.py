@@ -61,6 +61,7 @@ from optionda.batch import (
     merge_detail,
     ok_detail,
     render_batch_summary,
+    sell_from_line,
 )
 from optionda.engine import (
     apply_surface_reference_ivs,
@@ -74,6 +75,7 @@ from optionda.market.router import MarketRouter, resolve_poll_interval
 from optionda.models import Position
 from optionda.occ import (
     OccError,
+    as_sell_line,
     format_occ,
     parse_leg_line,
     require_entry,
@@ -548,11 +550,13 @@ def add_cmd(
     Cost is required: `@ 5.20` on the line, or `--entry 5.20`.
     Per-line qty: `x10` (or `*10`); otherwise `--qty` (default 1).
     Semicolon batch: each segment can have its own xQTY and @ cost.
+    Prefix a segment with ``sell`` to close at that premium in the same line.
     Re-adding the same OCC+side merges qty and quantity-weighted avg cost.
 
     Examples:
       optionda add "INTC 261016 140 C x10 @ 3.482"
       optionda add "INTC 261016 140 C x10 @ 3.482; SKHY 261016 200 C x1 @ 9.5"
+      optionda add "AAPL 261120 350 C x1 @ 3.4; sell SKHY 261016 200 C x6 @ 7.3"
       optionda add AAPL261120C00350000 --entry 5.20 --qty 2
       optionda add positions.txt
     """
@@ -606,6 +610,21 @@ def add_cmd(
 
     # One line: quiet path; many lines: progress bar
     if len(lines) == 1:
+        if as_sell_line(lines[0]) is not None:
+            try:
+                row = sell_from_line(store, lines[0], qty=qty)
+            except (StoreError, OccError) as exc:
+                _err(str(exc))
+                raise typer.Exit(1) from exc
+            acc = store.require_current()
+            sync_book(acc, home)
+            console.print(
+                render_batch_summary(
+                    BatchResult(sold=1, rows=[row]),
+                    book=book_path(acc.name, home),
+                )
+            )
+            return
         try:
             leg = parse_leg_line(lines[0])
             cost = require_entry(leg.entry, entry)

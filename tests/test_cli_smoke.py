@@ -260,6 +260,44 @@ def test_cli_create_add_export(tmp_path, monkeypatch) -> None:
             assert "Chg$" not in out
 
 
+def test_add_one_liner_mixes_buy_and_sell(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("OPTIONDA_HOME", str(tmp_path))
+    monkeypatch.setenv("OPTIONDA_ACTIVE", "demo")
+    assert runner.invoke(app, ["create", "demo"]).exit_code == 0
+
+    with patch(
+        "optionda.cli.freeze_iv_for_position",
+        side_effect=lambda p, **kw: p.model_copy(update={"iv_frozen": 0.40}),
+    ), patch(
+        "optionda.batch.freeze_iv_for_position",
+        side_effect=lambda p, **kw: p.model_copy(update={"iv_frozen": 0.40}),
+    ):
+        seed = runner.invoke(
+            app,
+            ["add", "SKHY 261016 200 C x6 @ 9.5", "--iv", "0.40"],
+        )
+        assert seed.exit_code == 0, seed.output
+        mixed = runner.invoke(
+            app,
+            [
+                "add",
+                "AAPL 261120 350 C x1 @ 3.4; "
+                "sell SKHY 261016 200 C x6 @ 7.3",
+                "--iv",
+                "0.40",
+            ],
+        )
+    assert mixed.exit_code == 0, mixed.output
+    assert "AAPL261120C00350000" in mixed.output
+    assert "SKHY261016C00200000" in mixed.output
+    assert "sold" in mixed.output.lower() or "sell" in mixed.output.lower()
+
+    book = runner.invoke(app, ["book"])
+    assert book.exit_code == 0, book.output
+    assert "AAPL261120C00350000" in book.output
+    assert "SKHY261016C00200000" not in book.output
+
+
 def test_key_status(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("OPTIONDA_HOME", str(tmp_path))
     with patch("optionda.cli.AlpacaClient") as client_cls:
