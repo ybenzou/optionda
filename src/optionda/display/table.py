@@ -89,6 +89,33 @@ def _fmt_iv(value: float) -> str:
     return f"{value * 100:.1f}%"
 
 
+def _iv_asof_label(as_of: datetime | None) -> str | None:
+    """US session calendar date for the IV used in Model$."""
+    if as_of is None:
+        return None
+    if as_of.tzinfo is None:
+        as_of = as_of.replace(tzinfo=timezone.utc)
+    local = as_of.astimezone(_ET)
+    return f"{local.month}/{local.day}"
+
+
+def _model_iv_cell(
+    iv: float | None,
+    as_of: datetime | None,
+    *,
+    stale: bool,
+) -> Text:
+    if iv is None:
+        return Text("—", style=_MUTED)
+    cell = Text(_fmt_iv(iv), style="cyan")
+    label = _iv_asof_label(as_of)
+    if label is None:
+        return cell
+    style = "bold yellow" if stale else _MUTED
+    cell.append(f"  {label}", style=style)
+    return cell
+
+
 FlashPhase = str  # "hot" | "warm" | "idle"
 
 
@@ -399,7 +426,7 @@ def render_snapshot(
     table.add_column("Qty", justify="right", style=_NUM, footer="", min_width=3)
     table.add_column("Spot", justify="right", footer="", min_width=14)
     table.add_column(
-        "Model IV", justify="right", style="cyan", footer="", min_width=8
+        "Model IV", justify="right", style="cyan", footer="", min_width=12
     )
     table.add_column("Cost", justify="right", style=_NUM, footer=cost_footer, min_width=6)
     table.add_column("Model$", justify="right", footer=model_footer, min_width=8)
@@ -424,13 +451,15 @@ def render_snapshot(
     for row in rows:
         pos = row.position
         model_iv = row.surface_iv if row.surface_iv is not None else pos.iv_frozen
+        iv_as_of = row.surface_as_of if row.surface_as_of is not None else pos.iv_as_of
+        iv_stale = row.valuation_mode != "surface"
         if row.error:
             table.add_row(
                 Text(pos.occ_symbol, style=_OCC),
                 _side_cell(pos.side),
                 f"{pos.qty:g}",
                 "—",
-                Text(_fmt_iv(model_iv), style="cyan"),
+                _model_iv_cell(model_iv, iv_as_of, stale=iv_stale),
                 _fmt_money(pos.entry_premium),
                 Text(row.error, style="red"),
                 "—",
@@ -449,7 +478,7 @@ def render_snapshot(
                 prev_s.get(pos.id),
                 phase=phase,
             ),
-            Text(_fmt_iv(model_iv), style="cyan"),
+            _model_iv_cell(model_iv, iv_as_of, stale=iv_stale),
             Text(
                 _fmt_money(row.cost if row.cost is not None else pos.entry_premium),
                 style=_NUM,

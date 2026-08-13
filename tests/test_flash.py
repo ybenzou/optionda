@@ -1,6 +1,10 @@
+from datetime import datetime, timezone
+
 from optionda.display.table import (
     _dir_style,
     _inline_bar,
+    _iv_asof_label,
+    _model_iv_cell,
     _money_flash,
     _move_direction,
     _pnl_flash,
@@ -65,3 +69,17 @@ def test_spot_chg_pct_vs_close():
     cell = _spot_cell(146.81, 141.65, None, phase="idle")
     assert "146.81" in cell.plain
     assert "+3.6%" in cell.plain
+
+
+def test_model_iv_shows_et_session_date():
+    as_of = datetime(2026, 8, 12, 20, 5, tzinfo=timezone.utc)  # 16:05 ET
+    label = _iv_asof_label(as_of)
+    assert label == "8/12"
+
+    cell = _model_iv_cell(0.779, as_of, stale=False)
+    assert "77.9%" in cell.plain
+    assert "8/12" in cell.plain
+
+    stale = _model_iv_cell(0.40, as_of, stale=True)
+    assert "8/12" in stale.plain
+    assert any(span.style == "bold yellow" for span in stale.spans)
