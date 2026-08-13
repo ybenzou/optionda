@@ -270,12 +270,14 @@ class AlpacaClient:
         return ["opra", "indicative"]
 
     def get_option_iv(self, occ_symbol: str) -> OptionIvQuote:
-        """Prefer IV implied from option mid; fall back to vendor IV field."""
+        """Prefer IV implied from option mid; fall back to vendor IV field.
+
+        Invert against the underlying print at the option quote time, not the
+        live overnight/pre-market snapshot — same pairing as refresh-iv.
+        """
         symbol = occ_symbol.strip().upper()
         parts = parse_occ(symbol)
         mode = self.iv_mode or load_config(self.home).iv_mode
-        spot_map = self.get_spots([parts.underlying])
-        spot_q = spot_map.get(parts.underlying)
         errors: list[str] = []
         with httpx.Client(timeout=self.timeout, headers=self._headers()) as client:
             for feed in self._options_feed_candidates():
@@ -287,28 +289,29 @@ class AlpacaClient:
                     continue
 
                 as_of = None
-                latest = node.get("latestTrade") or node.get("latestQuote")
+                latest = node.get("latestQuote") or node.get("latestTrade")
                 if isinstance(latest, dict):
                     as_of = _parse_ts(latest.get("t") or latest.get("timestamp"))
 
                 mid = quote_mid(node)
-                if mode in {"mid", "auto"} and mid is not None and spot_q is not None:
-                    try:
-                        quote = imply_iv_from_premium(
-                            symbol,
-                            spot_q.price,
-                            mid,
-                            home=self.home,
-                            source=f"alpaca/{feed}+mid",
-                        )
-                        if as_of is not None:
-                            quote = quote.model_copy(update={"as_of": as_of})
-                        return quote
-                    except Exception as exc:  # noqa: BLE001
-                        errors.append(f"{feed}+mid: {exc}")
-                        if mode == "mid":
-                            # still try vendor on this feed before next feed
-                            pass
+                if mode in {"mid", "auto"} and mid is not None:
+                    spot_q = self._spot_for_option_quote(parts.underlying, as_of)
+                    if spot_q is not None:
+                        try:
+                            quote = imply_iv_from_premium(
+                                symbol,
+                                spot_q.price,
+                                mid,
+                                home=self.home,
+                                source=f"alpaca/{feed}+mid",
+                            )
+                            if as_of is not None:
+                                quote = quote.model_copy(update={"as_of": as_of})
+                            return quote
+                        except Exception as exc:  # noqa: BLE001
+                            errors.append(f"{feed}+mid: {exc}")
+                            if mode == "mid":
+                                pass
 
                 if mode in {"vendor", "auto", "mid"}:
                     iv = _extract_iv(node)
@@ -324,6 +327,19 @@ class AlpacaClient:
                     errors.append(f"{feed}: no IV field")
         detail = "; ".join(errors) if errors else "unknown"
         raise AlpacaError(f"no IV for {symbol} ({detail})")
+
+    def _spot_for_option_quote(
+        self,
+        underlying: str,
+        quote_time: datetime | None,
+    ) -> SpotQuote | None:
+        if quote_time is not None:
+            try:
+                return self.get_spot_at(underlying, quote_time)
+            except Exception:  # noqa: BLE001
+                pass
+        spots = self.get_spots([underlying])
+        return spots.get(underlying)
 
     def _fetch_option_snapshot(
         self,

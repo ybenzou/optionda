@@ -5,6 +5,7 @@ import pytest
 from optionda.engine import (
     apply_surface_reference_ivs,
     calibrate_surfaces,
+    ensure_surfaces,
     mark_account,
 )
 from optionda.models import Account, Position, SpotQuote
@@ -275,6 +276,85 @@ def test_calibrate_surfaces_persists_each_held_underlying(tmp_path) -> None:
     stored = load_surface("SPCX", tmp_path)
     assert stored is not None
     assert stored.source == "alpaca/chain"
+
+
+def test_ensure_surfaces_skips_fresh_and_calibrates_missing(tmp_path) -> None:
+    as_of = datetime(2026, 8, 12, 20, 0, tzinfo=timezone.utc)
+    aapl = Position(
+        occ_symbol="AAPL261120C00350000",
+        underlying="AAPL",
+        expiry=date(2026, 11, 20),
+        strike=350.0,
+        option_type="call",
+        iv_frozen=0.25,
+        iv_as_of=as_of,
+        entry_premium=4.76,
+    )
+    goog = Position(
+        occ_symbol="GOOG261218C00400000",
+        underlying="GOOG",
+        expiry=date(2026, 12, 18),
+        strike=400.0,
+        option_type="call",
+        iv_frozen=0.33,
+        iv_as_of=as_of,
+        entry_premium=9.9,
+    )
+    save_surface(
+        IvSurface(
+            underlying="AAPL",
+            spot=302.0,
+            as_of=as_of,
+            source="alpaca/chain",
+            smiles=[
+                ExpirySmile(
+                    expiry=date(2026, 11, 20),
+                    nodes=[SurfaceNode(strike=350.0, delta=0.16, iv=0.25)],
+                )
+            ],
+            quality={"accepted": 1, "rejected": 0},
+        ),
+        tmp_path,
+    )
+    fetched: list[str] = []
+
+    class Router:
+        feed_name = "alpaca"
+
+        def get_option_chain_snapshots(self, underlying):
+            fetched.append(underlying)
+            return {
+                "GOOG261218C00400000": {
+                    "impliedVolatility": 0.33,
+                    "latestQuote": {
+                        "bp": 9.8,
+                        "ap": 10.0,
+                        "t": "2026-08-12T20:00:00Z",
+                    },
+                }
+            }
+
+        def get_spot_at(self, symbol, as_of_t):
+            return SpotQuote(
+                symbol=symbol,
+                price=338.0,
+                as_of=as_of_t,
+                source="alpaca/sip/historical-trade",
+            )
+
+    result = ensure_surfaces(
+        Account(name="demo", positions=[aapl, goog]),
+        ["AAPL", "GOOG"],
+        router=Router(),
+        home=tmp_path,
+        now=as_of,
+    )
+    assert fetched == ["GOOG"]
+    assert "GOOG" in result.surfaces
+    assert "AAPL" not in result.surfaces
+    stored = load_surface("GOOG", tmp_path)
+    assert stored is not None
+    assert stored.spot == pytest.approx(338.0)
 
 
 def test_calibrate_surface_uses_spot_at_option_quote_time(tmp_path) -> None:

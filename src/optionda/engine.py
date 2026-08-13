@@ -37,17 +37,22 @@ def calibrate_surfaces(
     now: datetime | None = None,
     max_quote_age: timedelta | None = None,
     on_progress: ProgressCallback | None = None,
+    only: set[str] | list[str] | None = None,
 ) -> CalibrationResult:
     """Build and persist one vendor-IV smile surface per held underlying.
 
     Failures are per-underlying: one dead ticker does not abort the rest.
     Chain fetches are slow; ``on_progress(label, done, total)`` reports each step.
+    Pass ``only`` to restrict to new names (e.g. after add).
     """
     market = router or MarketRouter(home)
     cfg = load_config(home)
     current = now or datetime.now(timezone.utc)
     age = max_quote_age if max_quote_age is not None else MAX_CALIBRATION_QUOTE_AGE
     underlyings = sorted({position.underlying for position in account.positions})
+    if only is not None:
+        want = {name.strip().upper() for name in only}
+        underlyings = [name for name in underlyings if name in want]
     total = max(len(underlyings), 1)
 
     def report(label: str, done: int) -> None:
@@ -104,6 +109,39 @@ def calibrate_surfaces(
     if on_progress is not None:
         on_progress("done", total, total)
     return result
+
+
+def ensure_surfaces(
+    account: Account,
+    underlyings: list[str],
+    *,
+    home: Path | None = None,
+    router: MarketRouter | None = None,
+    now: datetime | None = None,
+    on_progress: ProgressCallback | None = None,
+) -> CalibrationResult:
+    """Calibrate close surfaces for names that do not already have a fresh one."""
+    current = now or datetime.now(timezone.utc)
+    missing = [
+        name
+        for name in sorted({item.strip().upper() for item in underlyings if item})
+        if not _has_fresh_surface(name, home, current)
+    ]
+    if not missing:
+        return CalibrationResult()
+    return calibrate_surfaces(
+        account,
+        home=home,
+        router=router,
+        now=current,
+        on_progress=on_progress,
+        only=missing,
+    )
+
+
+def _has_fresh_surface(underlying: str, home: Path | None, now: datetime) -> bool:
+    surface = load_surface(underlying, home)
+    return surface is not None and is_surface_fresh(surface, now)
 
 
 def _representative_option_quote_time(

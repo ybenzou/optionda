@@ -208,6 +208,60 @@ def test_get_option_iv_prefers_mid() -> None:
     assert quote.iv != pytest.approx(0.931, abs=1e-3)
 
 
+def test_get_option_iv_uses_spot_at_option_quote_time_not_overnight() -> None:
+    from datetime import datetime, timezone
+
+    from optionda.models import SpotQuote
+
+    client = _client("indicative")
+    client.iv_mode = "mid"
+    quote_t = datetime(2026, 8, 12, 20, 0, tzinfo=timezone.utc)
+    snap = {
+        "snapshots": {
+            "GOOG261218C00400000": {
+                "implied_volatility": 0.40,
+                "latestQuote": {"bp": 9.8, "ap": 10.0, "t": quote_t.isoformat()},
+            }
+        }
+    }
+    close = SpotQuote(
+        symbol="GOOG",
+        price=330.0,
+        as_of=quote_t,
+        source="alpaca/sip/historical-trade",
+    )
+    overnight = SpotQuote(
+        symbol="GOOG",
+        price=350.0,
+        as_of=datetime(2026, 8, 13, 3, 0, tzinfo=timezone.utc),
+        source="alpaca/overnight/trade",
+    )
+    with patch.object(client, "_get", return_value=snap):
+        with patch.object(client, "get_spot_at", return_value=close) as at:
+            with patch.object(client, "get_spots", return_value={"GOOG": overnight}) as spots:
+                with patch("optionda.market.alpaca.httpx.Client") as cls:
+                    cls.return_value.__enter__.return_value = MagicMock()
+                    with patch(
+                        "optionda.market.alpaca.imply_iv_from_premium"
+                    ) as imply:
+                        from optionda.models import OptionIvQuote
+
+                        imply.return_value = OptionIvQuote(
+                            occ_symbol="GOOG261218C00400000",
+                            iv=0.33,
+                            as_of=quote_t,
+                            source="alpaca/indicative+mid",
+                        )
+                        quote = client.get_option_iv("GOOG261218C00400000")
+    at.assert_called_once()
+    assert at.call_args.args[0] == "GOOG"
+    assert at.call_args.args[1] == quote_t
+    spots.assert_not_called()
+    assert imply.call_args.kwargs["source"] == "alpaca/indicative+mid"
+    assert imply.call_args.args[1] == pytest.approx(330.0)
+    assert quote.iv == pytest.approx(0.33)
+
+
 def test_percent_scale_iv_normalized() -> None:
     client = _client("indicative")
     client.iv_mode = "vendor"

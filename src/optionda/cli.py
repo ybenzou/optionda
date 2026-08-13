@@ -66,6 +66,7 @@ from optionda.batch import (
 from optionda.engine import (
     apply_surface_reference_ivs,
     calibrate_surfaces,
+    ensure_surfaces,
     freeze_iv_for_position,
     mark_account,
 )
@@ -78,6 +79,7 @@ from optionda.occ import (
     as_sell_line,
     format_occ,
     parse_leg_line,
+    parse_occ,
     require_entry,
     resolve_qty,
 )
@@ -695,6 +697,9 @@ def add_cmd(
         console.print(
             render_batch_summary(summary, book=book_path(outcome.account.name, home))
         )
+        _ensure_close_surfaces(
+            outcome.account, [pos.underlying], home=home, console=console
+        )
         return
 
     result = add_batch(
@@ -710,8 +715,33 @@ def add_cmd(
     acc = store.require_current()
     sync_book(acc, home)
     console.print(render_batch_summary(result, book=book_path(acc.name, home)))
+    added = [
+        parse_occ(row.occ).underlying
+        for row in result.rows
+        if row.status in {"ok", "merge"} and row.occ
+    ]
+    if added:
+        _ensure_close_surfaces(acc, added, home=home, console=console)
     if result.failed:
         raise typer.Exit(1)
+
+
+def _ensure_close_surfaces(
+    account,
+    underlyings: list[str],
+    *,
+    home,
+    console: Console,
+) -> None:
+    """Build missing close IV surfaces so Spot % and Model IV use last session."""
+    names = [name.strip().upper() for name in underlyings if name]
+    if not names:
+        return
+    result = ensure_surfaces(account, names, home=home)
+    for name, surface in result.surfaces.items():
+        console.print(f"[dim]surface {name} close={surface.spot:.2f}[/dim]")
+    for name, err in result.errors.items():
+        console.print(f"[yellow]surface {name}: {err}[/yellow]")
 
 
 @app.command("delete")
