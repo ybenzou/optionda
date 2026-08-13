@@ -260,6 +260,21 @@ def test_cli_create_add_export(tmp_path, monkeypatch) -> None:
             assert "Chg$" not in out
 
 
+def test_run_ctrl_c_exits_without_nameerror(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("OPTIONDA_HOME", str(tmp_path))
+    monkeypatch.setenv("OPTIONDA_ACTIVE", "demo")
+    assert runner.invoke(app, ["create", "demo"]).exit_code == 0
+    with patch("optionda.cli.mark_account", return_value=[]), patch(
+        "optionda.cli.time.sleep", side_effect=KeyboardInterrupt
+    ):
+        result = runner.invoke(app, ["run"])
+    text = f"{result.output or ''}\n{result.exception!r}"
+    assert "NameError" not in text
+    assert "log_file" not in text
+    assert "stopped" in (result.output or "").lower()
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
 def test_add_one_liner_mixes_buy_and_sell(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("OPTIONDA_HOME", str(tmp_path))
     monkeypatch.setenv("OPTIONDA_ACTIVE", "demo")

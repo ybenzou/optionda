@@ -1524,11 +1524,10 @@ def run_cmd() -> None:
             time.sleep(0.1)
 
     # First mark before Live — same progress bar as export
-    acc, router, rows = _fetch_rows(live=None)
-    # Seed baselines without a flash (nothing to compare yet).
-    _commit_prev(rows)
-
     try:
+        acc, router, rows = _fetch_rows(live=None)
+        _commit_prev(rows)
+
         with Live(console=console, refresh_per_second=12, screen=False) as live:
             while True:
                 for remaining in range(refresh, 0, -1):
@@ -1558,7 +1557,8 @@ def run_cmd() -> None:
                 _play_flash(live, acc, router, rows)
                 _commit_prev(rows)
     except KeyboardInterrupt:
-        console.print(f"\n[dim]stopped · log: {log_file}[/dim]")
+        name = store.active_name() or "optionda"
+        console.print(f"\n[dim]stopped · log: {log_path(name, home)}[/dim]")
 
 
 def main() -> None:
