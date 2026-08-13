@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import logging
+import sys
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import yfinance as yf
 
@@ -30,16 +33,21 @@ class YahooClient:
 
     def get_spots(self, symbols: list[str]) -> dict[str, SpotQuote]:
         out: dict[str, SpotQuote] = {}
-        for symbol in sorted(set(s.upper() for s in symbols)):
-            ticker = yf.Ticker(symbol)
-            quote = self._spot_quote_from_ticker(symbol, ticker)
-            if quote is not None:
-                out[symbol] = quote
+        with _quiet_yahoo():
+            for symbol in sorted(set(s.upper() for s in symbols)):
+                ticker = yf.Ticker(symbol)
+                quote = self._spot_quote_from_ticker(symbol, ticker)
+                if quote is not None:
+                    out[symbol] = quote
         return out
 
     def get_option_iv(self, occ_symbol: str) -> OptionIvQuote:
         parts = parse_occ(occ_symbol)
         mode = self.iv_mode or load_config(self.home).iv_mode
+        with _quiet_yahoo():
+            return self._get_option_iv_unlocked(occ_symbol, parts, mode)
+
+    def _get_option_iv_unlocked(self, occ_symbol: str, parts, mode: IvMode) -> OptionIvQuote:
         ticker = yf.Ticker(parts.underlying)
         expiry_str = parts.expiry.isoformat()
         try:
@@ -95,11 +103,12 @@ class YahooClient:
 
     def get_option_mid(self, occ_symbol: str) -> float | None:
         parts = parse_occ(occ_symbol)
-        ticker = yf.Ticker(parts.underlying)
-        try:
-            chain = ticker.option_chain(parts.expiry.isoformat())
-        except Exception:  # noqa: BLE001
-            return None
+        with _quiet_yahoo():
+            ticker = yf.Ticker(parts.underlying)
+            try:
+                chain = ticker.option_chain(parts.expiry.isoformat())
+            except Exception:  # noqa: BLE001
+                return None
         frame = chain.calls if parts.option_type == "call" else chain.puts
         if frame is None or frame.empty:
             return None
@@ -232,3 +241,67 @@ def _cell(row, key: str) -> float | None:
         return value
     except Exception:  # noqa: BLE001
         return None
+
+
+@contextmanager
+def _quiet_yahoo() -> Iterator[None]:
+    """Keep Yahoo HTTP/2 failures off the live desk (Alpaca remains primary)."""
+    saved: list[tuple[logging.Logger, int, bool]] = []
+    for name in ("yfinance", "curl_cffi"):
+        log = logging.getLogger(name)
+        saved.append((log, log.level, log.propagate))
+        log.setLevel(logging.CRITICAL)
+        log.propagate = False
+    old_err = sys.stderr
+    sys.stderr = _CurlNoiseFilter(old_err)  # type: ignore[assignment]
+    try:
+        yield
+    finally:
+        sys.stderr = old_err
+        for log, level, propagate in saved:
+            log.setLevel(level)
+            log.propagate = propagate
+
+
+def _is_curl_noise(text: str) -> bool:
+    t = text.strip()
+    if not t:
+        return False
+    return (
+        "Failed to perform, curl:" in t
+        or "libcurl-errors.html" in t
+        or "curl: (16)" in t
+    )
+
+
+class _CurlNoiseFilter:
+    def __init__(self, wrapped) -> None:
+        self._wrapped = wrapped
+        self._buf = ""
+
+    def write(self, data) -> int:
+        if not isinstance(data, str):
+            data = str(data)
+        self._buf += data
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            if not _is_curl_noise(line):
+                self._wrapped.write(line + "\n")
+        return len(data)
+
+    def flush(self) -> None:
+        if self._buf:
+            if not _is_curl_noise(self._buf):
+                self._wrapped.write(self._buf)
+            self._buf = ""
+        self._wrapped.flush()
+
+    def isatty(self) -> bool:
+        isatty = getattr(self._wrapped, "isatty", None)
+        return bool(isatty()) if callable(isatty) else False
+
+    def fileno(self) -> int:
+        return self._wrapped.fileno()
+
+    def __getattr__(self, name: str):
+        return getattr(self._wrapped, name)
