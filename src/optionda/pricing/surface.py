@@ -433,6 +433,9 @@ def _term_interpolated_strike_iv(surface: IvSurface, position: Any) -> float | N
 
 _ET = ZoneInfo("America/New_York")
 _RTH_CLOSE = (16, 0)
+# Last RTH prints are typically 15:59:59 ET, not 16:00:00. Count the last
+# half-hour as the close so a successful align is not stale on the next run.
+_CLOSE_QUOTE_SLACK = timedelta(minutes=30)
 
 
 def last_completed_session_date(now: datetime) -> date:
@@ -465,13 +468,14 @@ def is_surface_fresh(
     *,
     max_age: timedelta = MAX_SURFACE_AGE,
 ) -> bool:
-    """True when the surface was taken at or after the last 16:00 ET close.
+    """True when the surface is last-session close quotes, not a pre-open freeze.
 
-    A same-calendar-day pre-open freeze is not the close. ``max_age`` is kept
-    for callers; the close timestamp is the source of truth.
+    Alpaca stamps the last RTH print at 15:59:59 ET. Treat quotes in the last
+    half-hour of that session as the close. ``max_age`` is kept for callers.
     """
     del max_age
-    return _utc(surface.as_of) >= _utc(last_completed_close_at(now))
+    close_at = last_completed_close_at(now)
+    return _utc(surface.as_of) >= _utc(close_at) - _CLOSE_QUOTE_SLACK
 
 
 def _interpolate_iv_by_delta(

@@ -95,3 +95,13 @@ def test_preopen_same_calendar_day_is_not_the_close() -> None:
         _surface(datetime(2026, 8, 13, 20, 0, tzinfo=timezone.utc)),
         beijing_afternoon,
     )
+
+
+def test_close_prints_just_before_1600_count_as_the_close() -> None:
+    # Alpaca last RTH prints are typically 15:59:59 ET, not 16:00:00.
+    thu_last_print = _surface(
+        datetime(2026, 8, 13, 19, 59, 59, 536675, tzinfo=timezone.utc)
+    )
+    beijing_afternoon = datetime(2026, 8, 14, 7, 49, tzinfo=timezone.utc)
+    assert last_completed_session_date(beijing_afternoon) == date(2026, 8, 13)
+    assert is_surface_fresh(thu_last_print, beijing_afternoon)
