@@ -772,8 +772,29 @@ def _align_session_surfaces(
     if not stale:
         return
     session = last_completed_session_date(current)
-    console.print(f"[dim]aligning close IV to {session.month}/{session.day}…[/dim]")
-    _ensure_close_surfaces(account, stale, home=home, console=console, now=current)
+    label = f"align close IV {session.month}/{session.day}"
+    with _mark_progress() as progress:
+        task = progress.add_task(f"{label} 0/{len(stale)}", total=max(len(stale), 1))
+
+        def on_progress(step: str, done: int, steps: int) -> None:
+            progress.update(
+                task,
+                description=f"{label} {done}/{steps}  {step}",
+                completed=min(done, steps),
+                total=max(steps, 1),
+            )
+
+        result = ensure_surfaces(
+            account,
+            stale,
+            home=home,
+            now=current,
+            on_progress=on_progress,
+        )
+    for name, surface in result.surfaces.items():
+        console.print(f"[dim]surface {name} close={surface.spot:.2f}[/dim]")
+    for name, err in result.errors.items():
+        console.print(f"[yellow]surface {name}: {err}[/yellow]")
 
 
 def _has_aligned_surface(underlying: str, home, now: datetime) -> bool:

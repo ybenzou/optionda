@@ -412,6 +412,7 @@ def test_align_session_surfaces_only_refreshes_stale(tmp_path) -> None:
 
     def fake_ensure(acc, names, **kwargs):
         asked.append(list(names))
+        assert kwargs.get("on_progress") is not None
         return CalibrationResult()
 
     console = Console(file=__import__("io").StringIO(), width=80)
