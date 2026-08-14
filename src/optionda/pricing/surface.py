@@ -431,25 +431,41 @@ def _term_interpolated_strike_iv(surface: IvSurface, position: Any) -> float | N
     return (max(total_var, 0.0) / target_t) ** 0.5
 
 
+_ET = ZoneInfo("America/New_York")
+_RTH_CLOSE = (16, 0)
+
+
+def last_completed_session_date(now: datetime) -> date:
+    """US equity session date whose 16:00 ET close has already printed.
+
+    Before the close, and on weekends, this is the previous weekday.
+    NYSE holidays are not modeled — those days may need a manual refresh-iv.
+    """
+    local = _utc(now).astimezone(_ET)
+    session = local.date()
+    if (local.hour, local.minute) < _RTH_CLOSE:
+        session -= timedelta(days=1)
+    while session.weekday() >= 5:
+        session -= timedelta(days=1)
+    return session
+
+
+def surface_session_date(surface: IvSurface) -> date:
+    return _utc(surface.as_of).astimezone(_ET).date()
+
+
 def is_surface_fresh(
     surface: IvSurface,
     now: datetime,
     *,
     max_age: timedelta = MAX_SURFACE_AGE,
 ) -> bool:
-    age = _utc(now) - _utc(surface.as_of)
-    if age <= max_age:
-        return True
-    # Friday's close remains the only usable surface through the US weekend.
-    # Holiday handling is conservative: the regular age limit still applies.
-    eastern = ZoneInfo("America/New_York")
-    local_now = _utc(now).astimezone(eastern)
-    local_surface = _utc(surface.as_of).astimezone(eastern)
-    return (
-        local_surface.weekday() == 4
-        and local_now.weekday() in (5, 6)
-        and age <= timedelta(hours=84)
-    )
+    """True when the surface is the last completed RTH session.
+
+    ``max_age`` is kept for callers; session date is the source of truth.
+    """
+    del max_age
+    return surface_session_date(surface) == last_completed_session_date(now)
 
 
 def _interpolate_iv_by_delta(

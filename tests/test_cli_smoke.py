@@ -260,6 +260,16 @@ def test_cli_create_add_export(tmp_path, monkeypatch) -> None:
             assert "Chg$" not in out
 
 
+def test_paint_live_forces_refresh() -> None:
+    from unittest.mock import MagicMock
+
+    from optionda.cli import _paint_live
+
+    live = MagicMock()
+    _paint_live(live, "desk")
+    live.update.assert_called_once_with("desk", refresh=True)
+
+
 def test_run_ctrl_c_exits_without_nameerror(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("OPTIONDA_HOME", str(tmp_path))
     monkeypatch.setenv("OPTIONDA_ACTIVE", "demo")
@@ -338,3 +348,75 @@ def test_key_rejects_bad_credentials(tmp_path, monkeypatch) -> None:
         result = runner.invoke(app, ["key", "alpaca", "BAD", "SECRET"])
     assert result.exit_code == 1
     assert "not saved" in result.output
+
+
+def test_align_session_surfaces_only_refreshes_stale(tmp_path) -> None:
+    from rich.console import Console
+
+    from optionda.cli import _align_session_surfaces
+    from optionda.config import apply_feed_defaults, load_config, save_config
+    from optionda.credentials import save_alpaca
+    from optionda.engine import CalibrationResult
+    from optionda.models import Account, Position
+    from optionda.pricing.surface import ExpirySmile
+
+    save_alpaca("PKTEST", "SECRET", tmp_path)
+    save_config(apply_feed_defaults(load_config(tmp_path), "alpaca"), tmp_path)
+
+    thu = datetime(2026, 8, 13, 20, tzinfo=timezone.utc)
+    wed = datetime(2026, 8, 12, 20, tzinfo=timezone.utc)
+    friday_pre = datetime(2026, 8, 14, 6, 40, tzinfo=timezone.utc)
+
+    def _pos(occ: str, underlying: str) -> Position:
+        return Position(
+            occ_symbol=occ,
+            underlying=underlying,
+            expiry=date(2026, 12, 18),
+            strike=100.0,
+            option_type="call",
+            iv_frozen=0.3,
+            iv_as_of=thu,
+            entry_premium=5.0,
+        )
+
+    save_surface(
+        IvSurface(
+            underlying="AAPL",
+            spot=300.0,
+            as_of=thu,
+            source="test",
+            smiles=[ExpirySmile(expiry=date(2026, 11, 20), nodes=[])],
+            quality={},
+        ),
+        tmp_path,
+    )
+    save_surface(
+        IvSurface(
+            underlying="GOOG",
+            spot=330.0,
+            as_of=wed,
+            source="test",
+            smiles=[ExpirySmile(expiry=date(2026, 12, 18), nodes=[])],
+            quality={},
+        ),
+        tmp_path,
+    )
+    account = Account(
+        name="demo",
+        positions=[
+            _pos("AAPL261120C00350000", "AAPL"),
+            _pos("GOOG261218C00400000", "GOOG"),
+        ],
+    )
+    asked: list[list[str]] = []
+
+    def fake_ensure(acc, names, **kwargs):
+        asked.append(list(names))
+        return CalibrationResult()
+
+    console = Console(file=__import__("io").StringIO(), width=80)
+    with patch("optionda.cli.ensure_surfaces", side_effect=fake_ensure):
+        _align_session_surfaces(
+            account, home=tmp_path, console=console, now=friday_pre
+        )
+    assert asked == [["GOOG"]]

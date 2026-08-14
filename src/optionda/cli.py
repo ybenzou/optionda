@@ -83,7 +83,12 @@ from optionda.occ import (
     require_entry,
     resolve_qty,
 )
-from optionda.pricing.surface import is_surface_fresh, load_surface, sticky_delta_iv
+from optionda.pricing.surface import (
+    is_surface_fresh,
+    last_completed_session_date,
+    load_surface,
+    sticky_delta_iv,
+)
 from optionda.paths import resolve_home, resolve_home_info
 from optionda.promptenv import (
     install_current_env_prompt,
@@ -732,16 +737,48 @@ def _ensure_close_surfaces(
     *,
     home,
     console: Console,
+    now: datetime | None = None,
 ) -> None:
     """Build missing close IV surfaces so Spot % and Model IV use last session."""
     names = [name.strip().upper() for name in underlyings if name]
     if not names:
         return
-    result = ensure_surfaces(account, names, home=home)
+    result = ensure_surfaces(account, names, home=home, now=now)
     for name, surface in result.surfaces.items():
         console.print(f"[dim]surface {name} close={surface.spot:.2f}[/dim]")
     for name, err in result.errors.items():
         console.print(f"[yellow]surface {name}: {err}[/yellow]")
+
+
+def _align_session_surfaces(
+    account,
+    *,
+    home,
+    console: Console,
+    now: datetime | None = None,
+) -> None:
+    """Once, before run/export: calibrate names not on the last completed close."""
+    names = sorted({pos.underlying.upper() for pos in account.positions if pos.underlying})
+    if not names:
+        return
+    if MarketRouter(home).feed_name != "alpaca":
+        return
+    current = now or datetime.now(timezone.utc)
+    stale = [
+        name
+        for name in names
+        if not _has_aligned_surface(name, home, current)
+    ]
+    if not stale:
+        return
+    session = last_completed_session_date(current)
+    console.print(f"[dim]aligning close IV to {session.month}/{session.day}…[/dim]")
+    _ensure_close_surfaces(account, stale, home=home, console=console, now=current)
+
+
+def _has_aligned_surface(underlying: str, home, now: datetime) -> bool:
+    surface = load_surface(underlying, home)
+    return surface is not None and is_surface_fresh(surface, now)
 
 
 @app.command("delete")
@@ -1309,6 +1346,7 @@ def export_cmd() -> None:
         _err(str(exc))
         raise typer.Exit(1) from exc
     home = _home_opt()
+    _align_session_surfaces(acc, home=home, console=console)
     feed = MarketRouter(home).feed_name
     refresh = resolve_poll_interval(home)
     total = _mark_step_total(len(acc.positions))
@@ -1342,16 +1380,22 @@ def export_cmd() -> None:
     )
 
 
+def _paint_live(live: Live, renderable) -> None:
+    """Rich 15+ ``Live.update`` does not refresh unless asked."""
+    live.update(renderable, refresh=True)
+
+
 @app.command("run")
 def run_cmd() -> None:
     """Continuously refresh MODEL marks; each refresh appends to the account log."""
     home = _home_opt()
     store = _store()
     try:
-        store.require_current()
+        acc = store.require_current()
     except StoreError as exc:
         _err(str(exc))
         raise typer.Exit(1) from exc
+    _align_session_surfaces(acc, home=home, console=console)
 
     refresh = resolve_poll_interval(home)
     prev_spots: dict[str, float] = {}
@@ -1435,7 +1479,8 @@ def run_cmd() -> None:
         def on_live_progress(label: str, done: int, steps: int) -> None:
             frac = min(done, steps) / max(steps, 1)
             short = label if len(label) <= 42 else label[:39] + "…"
-            live.update(
+            _paint_live(
+                live,
                 _panel(
                     paint_acc,
                     paint_router,
@@ -1447,7 +1492,8 @@ def run_cmd() -> None:
                 )
             )
 
-        live.update(
+        _paint_live(
+            live,
             _panel(
                 paint_acc,
                 paint_router,
@@ -1455,12 +1501,13 @@ def run_cmd() -> None:
                 poll_fraction=0.0,
                 poll_label="updating…",
                 poll_busy=True,
-            )
+            ),
         )
         rows = mark_account(
             acc, home=home, router=router, on_progress=on_live_progress
         )
-        live.update(
+        _paint_live(
+            live,
             _panel(
                 paint_acc,
                 paint_router,
@@ -1468,7 +1515,7 @@ def run_cmd() -> None:
                 poll_fraction=1.0,
                 poll_label="writing…",
                 poll_busy=True,
-            )
+            ),
         )
         sync_book(acc, home)
         append_export_log(
@@ -1492,7 +1539,8 @@ def run_cmd() -> None:
         """Animate tick deltas before committing baselines (so moves are visible)."""
         deadline_hot = time.monotonic() + flash_hot_sec
         while time.monotonic() < deadline_hot:
-            live.update(
+            _paint_live(
+                live,
                 _panel(
                     acc,
                     router,
@@ -1506,7 +1554,8 @@ def run_cmd() -> None:
             time.sleep(0.08)
         deadline_warm = time.monotonic() + flash_warm_sec
         while time.monotonic() < deadline_warm:
-            live.update(
+            _paint_live(
+                live,
                 _panel(
                     acc,
                     router,
@@ -1527,15 +1576,15 @@ def run_cmd() -> None:
         with Live(
             console=console,
             auto_refresh=False,
-            screen=False,
-            vertical_overflow="crop",
+            screen=True,
         ) as live:
             while True:
                 for remaining in range(refresh, 0, -1):
                     for sub in range(8):
                         elapsed = (refresh - remaining) + (sub + 1) / 8.0
                         frac = min(1.0, elapsed / refresh)
-                        live.update(
+                        _paint_live(
+                            live,
                             _panel(
                                 acc,
                                 router,
@@ -1545,7 +1594,7 @@ def run_cmd() -> None:
                                 poll_fraction=frac,
                                 poll_label=f"{remaining}s",
                                 poll_busy=False,
-                            )
+                            ),
                         )
                         time.sleep(0.125)
                 # Keep prior baselines / table body while header bar shows fetch progress.
