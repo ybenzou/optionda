@@ -82,3 +82,16 @@ def test_surface_freshness_follows_last_completed_session() -> None:
     assert is_surface_fresh(thu_close, friday_pre)
     assert not is_surface_fresh(wed_close, friday_pre)
     assert not is_surface_fresh(thu_close, friday_close)
+
+
+def test_preopen_same_calendar_day_is_not_the_close() -> None:
+    # 8/13 10:00 ET — after midnight, before the 16:00 close.
+    thu_preopen = _surface(datetime(2026, 8, 13, 14, 0, tzinfo=timezone.utc))
+    # Beijing 8/14 15:19 == 8/14 03:19 ET; last completed close is 8/13 16:00 ET.
+    beijing_afternoon = datetime(2026, 8, 14, 7, 19, tzinfo=timezone.utc)
+    assert last_completed_session_date(beijing_afternoon) == date(2026, 8, 13)
+    assert not is_surface_fresh(thu_preopen, beijing_afternoon)
+    assert is_surface_fresh(
+        _surface(datetime(2026, 8, 13, 20, 0, tzinfo=timezone.utc)),
+        beijing_afternoon,
+    )

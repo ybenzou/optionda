@@ -441,13 +441,18 @@ def last_completed_session_date(now: datetime) -> date:
     Before the close, and on weekends, this is the previous weekday.
     NYSE holidays are not modeled — those days may need a manual refresh-iv.
     """
+    return last_completed_close_at(now).astimezone(_ET).date()
+
+
+def last_completed_close_at(now: datetime) -> datetime:
+    """16:00 ET of the last weekday whose regular close has already printed."""
     local = _utc(now).astimezone(_ET)
     session = local.date()
     if (local.hour, local.minute) < _RTH_CLOSE:
         session -= timedelta(days=1)
     while session.weekday() >= 5:
         session -= timedelta(days=1)
-    return session
+    return datetime(session.year, session.month, session.day, 16, 0, tzinfo=_ET)
 
 
 def surface_session_date(surface: IvSurface) -> date:
@@ -460,12 +465,13 @@ def is_surface_fresh(
     *,
     max_age: timedelta = MAX_SURFACE_AGE,
 ) -> bool:
-    """True when the surface is the last completed RTH session.
+    """True when the surface was taken at or after the last 16:00 ET close.
 
-    ``max_age`` is kept for callers; session date is the source of truth.
+    A same-calendar-day pre-open freeze is not the close. ``max_age`` is kept
+    for callers; the close timestamp is the source of truth.
     """
     del max_age
-    return surface_session_date(surface) == last_completed_session_date(now)
+    return _utc(surface.as_of) >= _utc(last_completed_close_at(now))
 
 
 def _interpolate_iv_by_delta(
