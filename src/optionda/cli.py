@@ -35,7 +35,7 @@ from optionda.display.surface_plot import (
     sample_iv_grid,
     show_figure_in_browser,
 )
-from optionda.display.table import render_snapshot, spinner_frame
+from optionda.display.table import render_snapshot
 import sys
 
 from optionda.add_resolve import (
@@ -1358,7 +1358,6 @@ def run_cmd() -> None:
     prev_theos: dict[str, float] = {}
     prev_notionals: dict[str, float] = {}
     prev_upnls: dict[str, float] = {}
-    tick = 0
     flash_hot_sec = 0.55
     flash_warm_sec = 0.85
 
@@ -1373,8 +1372,6 @@ def run_cmd() -> None:
         poll_label: str | None = None,
         poll_busy: bool = False,
     ):
-        nonlocal tick
-        tick += 1
         realized = float(realized_pnl_summary(acc.name, home)["realized"])
         return render_snapshot(
             account=acc.name,
@@ -1387,7 +1384,6 @@ def run_cmd() -> None:
             prev_upnls=prev_upnls or None,
             realized=realized,
             continuous=True,
-            spin=spinner_frame(tick),
             eta_sec=eta,
             flash_phase=flash_phase,
             poll_fraction=poll_fraction,
@@ -1528,7 +1524,12 @@ def run_cmd() -> None:
         acc, router, rows = _fetch_rows(live=None)
         _commit_prev(rows)
 
-        with Live(console=console, refresh_per_second=12, screen=False) as live:
+        with Live(
+            console=console,
+            auto_refresh=False,
+            screen=False,
+            vertical_overflow="crop",
+        ) as live:
             while True:
                 for remaining in range(refresh, 0, -1):
                     for sub in range(8):

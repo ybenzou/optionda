@@ -322,26 +322,6 @@ def _footer_upnl(
     return _pnl_text(value)
 
 
-def _status_suffix(
-    *,
-    continuous: bool,
-    spin: str | None,
-    phase: FlashPhase,
-    poll_busy: bool,
-    poll_label: str | None,
-) -> Text | None:
-    if not continuous:
-        return None
-    frame = spin or spinner_frame(0)
-    if phase == "hot":
-        return Text(f"{frame} refreshed", style="bold green")
-    if phase == "warm":
-        return Text(f"{frame} refreshed", style="cyan")
-    if poll_busy:
-        return Text(f"{frame} {poll_label or 'updating…'}".rstrip(), style="yellow")
-    return Text(f"{frame} live", style="cyan")
-
-
 def render_snapshot(
     *,
     account: str,
@@ -495,17 +475,6 @@ def render_snapshot(
             ),
         )
 
-    status = _status_suffix(
-        continuous=continuous,
-        spin=spin,
-        phase=phase,
-        poll_busy=poll_busy,
-        poll_label=poll_label,
-    )
-    if status is not None:
-        table.caption = status
-        table.caption_justify = "right"
-
     border = _border_style(continuous=continuous, phase=phase, poll_busy=poll_busy)
     title = Text.assemble(
         (f"[{account}]", "bold cyan"),
@@ -523,7 +492,6 @@ def render_snapshot(
                 poll_label=poll_label,
                 poll_busy=poll_busy,
             ),
-            Text(""),
             table,
         ),
         title=title,

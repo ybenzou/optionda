@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from optionda.display.table import (
     _dir_style,
@@ -10,7 +10,9 @@ from optionda.display.table import (
     _pnl_flash,
     _spot_cell,
     _spot_chg_pct,
+    render_snapshot,
 )
+from optionda.models import Position, RowMark
 
 
 def test_move_direction():
@@ -83,3 +85,40 @@ def test_model_iv_shows_et_session_date():
     stale = _model_iv_cell(0.40, as_of, stale=True)
     assert "8/12" in stale.plain
     assert any(span.style == "bold yellow" for span in stale.spans)
+
+
+def test_continuous_desk_has_no_bottom_live_caption() -> None:
+    pos = Position(
+        occ_symbol="AAPL261120C00350000",
+        underlying="AAPL",
+        expiry=date(2026, 11, 20),
+        strike=350.0,
+        option_type="call",
+        qty=1,
+        side="long",
+        iv_frozen=0.25,
+        iv_as_of=datetime(2026, 8, 12, 20, tzinfo=timezone.utc),
+        entry_premium=3.5,
+    )
+    group = render_snapshot(
+        account="main",
+        feed="alpaca",
+        refresh_sec=15,
+        rows=[
+            RowMark(
+                position=pos,
+                spot=305.0,
+                theo=3.8,
+                delta=0.19,
+                dte=98.0,
+                notional=380.0,
+                cost=3.5,
+                upnl=30.0,
+            )
+        ],
+        continuous=True,
+        spin="⠹",
+    )
+    panel = group.renderables[0]
+    table = panel.renderable.renderables[-1]
+    assert table.caption is None
