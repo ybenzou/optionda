@@ -79,11 +79,13 @@ def test_dispatch_create_and_list(tmp_path, monkeypatch) -> None:
 def test_dispatch_pack_uses_cli(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("OPTIONDA_HOME", str(tmp_path))
     monkeypatch.setenv("OPTIONDA_ACTIVE", "demo")
+    monkeypatch.chdir(tmp_path)
     assert dispatch("create demo", home=tmp_path).code == 0
     assert dispatch("activate demo", home=tmp_path).code == 0
     packed = dispatch("pack", home=tmp_path)
     assert packed.code == 0, packed.text
-    assert "oda1." in packed.text or "packed" in packed.text.lower()
+    assert "wrote" in packed.text.lower() or "packed" in packed.text.lower()
+    assert (tmp_path / "demo.oda").exists()
 
 
 def test_desk_runner_export_paints_progress(tmp_path, monkeypatch) -> None:

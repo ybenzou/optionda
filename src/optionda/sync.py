@@ -350,3 +350,59 @@ def unpack_code(
     bundle = decode_code(cleaned)
     apply_bundle(store, bundle, home=home, overwrite=overwrite)
     return bundle
+
+
+def default_oda_path(account: str, directory: Path | None = None) -> Path:
+    safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in account) or "account"
+    root = directory if directory is not None else Path.cwd()
+    return Path(root) / f"{safe}.oda"
+
+
+def write_oda(path: Path, packed: PackResult) -> Path:
+    dest = Path(path).expanduser()
+    if dest.suffix.lower() != ".oda":
+        dest = dest.with_suffix(".oda")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(packed.code + "\n", encoding="ascii")
+    return dest
+
+
+def _extract_code(block: str) -> str:
+    raw = ""
+    for line in block.splitlines():
+        line = line.strip()
+        if line.startswith(PREFIX):
+            raw = line
+            break
+    if not raw and block.strip().startswith(PREFIX):
+        raw = block.strip().splitlines()[0].strip()
+    if not raw:
+        raise SyncError("no oda1. sync code found")
+    return raw.replace(" ", "")
+
+
+def read_pack_text(source: str | Path) -> str:
+    text = str(source).strip()
+    path = Path(text)
+    if path.exists() and path.is_file():
+        return _extract_code(path.read_text(encoding="utf-8"))
+    if text.startswith(PREFIX):
+        return text.replace("\n", "").replace(" ", "")
+    raise SyncError(f"not a pack file or oda1. code: {text}")
+
+
+def unpack_source(
+    store: AccountStore,
+    source: str | Path,
+    *,
+    home: Path | None = None,
+    sha256: str | None = None,
+    overwrite: bool = False,
+) -> Bundle:
+    return unpack_code(
+        store,
+        read_pack_text(source),
+        home=home,
+        sha256=sha256,
+        overwrite=overwrite,
+    )

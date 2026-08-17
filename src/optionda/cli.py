@@ -106,7 +106,14 @@ from optionda.shellenv import (
     render_shellenv,
 )
 from optionda.store import AccountStore, StoreError, realized_pnl_summary
-from optionda.sync import SyncError, pack_account, unpack_code
+from optionda.sync import (
+    SyncError,
+    default_oda_path,
+    pack_account,
+    read_pack_text,
+    unpack_code,
+    write_oda,
+)
 
 app = typer.Typer(
     name="optionda",
@@ -983,15 +990,28 @@ def stats_cmd(
 
 
 @app.command("pack")
-def pack_cmd() -> None:
-    """Export active account + slim journal + keys as a pasteable sync code."""
+def pack_cmd(
+    output: Optional[Path] = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="write .oda file (default: ./<account>.oda)",
+    ),
+) -> None:
+    """Export active account + slim journal + keys to an .oda file."""
     store = _store()
     try:
         packed = pack_account(store, home=_home_opt())
     except SyncError as exc:
         _err(str(exc))
         raise typer.Exit(1) from exc
-    console.print(packed.code)
+    path = Path(output) if output is not None else default_oda_path(packed.account)
+    try:
+        written = write_oda(path, packed)
+    except OSError as exc:
+        _err(f"could not write {path}: {exc}")
+        raise typer.Exit(1) from exc
+    console.print(f"wrote {written}")
     console.print(f"sha256:{packed.sha256}")
     console.print(
         f"[dim]packed {packed.account}  positions={packed.n_positions}  "
@@ -1002,9 +1022,9 @@ def pack_cmd() -> None:
 
 @app.command("unpack")
 def unpack_cmd(
-    code: Optional[str] = typer.Argument(
+    source: Optional[str] = typer.Argument(
         None,
-        help="oda1.… sync code (omit to paste one line on stdin)",
+        help=".oda file or oda1.… code (omit to type a path)",
     ),
     sha256: Optional[str] = typer.Option(
         None,
@@ -1023,33 +1043,21 @@ def unpack_cmd(
         help="skip automatic refresh-iv after import",
     ),
 ) -> None:
-    """Import a pack code: replace account and journal, restore keys, then refresh-iv."""
+    """Import an .oda file: replace account and journal, restore keys, then refresh-iv."""
     store = _store()
     home = _home_opt()
-    block = (code or "").strip()
+    block = (source or "").strip()
     if not block:
         if not sys.stdin.isatty():
             block = sys.stdin.read().strip()
         else:
-            console.print("[dim]paste sync code, then Enter[/dim]")
+            console.print("[dim]path to .oda file, then Enter[/dim]")
             block = input().strip()
-    raw = ""
-    sha_from_block: str | None = None
-    for line in block.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        if line.startswith("oda1.") and not raw:
-            raw = line
-        elif line.lower().startswith("sha256:") and sha_from_block is None:
-            sha_from_block = line.split(":", 1)[1].strip()
-    if not raw and block.startswith("oda1."):
-        raw = block.splitlines()[0].strip()
-    if not raw:
-        _err("no sync code provided")
-        raise typer.Exit(1)
-    if sha256 is None and sha_from_block:
-        sha256 = sha_from_block
+    try:
+        raw = read_pack_text(block)
+    except SyncError as exc:
+        _err(str(exc))
+        raise typer.Exit(1) from exc
 
     # Peek account name for overwrite prompt without applying yet.
     from optionda.sync import decode_code

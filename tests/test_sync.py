@@ -17,7 +17,10 @@ from optionda.sync import (
     encode_payload,
     fingerprint,
     pack_account,
+    read_pack_text,
     unpack_code,
+    unpack_source,
+    write_oda,
 )
 
 
@@ -210,6 +213,38 @@ def test_v1_pack_does_not_replace_destination_journal(tmp_path, monkeypatch) -> 
     unpack_code(dest_store, packed.code, home=dest, overwrite=True)
     kept = read_events(log_path("desk", dest))
     assert kept[0]["id"] == "keep"
+
+
+def test_pack_file_roundtrip(tmp_path, monkeypatch) -> None:
+    store = AccountStore(tmp_path)
+    store.create("desk")
+    monkeypatch.setenv("OPTIONDA_ACTIVE", "desk")
+    store.add_position(None, _pos())
+    packed = pack_account(store, home=tmp_path)
+    path = write_oda(tmp_path / "desk.oda", packed)
+    assert path.name == "desk.oda"
+    assert path.read_text(encoding="utf-8").startswith(PREFIX)
+
+    dest = tmp_path / "dest"
+    other = AccountStore(dest)
+    bundle = unpack_source(other, path, home=dest, overwrite=True)
+    assert bundle.account.name == "desk"
+    assert len(other.load("desk").positions) == 1
+    assert read_pack_text(path).startswith(PREFIX)
+
+
+def test_read_pack_text_still_accepts_oda1_code(tmp_path, monkeypatch) -> None:
+    store = AccountStore(tmp_path)
+    store.create("desk")
+    monkeypatch.setenv("OPTIONDA_ACTIVE", "desk")
+    store.add_position(None, _pos())
+    packed = pack_account(store, home=tmp_path)
+    assert read_pack_text(packed.code).startswith(PREFIX)
+
+
+def test_read_pack_text_rejects_missing_file() -> None:
+    with pytest.raises(SyncError, match="not a pack"):
+        read_pack_text("missing.oda")
 
 
 def test_invalid_journal_rejects_unpack(tmp_path, monkeypatch) -> None:
