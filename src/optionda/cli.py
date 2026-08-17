@@ -111,7 +111,7 @@ from optionda.sync import SyncError, pack_account, unpack_code
 app = typer.Typer(
     name="optionda",
     help="Terminal options desk — MODEL marks with frozen IV.",
-    no_args_is_help=True,
+    no_args_is_help=False,
     add_completion=False,
 )
 console = Console()
@@ -151,8 +151,9 @@ def _version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
-@app.callback()
+@app.callback(invoke_without_command=True)
 def _root(
+    ctx: typer.Context,
     version: bool = typer.Option(
         False,
         "--version",
@@ -162,6 +163,8 @@ def _root(
     ),
 ) -> None:
     _ = version
+    if ctx.invoked_subcommand is None:
+        _launch_shell()
 
 
 @app.command("key")
@@ -888,6 +891,95 @@ def realized_cmd() -> None:
     )
     for occ, pnl in sorted(summary["by_occ"].items()):
         console.print(f"  {occ}  ${pnl:,.2f}")
+    console.print("[dim]calendar / win rate / habits: optionda stats[/dim]")
+
+
+def _launch_shell(*, foreground: bool = False) -> None:
+    from optionda.gui.launch import run_app
+
+    name = _store().active_name() or ""
+    run_app(
+        name,
+        _home_opt(),
+        period="all",
+        initial_view="term",
+        foreground=foreground,
+    )
+    if not foreground:
+        console.print("optionda opened")
+
+
+def _launch_desk(
+    period: str,
+    *,
+    initial_view: str,
+    foreground: bool,
+) -> None:
+    store = _store()
+    try:
+        acc = store.require_current()
+    except StoreError as exc:
+        _err(str(exc))
+        raise typer.Exit(1) from exc
+    key = (period or "all").strip().lower()
+    if key in {"1", "1m", "month"}:
+        key = "1m"
+    elif key in {"3", "3m"}:
+        key = "3m"
+    elif key in {"6", "6m"}:
+        key = "6m"
+    elif key in {"a", "all"}:
+        key = "all"
+    else:
+        _err("period must be 1m, 3m, 6m, or all")
+        raise typer.Exit(1)
+    from optionda.gui.launch import run_app
+
+    run_app(
+        acc.name,
+        _home_opt(),
+        period=key,  # type: ignore[arg-type]
+        initial_view=initial_view,  # type: ignore[arg-type]
+        foreground=foreground,
+    )
+    if not foreground:
+        console.print("Stats window opened")
+
+
+@app.command("desk")
+def desk_cmd(
+    period: str = typer.Option(
+        "all",
+        "--period",
+        "-p",
+        help="Lookback (stats always uses all: first buy to now).",
+    ),
+    foreground: bool = typer.Option(
+        False,
+        "--foreground",
+        help="Keep the window attached to this terminal (debug).",
+    ),
+) -> None:
+    """Open the native desk window (Stats page). Does not replace run."""
+    _launch_desk(period, initial_view="desk", foreground=foreground)
+
+
+@app.command("stats")
+def stats_cmd(
+    period: str = typer.Option(
+        "all",
+        "--period",
+        "-p",
+        help="Lookback (stats always uses all: first buy to now).",
+    ),
+    foreground: bool = typer.Option(
+        False,
+        "--foreground",
+        help="Keep the window attached to this terminal (debug).",
+    ),
+) -> None:
+    """Open the native Stats analysis window."""
+    _launch_desk(period, initial_view="stats", foreground=foreground)
 
 
 @app.command("pack")
@@ -1375,9 +1467,8 @@ def verify_cmd() -> None:
     )
 
 
-@app.command("export")
-def export_cmd() -> None:
-    """Print a MODEL snapshot and append it to the account log under ~/.optionda."""
+def snapshot_once(*, source: str) -> None:
+    """One MODEL mark. Used by export and the GUI ``run``."""
     store = _store()
     try:
         acc = store.require_current()
@@ -1405,7 +1496,7 @@ def export_cmd() -> None:
             total=n_pos,
         )
         sync_book(acc, home)
-        append_export_log(acc, rows, feed=feed, home=home, source="export")
+        append_export_log(acc, rows, feed=feed, home=home, source=source)
 
     realized = float(realized_pnl_summary(acc.name, home)["realized"])
     console.print(
@@ -1420,6 +1511,12 @@ def export_cmd() -> None:
     )
 
 
+@app.command("export")
+def export_cmd() -> None:
+    """Print a MODEL snapshot and append it to the account log under ~/.optionda."""
+    snapshot_once(source="export")
+
+
 def _paint_live(live: Live, renderable) -> None:
     """Rich 15+ ``Live.update`` does not refresh unless asked."""
     live.update(renderable, refresh=True)
@@ -1431,265 +1528,14 @@ def run_cmd() -> None:
     home = _home_opt()
     store = _store()
     try:
-        acc = store.require_current()
+        store.require_current()
     except StoreError as exc:
         _err(str(exc))
         raise typer.Exit(1) from exc
-    sync = _sync_session(acc, home=home, console=console)
-    next_close_at = sync.next_close_at
-    next_retry_at = sync.next_retry_at
+    from optionda.desk_live import run_forever
 
-    refresh = resolve_poll_interval(home)
-    prev_spots: dict[str, float] = {}
-    prev_theos: dict[str, float] = {}
-    prev_notionals: dict[str, float] = {}
-    prev_upnls: dict[str, float] = {}
-    flash_hot_sec = 0.55
-    flash_warm_sec = 0.85
-
-    def _panel(
-        acc,
-        router,
-        rows,
-        *,
-        eta: int | None = None,
-        flash_phase: str = "idle",
-        poll_fraction: float = 0.0,
-        poll_label: str | None = None,
-        poll_busy: bool = False,
-        poll_done: int | None = None,
-        poll_total: int | None = None,
-    ):
-        realized = float(realized_pnl_summary(acc.name, home)["realized"])
-        return render_snapshot(
-            account=acc.name,
-            feed=router.feed_name,
-            refresh_sec=refresh,
-            rows=rows,
-            prev_spots=prev_spots or None,
-            prev_theos=prev_theos or None,
-            prev_notionals=prev_notionals or None,
-            prev_upnls=prev_upnls or None,
-            realized=realized,
-            continuous=True,
-            eta_sec=eta,
-            flash_phase=flash_phase,
-            poll_fraction=poll_fraction,
-            poll_label=poll_label,
-            poll_busy=poll_busy,
-            poll_done=poll_done,
-            poll_total=poll_total,
-        )
-
-    def _fetch_rows(
-        *,
-        live: Live | None = None,
-        hold_acc=None,
-        hold_router=None,
-        hold_rows=None,
-    ):
-        """Mark account. Under Live, keep the last table painted; only the header bar moves."""
-        acc = store.require_current()
-        router = MarketRouter(home)
-        nonlocal next_close_at, next_retry_at
-
-        def _maybe_sync(on_progress, *, announce: bool) -> None:
-            nonlocal next_close_at, next_retry_at
-            if not session_due(
-                datetime.now(timezone.utc),
-                next_close_at=next_close_at,
-                next_retry_at=next_retry_at,
-            ):
-                return
-            synced = _sync_session(
-                acc,
-                home=home,
-                console=console,
-                on_progress=on_progress,
-                announce=announce,
-            )
-            next_close_at = synced.next_close_at
-            next_retry_at = synced.next_retry_at
-            if synced.completed_session is not None:
-                sync.completed_session = synced.completed_session
-
-        if live is None:
-            _maybe_sync(None, announce=True)
-            with _mark_progress() as progress:
-                task = progress.add_task("1/2 fetch", total=1)
-                on_progress = _bind_progress(progress, task)
-                rows = mark_account(
-                    acc,
-                    home=home,
-                    router=router,
-                    on_progress=on_progress,
-                    completed_session=sync.completed_session,
-                )
-                n_pos = max(len(acc.positions), 1)
-                progress.update(
-                    task,
-                    description="2/2 mark  writing…",
-                    completed=n_pos,
-                    total=n_pos,
-                )
-                sync_book(acc, home)
-                append_export_log(
-                    acc, rows, feed=router.feed_name, home=home, source="run"
-                )
-            return acc, router, rows
-
-        # In-place refresh: reuse previous snapshot body while header bar advances.
-        paint_acc = hold_acc or acc
-        paint_router = hold_router or router
-        paint_rows = hold_rows or []
-
-        def on_live_progress(label: str, done: int, steps: int) -> None:
-            frac = min(done, steps) / max(steps, 1)
-            _paint_live(
-                live,
-                _panel(
-                    paint_acc,
-                    paint_router,
-                    paint_rows,
-                    poll_fraction=frac,
-                    poll_label=label,
-                    poll_busy=True,
-                    poll_done=done,
-                    poll_total=steps,
-                    flash_phase="idle",
-                )
-            )
-
-        _paint_live(
-            live,
-            _panel(
-                paint_acc,
-                paint_router,
-                paint_rows,
-                poll_fraction=0.0,
-                poll_label="updating…",
-                poll_busy=True,
-            ),
-        )
-        _maybe_sync(on_live_progress, announce=False)
-        rows = mark_account(
-            acc,
-            home=home,
-            router=router,
-            on_progress=on_live_progress,
-            completed_session=sync.completed_session,
-        )
-        _paint_live(
-            live,
-            _panel(
-                paint_acc,
-                paint_router,
-                paint_rows,
-                poll_fraction=1.0,
-                poll_label="writing…",
-                poll_busy=True,
-            ),
-        )
-        sync_book(acc, home)
-        append_export_log(
-            acc, rows, feed=router.feed_name, home=home, source="run"
-        )
-        return acc, router, rows
-
-    def _commit_prev(rows) -> None:
-        for row in rows:
-            pid = row.position.id
-            if row.spot is not None:
-                prev_spots[pid] = row.spot
-            if row.theo is not None:
-                prev_theos[pid] = row.theo
-            if row.notional is not None:
-                prev_notionals[pid] = row.notional
-            if row.upnl is not None:
-                prev_upnls[pid] = row.upnl
-
-    def _play_flash(live: Live, acc, router, rows) -> None:
-        """Animate tick deltas before committing baselines (so moves are visible)."""
-        deadline_hot = time.monotonic() + flash_hot_sec
-        while time.monotonic() < deadline_hot:
-            _paint_live(
-                live,
-                _panel(
-                    acc,
-                    router,
-                    rows,
-                    eta=refresh,
-                    flash_phase="hot",
-                    poll_fraction=1.0,
-                    poll_label="0s",
-                )
-            )
-            time.sleep(0.08)
-        deadline_warm = time.monotonic() + flash_warm_sec
-        while time.monotonic() < deadline_warm:
-            _paint_live(
-                live,
-                _panel(
-                    acc,
-                    router,
-                    rows,
-                    eta=refresh,
-                    flash_phase="warm",
-                    poll_fraction=1.0,
-                    poll_label="0s",
-                )
-            )
-            time.sleep(0.1)
-
-    def _idle_until(live: Live, acc, router, rows, seconds: float) -> None:
-        """Wait out the unused part of the refresh interval; skip if fetch already used it."""
-        if seconds <= 0:
-            return
-        deadline = time.monotonic() + seconds
-        while True:
-            left = deadline - time.monotonic()
-            if left <= 0:
-                break
-            frac = min(1.0, 1.0 - (left / seconds))
-            eta = max(1, int(left) if left == int(left) else int(left) + 1)
-            _paint_live(
-                live,
-                _panel(
-                    acc,
-                    router,
-                    rows,
-                    eta=eta,
-                    flash_phase="idle",
-                    poll_fraction=frac,
-                    poll_label=f"{eta}s",
-                    poll_busy=False,
-                ),
-            )
-            time.sleep(min(0.125, left))
-
-    # First mark before Live — same progress bar as export
     try:
-        cycle_started = time.monotonic()
-        acc, router, rows = _fetch_rows(live=None)
-        _commit_prev(rows)
-
-        with Live(
-            console=console,
-            auto_refresh=False,
-            screen=True,
-        ) as live:
-            while True:
-                remain = refresh - (time.monotonic() - cycle_started)
-                _idle_until(live, acc, router, rows, remain)
-                cycle_started = time.monotonic()
-                acc, router, rows = _fetch_rows(
-                    live=live,
-                    hold_acc=acc,
-                    hold_router=router,
-                    hold_rows=rows,
-                )
-                _play_flash(live, acc, router, rows)
-                _commit_prev(rows)
+        run_forever(home=home, store=store, console=console)
     except KeyboardInterrupt:
         name = store.active_name() or "optionda"
         console.print(f"\n[dim]stopped · log: {log_path(name, home)}[/dim]")

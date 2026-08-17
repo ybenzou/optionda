@@ -28,6 +28,7 @@ class Position(BaseModel):
     iv_source: str | None = None
     entry_premium: float | None = None
     multiplier: int = 100
+    opened_at: datetime | None = None
 
     @field_validator("underlying")
     @classmethod

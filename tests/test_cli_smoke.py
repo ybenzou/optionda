@@ -280,8 +280,15 @@ def test_run_ctrl_c_exits_without_nameerror(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("OPTIONDA_HOME", str(tmp_path))
     monkeypatch.setenv("OPTIONDA_ACTIVE", "demo")
     assert runner.invoke(app, ["create", "demo"]).exit_code == 0
-    with patch("optionda.cli.mark_account", return_value=[]), patch(
-        "optionda.cli.time.sleep", side_effect=KeyboardInterrupt
+    from optionda.market.session import SessionSyncResult
+
+    with (
+        patch("optionda.desk_live.mark_account", return_value=[]),
+        patch(
+            "optionda.desk_live.sync_completed_session",
+            return_value=SessionSyncResult(),
+        ),
+        patch("optionda.desk_live.time.sleep", side_effect=KeyboardInterrupt),
     ):
         result = runner.invoke(app, ["run"])
     text = f"{result.output or ''}\n{result.exception!r}"
@@ -434,11 +441,11 @@ def test_run_syncs_once_at_start(tmp_path, monkeypatch) -> None:
 
     with (
         patch(
-            "optionda.cli.sync_completed_session",
+            "optionda.desk_live.sync_completed_session",
             return_value=SessionSyncResult(),
         ) as sync,
-        patch("optionda.cli.mark_account", return_value=[]),
-        patch("optionda.cli.time.sleep", side_effect=KeyboardInterrupt),
+        patch("optionda.desk_live.mark_account", return_value=[]),
+        patch("optionda.desk_live.time.sleep", side_effect=KeyboardInterrupt),
     ):
         result = runner.invoke(app, ["run"])
     assert "stopped" in (result.output or "").lower()
@@ -478,11 +485,11 @@ def test_run_resyncs_after_close_boundary(tmp_path, monkeypatch) -> None:
             raise KeyboardInterrupt
 
     with (
-        patch("optionda.cli.sync_completed_session", side_effect=fake_sync),
-        patch("optionda.cli.session_due", side_effect=fake_due),
-        patch("optionda.cli.mark_account", return_value=[]),
-        patch("optionda.cli.time.sleep", side_effect=fake_sleep),
-        patch("optionda.cli.resolve_poll_interval", return_value=0),
+        patch("optionda.desk_live.sync_completed_session", side_effect=fake_sync),
+        patch("optionda.desk_live.session_due", side_effect=fake_due),
+        patch("optionda.desk_live.mark_account", return_value=[]),
+        patch("optionda.desk_live.time.sleep", side_effect=fake_sleep),
+        patch("optionda.desk_live.resolve_poll_interval", return_value=0),
     ):
         result = runner.invoke(app, ["run"])
     assert calls["n"] >= 2

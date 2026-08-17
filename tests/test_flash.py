@@ -5,6 +5,7 @@ from optionda.display.table import (
     _dir_style,
     _fit_width,
     _inline_bar,
+    spinner_frame,
     _iv_asof_label,
     _model_cell,
     _model_iv_cell,
@@ -76,13 +77,21 @@ def test_poll_status_width_is_stable():
     assert len(idle) == _STATUS_WIDTH
 
 
+def test_spinner_frame_cycles() -> None:
+    assert spinner_frame(0) == "⠋"
+    assert spinner_frame(1) == "⠙"
+    assert spinner_frame(0) != spinner_frame(1)
+    assert spinner_frame(10) == spinner_frame(0)
+
+
 def test_inline_bar_fills():
     empty = _inline_bar(0.0, width=10)
     full = _inline_bar(1.0, width=10)
     busy = _inline_bar(0.5, width=10, busy=True)
-    assert empty.plain == "─" * 10
-    assert full.plain == "━" * 10
-    assert "yellow" in str(busy.style)
+    assert empty.plain == "-" * 10
+    assert full.plain == "#" * 10
+    assert busy.plain == "#####-----"
+    assert any(span.style == "bold yellow" for span in busy.spans)
 
 
 def test_spot_chg_pct_vs_close():
@@ -166,6 +175,141 @@ def test_continuous_desk_has_no_bottom_live_caption() -> None:
     panel = group.renderables[0]
     table = panel.renderable.renderables[-1]
     assert table.caption is None
+
+
+def test_session_notes_stay_inside_snapshot() -> None:
+    pos = Position(
+        occ_symbol="AAPL261120C00350000",
+        underlying="AAPL",
+        expiry=date(2026, 11, 20),
+        strike=350.0,
+        option_type="call",
+        qty=1,
+        side="long",
+        iv_frozen=0.25,
+        iv_as_of=datetime(2026, 8, 12, 20, tzinfo=timezone.utc),
+        entry_premium=3.5,
+    )
+    group = render_snapshot(
+        account="main",
+        feed="alpaca",
+        refresh_sec=15,
+        rows=[
+            RowMark(
+                position=pos,
+                spot=305.0,
+                theo=3.8,
+                delta=0.19,
+                dte=98.0,
+                notional=380.0,
+                cost=3.5,
+                upnl=30.0,
+            )
+        ],
+        continuous=True,
+        notes=["completed session 8/14"],
+    )
+    texts = [item.plain for item in group.renderables[0].renderable.renderables if hasattr(item, "plain")]
+    assert any("completed session 8/14" in text for text in texts)
+
+
+def test_iv_and_close_share_the_progress_line() -> None:
+    pos = Position(
+        occ_symbol="AAPL261120C00350000",
+        underlying="AAPL",
+        expiry=date(2026, 11, 20),
+        strike=350.0,
+        option_type="call",
+        qty=1,
+        side="long",
+        iv_frozen=0.25,
+        iv_as_of=datetime(2026, 8, 12, 20, tzinfo=timezone.utc),
+        entry_premium=3.5,
+    )
+    group = render_snapshot(
+        account="main",
+        feed="alpaca",
+        refresh_sec=15,
+        rows=[
+            RowMark(
+                position=pos,
+                spot=305.0,
+                theo=3.8,
+                delta=0.19,
+                dte=98.0,
+                notional=380.0,
+                cost=3.5,
+                upnl=30.0,
+                surface_session_date=date(2026, 8, 14),
+                reference_session_date=date(2026, 8, 14),
+            )
+        ],
+        continuous=True,
+        framed=False,
+    )
+    meta = group.renderables[1]
+    assert "alpaca" in meta.plain
+    assert "IV 8/14" in meta.plain
+    assert "close 8/14" in meta.plain
+    assert meta.plain.count("\n") == 0
+
+
+def test_unframed_snapshot_keeps_title_on_first_line() -> None:
+    group = render_snapshot(
+        account="main",
+        feed="alpaca",
+        refresh_sec=15,
+        rows=[],
+        continuous=True,
+        framed=False,
+    )
+    assert "[main]" in group.renderables[0].plain
+    assert "optionda" in group.renderables[0].plain
+
+
+def test_busy_header_uses_spinner_not_bar() -> None:
+    pos = Position(
+        occ_symbol="AAPL261120C00350000",
+        underlying="AAPL",
+        expiry=date(2026, 11, 20),
+        strike=350.0,
+        option_type="call",
+        qty=1,
+        side="long",
+        iv_frozen=0.25,
+        iv_as_of=datetime(2026, 8, 12, 20, tzinfo=timezone.utc),
+        entry_premium=3.5,
+    )
+    group = render_snapshot(
+        account="main",
+        feed="alpaca",
+        refresh_sec=15,
+        rows=[
+            RowMark(
+                position=pos,
+                spot=305.0,
+                theo=3.8,
+                delta=0.19,
+                dte=98.0,
+                notional=380.0,
+                cost=3.5,
+                upnl=30.0,
+            )
+        ],
+        continuous=True,
+        poll_busy=True,
+        poll_label="1/2 fetch",
+        poll_done=0,
+        poll_total=1,
+        spin="/",
+        header_bar=False,
+    )
+    meta = group.renderables[0].renderable.renderables[0]
+    assert "alpaca" in meta.plain
+    assert "/" in meta.plain
+    assert "1/2 fetch" in meta.plain
+    assert "#" not in meta.plain
+    assert "-" not in meta.plain
 
 
 def _row(occ: str, notional: float | None) -> RowMark:

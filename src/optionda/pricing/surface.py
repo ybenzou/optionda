@@ -93,6 +93,18 @@ def surface_path(underlying: str, home: Path | None = None) -> Path:
     return surfaces_dir(home) / f"{underlying.strip().upper()}.json"
 
 
+def surface_session_path(
+    underlying: str,
+    session_date: date,
+    home: Path | None = None,
+) -> Path:
+    return (
+        surfaces_dir(home)
+        / underlying.strip().upper()
+        / f"{session_date.isoformat()}.json"
+    )
+
+
 def build_surface(
     underlying: str,
     *,
@@ -279,11 +291,30 @@ def save_surface(surface: IvSurface, home: Path | None = None) -> Path:
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     tmp.replace(path)
+    if surface.session_date is not None:
+        dated = surface_session_path(surface.underlying, surface.session_date, home)
+        dated.parent.mkdir(parents=True, exist_ok=True)
+        dated.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     return path
 
 
+def load_surface_for_session(
+    underlying: str,
+    session_date: date,
+    home: Path | None = None,
+) -> IvSurface | None:
+    path = surface_session_path(underlying, session_date, home)
+    surface = _load_surface_file(path)
+    if surface is None or surface.session_date != session_date:
+        return None
+    return surface
+
+
 def load_surface(underlying: str, home: Path | None = None) -> IvSurface | None:
-    path = surface_path(underlying, home)
+    return _load_surface_file(surface_path(underlying, home))
+
+
+def _load_surface_file(path: Path) -> IvSurface | None:
     if not path.exists():
         return None
     raw = json.loads(path.read_text(encoding="utf-8"))

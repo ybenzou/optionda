@@ -52,6 +52,30 @@ def test_partial_sell_long_realizes_pnl_and_keeps_remainder(tmp_path, monkeypatc
     assert sell["qty_sold"] == 1
     assert sell["exit"] == 8.5
     assert sell["realized"] == pytest.approx(180.0)
+    assert sell["dte_at_exit"] is not None
+    assert sell["hold_days"] is not None
+    add = next(event for event in events if event["event"] == "add")
+    assert add["dte_at_entry"] is not None
+    assert outcome.position is not None
+    assert outcome.position.opened_at is not None
+
+
+def test_merge_keeps_opened_at_and_writes_entry_dte(tmp_path, monkeypatch) -> None:
+    store = AccountStore(tmp_path)
+    store.create("demo")
+    monkeypatch.setenv("OPTIONDA_ACTIVE", "demo")
+    first = store.add_position(None, _pos(qty=1, entry=6.0))
+    opened = first.position.opened_at
+    assert opened is not None
+    second = store.add_position(None, _pos(qty=1, entry=7.0))
+    assert second.merged is True
+    assert second.position.opened_at == opened
+    events = [
+        __import__("json").loads(line)
+        for line in log_path("demo", tmp_path).read_text(encoding="utf-8").splitlines()
+    ]
+    merge = next(event for event in events if event["event"] == "merge")
+    assert merge["dte_at_entry"] is not None
 
 
 def test_full_sell_removes_position(tmp_path, monkeypatch) -> None:

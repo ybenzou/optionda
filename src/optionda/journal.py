@@ -88,6 +88,14 @@ def append_event(
     return path
 
 
+def _iso_ts(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat(timespec="seconds")
+
+
 def _position_brief(pos: Position) -> dict[str, Any]:
     return {
         "id": pos.id,
@@ -101,6 +109,7 @@ def _position_brief(pos: Position) -> dict[str, Any]:
         "expiry": pos.expiry.isoformat(),
         "strike": pos.strike,
         "option_type": pos.option_type,
+        "opened_at": _iso_ts(pos.opened_at),
     }
 
 
@@ -117,6 +126,7 @@ def append_add_event(
     merged: bool,
     previous_qty: float,
     previous_entry: float | None,
+    dte_at_entry: int | None = None,
     home: Path | None = None,
 ) -> Path:
     """Append add / merge mutation to the event log."""
@@ -135,6 +145,7 @@ def append_add_event(
             "cost_before": previous_entry if merged else None,
             "iv": position_after.iv_frozen,
             "iv_source": position_after.iv_source,
+            "dte_at_entry": dte_at_entry,
             "book": _book_snapshot(account),
         },
         home=home,
@@ -171,6 +182,8 @@ def append_sell_event(
     qty_remaining: float,
     closed: bool,
     multiplier: int = 100,
+    dte_at_exit: int | None = None,
+    hold_days: float | None = None,
     home: Path | None = None,
 ) -> Path:
     """Append a realized close / partial-close trade."""
@@ -188,6 +201,8 @@ def append_sell_event(
             "realized": realized,
             "qty_remaining": qty_remaining,
             "closed": closed,
+            "dte_at_exit": dte_at_exit,
+            "hold_days": hold_days,
             "book": _book_snapshot(account),
         },
         home=home,

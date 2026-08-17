@@ -125,6 +125,18 @@ class MarketRouter:
             )
         return self._alpaca.get_daily_closes(symbols, session_date)
 
+    def get_daily_closes_range(
+        self,
+        symbols: list[str],
+        start: date,
+        end: date,
+    ) -> dict[str, dict[date, DailyClose]]:
+        if self._alpaca is None:
+            raise MarketDataError(
+                "official daily close requires Alpaca market data"
+            )
+        return self._alpaca.get_daily_closes_range(symbols, start, end)
+
     def get_option_chain_snapshots(self, underlying: str) -> dict:
         if self.feed_name == "alpaca" and self._alpaca is not None:
             return self._alpaca.get_option_chain_snapshots(underlying)

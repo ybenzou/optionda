@@ -4,9 +4,10 @@ import json
 import os
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from optionda.config import load_config, save_config
 from optionda.journal import (
@@ -24,6 +25,29 @@ ACTIVE_ENV = "OPTIONDA_ACTIVE"
 ACTIVE_FILE = "active"
 
 _ACCOUNT_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
+_ET = ZoneInfo("America/New_York")
+
+
+def _aware_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def calendar_dte(expiry, when: datetime | None = None) -> int:
+    """Calendar days from the US/Eastern date of ``when`` to option expiry."""
+    instant = _aware_utc(when) or datetime.now(timezone.utc)
+    return (expiry - instant.astimezone(_ET).date()).days
+
+
+def hold_days_between(opened_at: datetime | None, when: datetime | None = None) -> float | None:
+    start = _aware_utc(opened_at)
+    if start is None:
+        return None
+    instant = _aware_utc(when) or datetime.now(timezone.utc)
+    return max((instant - start).total_seconds() / 86400.0, 0.0)
 
 
 class StoreError(Exception):
@@ -187,6 +211,10 @@ class AccountStore:
                 "cost required — use '@ 5.20' on the line or pass --entry 5.20"
             )
         account = self.require_current(account_name)
+        now = datetime.now(timezone.utc)
+        if position.opened_at is None:
+            position = position.model_copy(update={"opened_at": now})
+        dte_at_entry = calendar_dte(position.expiry, now)
         for index, existing in enumerate(account.positions):
             if (
                 existing.occ_symbol == position.occ_symbol
@@ -232,6 +260,7 @@ class AccountStore:
                     merged=True,
                     previous_qty=previous,
                     previous_entry=previous_entry,
+                    dte_at_entry=dte_at_entry,
                     home=self.home,
                 )
                 return outcome
@@ -246,6 +275,7 @@ class AccountStore:
             merged=False,
             previous_qty=0.0,
             previous_entry=None,
+            dte_at_entry=dte_at_entry,
             home=self.home,
         )
         return AddOutcome(
@@ -332,6 +362,7 @@ class AccountStore:
             qty_remaining = remaining
         self.save(account)
         sync_book(account, self.home)
+        now = datetime.now(timezone.utc)
         append_sell_event(
             account,
             position_id=position.id,
@@ -344,6 +375,8 @@ class AccountStore:
             qty_remaining=qty_remaining,
             closed=closed,
             multiplier=position.multiplier,
+            dte_at_exit=calendar_dte(position.expiry, now),
+            hold_days=hold_days_between(position.opened_at, now),
             home=self.home,
         )
         return SellOutcome(

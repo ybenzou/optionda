@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Literal
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -308,6 +309,94 @@ class AlpacaClient:
             f"on {session_date.isoformat()} ({detail})"
         )
 
+    def get_daily_closes_range(
+        self,
+        symbols: list[str],
+        start: date,
+        end: date,
+    ) -> dict[str, dict[date, DailyClose]]:
+        uniq = sorted({item.strip().upper() for item in symbols if item})
+        if not uniq or end < start:
+            return {}
+        errors: list[str] = []
+        with httpx.Client(timeout=self.timeout, headers=self._headers()) as client:
+            for feed in ("sip", "iex"):
+                try:
+                    bars = self._paged_daily_bars(client, uniq, start, end, feed)
+                except AlpacaError as exc:
+                    errors.append(f"{feed}: {exc}")
+                    continue
+                out: dict[str, dict[date, DailyClose]] = {}
+                for symbol, series in bars.items():
+                    days: dict[date, DailyClose] = {}
+                    for bar in series:
+                        if not isinstance(bar, dict) or bar.get("c") is None:
+                            continue
+                        close = float(bar["c"])
+                        if close <= 0:
+                            continue
+                        session = _bar_session_date(bar.get("t"))
+                        if session is None or session < start or session > end:
+                            continue
+                        days[session] = DailyClose(
+                            symbol=symbol,
+                            session_date=session,
+                            close=close,
+                            source=f"alpaca/{feed}/1Day",
+                            as_of=_parse_ts(bar.get("t")),
+                        )
+                    if days:
+                        out[symbol] = days
+                if out:
+                    return out
+                errors.append(f"{feed}: no daily closes for {','.join(uniq)}")
+        detail = "; ".join(errors) if errors else "unknown"
+        raise AlpacaError(
+            f"no official daily closes for {','.join(uniq)} "
+            f"{start.isoformat()}..{end.isoformat()} ({detail})"
+        )
+
+    def _paged_daily_bars(
+        self,
+        client: httpx.Client,
+        symbols: list[str],
+        start: date,
+        end: date,
+        feed: str,
+    ) -> dict[str, list[dict[str, Any]]]:
+        collected: dict[str, list[dict[str, Any]]] = {symbol: [] for symbol in symbols}
+        page_token: str | None = None
+        while True:
+            params = {
+                "symbols": ",".join(symbols),
+                "timeframe": "1Day",
+                "start": start.isoformat(),
+                "end": (end + timedelta(days=1)).isoformat(),
+                "limit": "10000",
+                "adjustment": "all",
+                "feed": feed,
+            }
+            if page_token:
+                params["page_token"] = page_token
+            payload = self._get(
+                client,
+                f"{DATA_URL}/v2/stocks/bars",
+                params=params,
+            )
+            bars = payload.get("bars")
+            if not isinstance(bars, dict):
+                raise AlpacaError(f"{feed}: unexpected bars shape")
+            for symbol in symbols:
+                series = bars.get(symbol)
+                if isinstance(series, list):
+                    collected[symbol].extend(
+                        item for item in series if isinstance(item, dict)
+                    )
+            next_token = payload.get("next_page_token")
+            if not next_token:
+                return collected
+            page_token = str(next_token)
+
     def get_option_mid(self, occ_symbol: str) -> float | None:
         symbol = occ_symbol.strip().upper()
         with httpx.Client(timeout=self.timeout, headers=self._headers()) as client:
@@ -560,3 +649,12 @@ def _parse_ts(value: Any) -> datetime | None:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+def _bar_session_date(value: Any) -> date | None:
+    instant = _parse_ts(value)
+    if instant is None:
+        return None
+    if instant.tzinfo is None:
+        instant = instant.replace(tzinfo=timezone.utc)
+    return instant.astimezone(ZoneInfo("America/New_York")).date()

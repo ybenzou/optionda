@@ -12,6 +12,7 @@ from rich.text import Text
 from optionda.models import RowMark
 
 _SPINNERS = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+_ASCII_SPIN = ("|", "/", "-", "\\")
 _ET = ZoneInfo("America/New_York")
 
 # Desk chrome — cool slate/cyan, avoid neon purple “AI dashboard” look.
@@ -28,6 +29,10 @@ _MUTED = "bright_black"
 
 def spinner_frame(tick: int) -> str:
     return _SPINNERS[tick % len(_SPINNERS)]
+
+
+def ascii_spinner(tick: int) -> str:
+    return _ASCII_SPIN[tick % len(_ASCII_SPIN)]
 
 
 def _tz_abbr(dt: datetime) -> str:
@@ -293,12 +298,13 @@ def _inline_bar(
     frac = max(0.0, min(1.0, fraction))
     filled = int(round(width * frac))
     filled = min(width, max(0, filled))
-    bar = "━" * filled + "─" * (width - filled)
-    if busy:
-        return Text(bar, style="bold yellow")
-    if frac >= 0.999:
-        return Text(bar, style="bold green")
-    return Text(bar, style="cyan")
+    fill_style = "bold yellow" if busy else ("bold green" if frac >= 0.999 else "cyan")
+    bar = Text()
+    if filled:
+        bar.append("#" * filled, style=fill_style)
+    if filled < width:
+        bar.append("-" * (width - filled), style="bright_black")
+    return bar
 
 
 def _side_cell(side: str) -> Text:
@@ -390,7 +396,12 @@ def _meta_line(
     poll_busy: bool,
     poll_done: int | None = None,
     poll_total: int | None = None,
+    bar_width: int = 12,
+    header_bar: bool = True,
+    spin: str | None = None,
+    session: Text | None = None,
 ) -> Text:
+    _ = bar_width
     clock_style = (
         "bold cyan" if phase == "hot" else "cyan" if phase == "warm" else _META
     )
@@ -398,9 +409,13 @@ def _meta_line(
     line.append(feed, style="bold cyan")
     line.append("  ·  ", style=_MUTED)
     if continuous:
-        frac = 0.0 if poll_fraction is None else poll_fraction
-        line.append(f"{refresh_sec}s ", style=_MUTED)
-        line.append_text(_inline_bar(frac, busy=poll_busy))
+        line.append(f"{refresh_sec}s", style=_MUTED)
+        if poll_busy:
+            line.append("  ", style=_MUTED)
+            line.append(spin or ascii_spinner(0), style="bold yellow")
+        elif header_bar and poll_fraction is not None:
+            line.append("  ", style=_MUTED)
+            line.append_text(_inline_bar(poll_fraction, width=12, busy=False))
         status = format_poll_status(
             poll_label,
             busy=poll_busy,
@@ -412,6 +427,9 @@ def _meta_line(
         line.append(status, style="bold yellow" if poll_busy else _MUTED)
     else:
         line.append(f"refresh {refresh_sec}s", style=_MUTED)
+    if session is not None and session.plain.strip():
+        line.append("  ·  ", style=_MUTED)
+        line.append_text(session)
     line.append("  ·  ", style=_MUTED)
     line.append(format_clock(), style=clock_style)
     return line
@@ -475,6 +493,11 @@ def render_snapshot(
     poll_busy: bool = False,
     poll_done: int | None = None,
     poll_total: int | None = None,
+    min_lines: int = 0,
+    bar_width: int = 12,
+    header_bar: bool = True,
+    notes: list[str] | None = None,
+    framed: bool = True,
 ) -> Group:
     """Single framed desk: meta + positions + column-aligned totals."""
     rows = sort_desk_rows(rows)
@@ -649,10 +672,20 @@ def render_snapshot(
         poll_busy=poll_busy,
         poll_done=poll_done,
         poll_total=poll_total,
+        bar_width=bar_width,
+        header_bar=header_bar,
+        spin=spin,
+        session=status,
     )]
-    if status is not None:
-        header.append(status)
+    for note in notes or []:
+        header.append(Text(note, style=_MUTED))
     header.append(table)
+    if not framed:
+        return Group(title, *header)
+    used = 5 + max(len(rows), 1) + len(notes or [])
+    pad = max(0, min_lines - used)
+    if pad:
+        header.append(Text("\n".join([" "] * pad)))
     desk = Panel(
         Group(*header),
         title=title,
