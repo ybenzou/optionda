@@ -1457,6 +1457,8 @@ def run_cmd() -> None:
         poll_fraction: float = 0.0,
         poll_label: str | None = None,
         poll_busy: bool = False,
+        poll_done: int | None = None,
+        poll_total: int | None = None,
     ):
         realized = float(realized_pnl_summary(acc.name, home)["realized"])
         return render_snapshot(
@@ -1475,6 +1477,8 @@ def run_cmd() -> None:
             poll_fraction=poll_fraction,
             poll_label=poll_label,
             poll_busy=poll_busy,
+            poll_done=poll_done,
+            poll_total=poll_total,
         )
 
     def _fetch_rows(
@@ -1541,8 +1545,6 @@ def run_cmd() -> None:
 
         def on_live_progress(label: str, done: int, steps: int) -> None:
             frac = min(done, steps) / max(steps, 1)
-            text = f"{label}  {done}/{steps}"
-            short = text if len(text) <= 48 else text[:45] + "…"
             _paint_live(
                 live,
                 _panel(
@@ -1550,8 +1552,10 @@ def run_cmd() -> None:
                     paint_router,
                     paint_rows,
                     poll_fraction=frac,
-                    poll_label=short,
+                    poll_label=label,
                     poll_busy=True,
+                    poll_done=done,
+                    poll_total=steps,
                     flash_phase="idle",
                 )
             )

@@ -237,6 +237,52 @@ def _pnl_flash(
     return _pnl_text(value)
 
 
+_STATUS_WIDTH = 36
+
+
+def _fit_width(text: str, width: int = _STATUS_WIDTH) -> str:
+    """Pad or ellipsize so the header clock does not jump when labels change."""
+    visible = text.replace("\t", " ")
+    if width <= 0:
+        return ""
+    if len(visible) > width:
+        if width == 1:
+            return "…"
+        return visible[: width - 1] + "…"
+    return visible.ljust(width)
+
+
+def format_poll_status(
+    label: str | None,
+    *,
+    busy: bool,
+    done: int | None = None,
+    total: int | None = None,
+    eta_sec: int | None = None,
+) -> str:
+    """Fixed-width header status: ``1/2 fetch   0/1  spots`` or ``5s``."""
+    if not busy:
+        if label:
+            return _fit_width(label)
+        if eta_sec is not None:
+            return _fit_width(f"{eta_sec}s")
+        return _fit_width("")
+    raw = (label or "updating…").strip()
+    phase, _, detail = raw.partition("  ")
+    if not phase:
+        phase = raw
+    if detail.startswith("spots"):
+        detail = "spots"
+    elif detail in {"done", "ready", "spots ready"}:
+        detail = "ready"
+    if done is not None and total is not None:
+        counts = f"{done:>2}/{max(total, 1):<2}"
+    else:
+        counts = "     "
+    body = f"{phase:<10} {counts} {detail}".rstrip()
+    return _fit_width(body)
+
+
 def _inline_bar(
     fraction: float,
     *,
@@ -342,6 +388,8 @@ def _meta_line(
     poll_fraction: float | None,
     poll_label: str | None,
     poll_busy: bool,
+    poll_done: int | None = None,
+    poll_total: int | None = None,
 ) -> Text:
     clock_style = (
         "bold cyan" if phase == "hot" else "cyan" if phase == "warm" else _META
@@ -351,16 +399,17 @@ def _meta_line(
     line.append("  ·  ", style=_MUTED)
     if continuous:
         frac = 0.0 if poll_fraction is None else poll_fraction
-        if poll_busy:
-            line.append_text(_inline_bar(frac, busy=True))
-            line.append(f"  {poll_label or 'updating…'}", style="bold yellow")
-        else:
-            line.append(f"{refresh_sec}s ", style=_MUTED)
-            line.append_text(_inline_bar(frac, busy=False))
-            if poll_label:
-                line.append(f"  {poll_label}", style=_MUTED)
-            elif eta_sec is not None:
-                line.append(f"  {eta_sec}s", style=_MUTED)
+        line.append(f"{refresh_sec}s ", style=_MUTED)
+        line.append_text(_inline_bar(frac, busy=poll_busy))
+        status = format_poll_status(
+            poll_label,
+            busy=poll_busy,
+            done=poll_done,
+            total=poll_total,
+            eta_sec=eta_sec,
+        )
+        line.append("  ", style=_MUTED)
+        line.append(status, style="bold yellow" if poll_busy else _MUTED)
     else:
         line.append(f"refresh {refresh_sec}s", style=_MUTED)
     line.append("  ·  ", style=_MUTED)
@@ -424,6 +473,8 @@ def render_snapshot(
     poll_fraction: float | None = None,
     poll_label: str | None = None,
     poll_busy: bool = False,
+    poll_done: int | None = None,
+    poll_total: int | None = None,
 ) -> Group:
     """Single framed desk: meta + positions + column-aligned totals."""
     rows = sort_desk_rows(rows)
@@ -596,6 +647,8 @@ def render_snapshot(
         poll_fraction=poll_fraction,
         poll_label=poll_label,
         poll_busy=poll_busy,
+        poll_done=poll_done,
+        poll_total=poll_total,
     )]
     if status is not None:
         header.append(status)

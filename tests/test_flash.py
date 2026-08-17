@@ -1,7 +1,9 @@
 from datetime import date, datetime, timezone
 
 from optionda.display.table import (
+    _STATUS_WIDTH,
     _dir_style,
+    _fit_width,
     _inline_bar,
     _iv_asof_label,
     _model_cell,
@@ -12,6 +14,7 @@ from optionda.display.table import (
     _premium_chg,
     _spot_cell,
     _spot_chg_pct,
+    format_poll_status,
     render_snapshot,
     sort_desk_rows,
 )
@@ -49,6 +52,28 @@ def test_dir_style_phases():
     assert "on dark_green" in _dir_style(1, phase="hot")
     assert _dir_style(-1, phase="warm") == "bold red"
     assert _dir_style(0, phase="hot") == "dim"
+
+
+def test_poll_status_width_is_stable():
+    fetch = format_poll_status(
+        "1/2 fetch  spots · AAPL AVGO CSCO GOOG HOOD IBM INTC",
+        busy=True,
+        done=0,
+        total=1,
+    )
+    mark = format_poll_status(
+        "2/2 mark  SKHY261016C00200000",
+        busy=True,
+        done=3,
+        total=11,
+    )
+    idle = format_poll_status("5s", busy=False, eta_sec=5)
+    assert fetch == _fit_width("1/2 fetch   0/1  spots")
+    assert "spots ·" not in fetch
+    assert "SKHY261016C00200000" in mark
+    assert len(fetch) == _STATUS_WIDTH
+    assert len(mark) == _STATUS_WIDTH
+    assert len(idle) == _STATUS_WIDTH
 
 
 def test_inline_bar_fills():
