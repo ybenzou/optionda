@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from optionda.config import load_config
 from optionda.credentials import has_alpaca, load_alpaca
 from optionda.market.alpaca import AlpacaClient
+from optionda.market.session import DailyClose, MarketClock, MarketSession
 from optionda.market.yahoo import YahooClient
 from optionda.models import OptionIvQuote, SpotQuote
 
@@ -98,6 +99,31 @@ class MarketRouter:
             return self._yahoo.get_option_mid(occ_symbol)
         except Exception:
             return None
+
+    def get_market_clock(self) -> MarketClock:
+        if self._alpaca is None:
+            raise MarketDataError(
+                "Alpaca clock/calendar unavailable — configure optionda key alpaca"
+            )
+        return self._alpaca.get_market_clock()
+
+    def get_market_calendar(self, start: date, end: date) -> list[MarketSession]:
+        if self._alpaca is None:
+            raise MarketDataError(
+                "Alpaca clock/calendar unavailable — configure optionda key alpaca"
+            )
+        return self._alpaca.get_market_calendar(start, end)
+
+    def get_daily_closes(
+        self,
+        symbols: list[str],
+        session_date: date,
+    ) -> dict[str, DailyClose]:
+        if self._alpaca is None:
+            raise MarketDataError(
+                "official daily close requires Alpaca market data"
+            )
+        return self._alpaca.get_daily_closes(symbols, session_date)
 
     def get_option_chain_snapshots(self, underlying: str) -> dict:
         if self.feed_name == "alpaca" and self._alpaca is not None:

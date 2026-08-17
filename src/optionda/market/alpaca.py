@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Literal
 
 import httpx
@@ -10,11 +10,26 @@ from pathlib import Path
 from optionda.config import load_config
 from optionda.credentials import AlpacaCredentials
 from optionda.market.iv_mid import imply_iv_from_premium, quote_mid
+from optionda.market.session import (
+    CALENDAR_LOOKAHEAD_DAYS,
+    CALENDAR_LOOKBACK_DAYS,
+    DailyClose,
+    MarketClock,
+    MarketSession,
+    parse_calendar_days,
+    parse_clock,
+)
 from optionda.models import IvMode, OptionIvQuote, SpotQuote
 from optionda.occ import parse_occ
 
 DATA_URL = "https://data.alpaca.markets"
 OPTIONS_URL = "https://data.alpaca.markets"
+LIVE_TRADING_URL = "https://api.alpaca.markets"
+PAPER_TRADING_URL = "https://paper-api.alpaca.markets"
+_TRADING_HOSTS = (LIVE_TRADING_URL, PAPER_TRADING_URL)
+_CALENDAR_TTL = timedelta(hours=6)
+_trading_host: str | None = None
+_calendar_cache: dict[str, tuple[datetime, list[MarketSession]]] = {}
 
 OptionsFeed = Literal["opra", "indicative"]
 
@@ -198,6 +213,101 @@ class AlpacaClient:
             f"no {ticker} spot at {instant.isoformat()} ({detail})"
         )
 
+    def get_market_clock(self) -> MarketClock:
+        payload = self._trading_get("/v2/clock")
+        return parse_clock(payload)
+
+    def get_market_calendar(
+        self,
+        start: date,
+        end: date,
+    ) -> list[MarketSession]:
+        key = f"{start.isoformat()}:{end.isoformat()}"
+        cached = _calendar_cache.get(key)
+        now = datetime.now(timezone.utc)
+        if cached is not None and now - cached[0] <= _CALENDAR_TTL:
+            return cached[1]
+        payload = self._trading_get(
+            "/v2/calendar",
+            params={"start": start.isoformat(), "end": end.isoformat()},
+        )
+        rows = payload if isinstance(payload, list) else payload.get("calendar") or []
+        if not isinstance(rows, list):
+            raise AlpacaError("unexpected alpaca calendar shape")
+        sessions = parse_calendar_days(rows)
+        _calendar_cache[key] = (now, sessions)
+        return sessions
+
+    def get_completed_calendar_window(
+        self,
+        timestamp: datetime,
+    ) -> list[MarketSession]:
+        instant = timestamp.astimezone(timezone.utc)
+        start = instant.date() - timedelta(days=CALENDAR_LOOKBACK_DAYS)
+        end = instant.date() + timedelta(days=CALENDAR_LOOKAHEAD_DAYS)
+        return self.get_market_calendar(start, end)
+
+    def get_daily_closes(
+        self,
+        symbols: list[str],
+        session_date: date,
+    ) -> dict[str, DailyClose]:
+        uniq = sorted({item.strip().upper() for item in symbols if item})
+        if not uniq:
+            return {}
+        start = session_date.isoformat()
+        end = (session_date + timedelta(days=1)).isoformat()
+        errors: list[str] = []
+        with httpx.Client(timeout=self.timeout, headers=self._headers()) as client:
+            for feed in ("sip", "iex"):
+                try:
+                    payload = self._get(
+                        client,
+                        f"{DATA_URL}/v2/stocks/bars",
+                        params={
+                            "symbols": ",".join(uniq),
+                            "timeframe": "1Day",
+                            "start": start,
+                            "end": end,
+                            "limit": "1000",
+                            "adjustment": "all",
+                            "feed": feed,
+                        },
+                    )
+                except AlpacaError as exc:
+                    errors.append(f"{feed}: {exc}")
+                    continue
+                bars = payload.get("bars")
+                if not isinstance(bars, dict):
+                    errors.append(f"{feed}: unexpected bars shape")
+                    continue
+                out: dict[str, DailyClose] = {}
+                for symbol in uniq:
+                    series = bars.get(symbol)
+                    if not isinstance(series, list) or not series:
+                        continue
+                    bar = series[-1]
+                    if not isinstance(bar, dict) or bar.get("c") is None:
+                        continue
+                    close = float(bar["c"])
+                    if close <= 0:
+                        continue
+                    out[symbol] = DailyClose(
+                        symbol=symbol,
+                        session_date=session_date,
+                        close=close,
+                        source=f"alpaca/{feed}/1Day",
+                        as_of=_parse_ts(bar.get("t")),
+                    )
+                if out:
+                    return out
+                errors.append(f"{feed}: no daily close for {','.join(uniq)}")
+        detail = "; ".join(errors) if errors else "unknown"
+        raise AlpacaError(
+            f"no official daily close for {','.join(uniq)} "
+            f"on {session_date.isoformat()} ({detail})"
+        )
+
     def get_option_mid(self, occ_symbol: str) -> float | None:
         symbol = occ_symbol.strip().upper()
         with httpx.Client(timeout=self.timeout, headers=self._headers()) as client:
@@ -361,12 +471,42 @@ class AlpacaClient:
                 params={"feed": feed},
             )
 
+    def _trading_get(
+        self,
+        path: str,
+        params: dict[str, str] | None = None,
+    ) -> Any:
+        global _trading_host
+        hosts = [_trading_host] if _trading_host else list(_TRADING_HOSTS)
+        errors: list[str] = []
+        with httpx.Client(timeout=self.timeout, headers=self._headers()) as client:
+            for host in hosts:
+                if not host:
+                    continue
+                try:
+                    payload = self._request(client, f"{host}{path}", params)
+                except AlpacaError as exc:
+                    errors.append(f"{host}: {exc}")
+                    continue
+                _trading_host = host
+                return payload
+        detail = "; ".join(errors) if errors else "unknown"
+        raise AlpacaError(f"trading API unavailable ({detail})")
+
     @staticmethod
-    def _get(client: httpx.Client, url: str, params: dict[str, str] | None = None) -> dict:
+    def _request(
+        client: httpx.Client,
+        url: str,
+        params: dict[str, str] | None = None,
+    ) -> Any:
         response = client.get(url, params=params)
         if response.status_code >= 400:
             raise AlpacaError(f"alpaca HTTP {response.status_code}: {response.text[:200]}")
-        payload = response.json()
+        return response.json()
+
+    @staticmethod
+    def _get(client: httpx.Client, url: str, params: dict[str, str] | None = None) -> dict:
+        payload = AlpacaClient._request(client, url, params)
         if not isinstance(payload, dict):
             raise AlpacaError("unexpected alpaca response")
         return payload

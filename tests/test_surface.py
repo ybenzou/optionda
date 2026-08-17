@@ -152,6 +152,34 @@ def test_surface_keeps_call_and_put_wings_separate() -> None:
     assert iv > 0.75
 
 
+def test_weekend_align_keeps_friday_close_prints() -> None:
+    # Beijing Monday 10:36 == Sunday 22:36 ET. Last close is Friday 16:00 ET.
+    # Alpaca still serves Friday 15:59:59 prints; age them vs that snapshot,
+    # not vs wall-clock now, or every name fails with no usable nodes.
+    friday_print = datetime(2026, 8, 14, 19, 59, 59, tzinfo=timezone.utc)
+    sunday_night = datetime(2026, 8, 17, 2, 36, tzinfo=timezone.utc)
+    surface = build_surface(
+        "AAPL",
+        spot=305.33,
+        snapshots={
+            "AAPL261120C00350000": {
+                "impliedVolatility": 0.25,
+                "greeks": {"delta": 0.19},
+                "latestQuote": {
+                    "bp": 3.70,
+                    "ap": 3.90,
+                    "t": friday_print.isoformat(),
+                },
+            }
+        },
+        as_of=sunday_night,
+        quote_as_of=friday_print,
+        source="alpaca/chain",
+    )
+    assert surface.quality["accepted"] == 1
+    assert surface.as_of == friday_print
+
+
 def test_surface_rejects_quote_without_timestamp() -> None:
     with pytest.raises(ValueError, match="no usable surface nodes"):
         build_surface(
@@ -676,6 +704,173 @@ def test_apply_surface_reference_ivs_updates_fallback_iv() -> None:
     assert refreshed[0].iv_source == "surface/alpaca/chain"
 
 
+def test_v2_surface_loads_as_legacy_v3(tmp_path) -> None:
+    path = tmp_path / "surfaces"
+    path.mkdir()
+    (path / "AAPL.json").write_text(
+        """
+{
+  "schema_version": 2,
+  "underlying": "AAPL",
+  "spot": 210.5,
+  "as_of": "2026-08-14T19:59:59+00:00",
+  "source": "alpaca/chain",
+  "quality": {"accepted": 1, "rejected": 0},
+  "smiles": [
+    {
+      "expiry": "2026-11-20",
+      "nodes": [{"strike": 210.0, "delta": 0.5, "iv": 0.28}]
+    }
+  ]
+}
+""".strip(),
+        encoding="utf-8",
+    )
+    loaded = load_surface("AAPL", tmp_path)
+    assert loaded is not None
+    assert loaded.legacy is True
+    assert loaded.calibration_spot == 210.5
+    assert loaded.quote_as_of.isoformat() == "2026-08-14T19:59:59+00:00"
+    assert loaded.session_date == date(2026, 8, 14)
+
+
+def test_build_surface_accepts_friday_close_print() -> None:
+    from optionda.market.session import MarketSession
+    from zoneinfo import ZoneInfo
+
+    et = ZoneInfo("America/New_York")
+    session = MarketSession(
+        session_date=date(2026, 8, 14),
+        open_at=datetime(2026, 8, 14, 9, 30, tzinfo=et),
+        close_at=datetime(2026, 8, 14, 16, 0, tzinfo=et),
+    )
+    quote = datetime(2026, 8, 14, 15, 59, 59, tzinfo=et)
+    surface = build_surface(
+        "AAPL",
+        spot=230.0,
+        snapshots={
+            "AAPL261120C00230000": {
+                "impliedVolatility": 0.28,
+                "latestQuote": {
+                    "bp": 4.9,
+                    "ap": 5.1,
+                    "t": quote.isoformat(),
+                },
+            }
+        },
+        as_of=datetime(2026, 8, 16, 12, 0, tzinfo=timezone.utc),
+        quote_as_of=quote,
+        target_session=session,
+        source="alpaca/chain",
+    )
+    assert surface.session_date == date(2026, 8, 14)
+    assert surface.legacy is False
+
+
+def test_weekend_wall_clock_does_not_expire_friday_quotes() -> None:
+    from optionda.market.session import MarketSession
+    from zoneinfo import ZoneInfo
+
+    et = ZoneInfo("America/New_York")
+    session = MarketSession(
+        session_date=date(2026, 8, 14),
+        open_at=datetime(2026, 8, 14, 9, 30, tzinfo=et),
+        close_at=datetime(2026, 8, 14, 16, 0, tzinfo=et),
+    )
+    quote = datetime(2026, 8, 14, 15, 59, 59, tzinfo=et)
+    surface = build_surface(
+        "AAPL",
+        spot=230.0,
+        snapshots={
+            "AAPL261120C00230000": {
+                "impliedVolatility": 0.28,
+                "latestQuote": {
+                    "bp": 4.9,
+                    "ap": 5.1,
+                    "t": quote.isoformat(),
+                },
+            }
+        },
+        as_of=datetime(2026, 8, 16, 10, 0, tzinfo=timezone.utc),
+        quote_as_of=quote,
+        target_session=session,
+        source="alpaca/chain",
+    )
+    assert surface.quality["accepted"] == 1
+
+
+def test_build_surface_rejects_wrong_session_quotes() -> None:
+    from optionda.market.session import MarketSession
+    from zoneinfo import ZoneInfo
+
+    et = ZoneInfo("America/New_York")
+    session = MarketSession(
+        session_date=date(2026, 8, 14),
+        open_at=datetime(2026, 8, 14, 9, 30, tzinfo=et),
+        close_at=datetime(2026, 8, 14, 16, 0, tzinfo=et),
+    )
+    with pytest.raises(ValueError, match="outside the 2026-08-14 close window"):
+        build_surface(
+            "AAPL",
+            spot=230.0,
+            snapshots={
+                "AAPL261120C00230000": {
+                    "impliedVolatility": 0.28,
+                    "latestQuote": {
+                        "bp": 4.9,
+                        "ap": 5.1,
+                        "t": "2026-08-13T19:59:59+00:00",
+                    },
+                }
+            },
+            as_of=datetime(2026, 8, 14, 21, 0, tzinfo=timezone.utc),
+            quote_as_of=datetime(2026, 8, 13, 19, 59, 59, tzinfo=timezone.utc),
+            target_session=session,
+            source="alpaca/chain",
+        )
+
+
+def test_build_surface_filters_skewed_node() -> None:
+    from optionda.market.session import MarketSession
+    from zoneinfo import ZoneInfo
+
+    et = ZoneInfo("America/New_York")
+    session = MarketSession(
+        session_date=date(2026, 8, 14),
+        open_at=datetime(2026, 8, 14, 9, 30, tzinfo=et),
+        close_at=datetime(2026, 8, 14, 16, 0, tzinfo=et),
+    )
+    quote = datetime(2026, 8, 14, 15, 59, 59, tzinfo=et)
+    surface = build_surface(
+        "AAPL",
+        spot=230.0,
+        snapshots={
+            "AAPL261120C00230000": {
+                "impliedVolatility": 0.28,
+                "latestQuote": {
+                    "bp": 4.9,
+                    "ap": 5.1,
+                    "t": quote.isoformat(),
+                },
+            },
+            "AAPL261120C00240000": {
+                "impliedVolatility": 0.30,
+                "latestQuote": {
+                    "bp": 3.9,
+                    "ap": 4.1,
+                    "t": (quote - timedelta(hours=2)).isoformat(),
+                },
+            },
+        },
+        as_of=quote,
+        quote_as_of=quote,
+        target_session=session,
+        source="alpaca/chain",
+    )
+    assert surface.quality["accepted"] == 1
+    assert surface.quality["rejected"] == 1
+
+
 def test_mark_account_falls_back_when_surface_is_stale(tmp_path) -> None:
     calibrated = datetime(2026, 8, 4, 20, 0, tzinfo=timezone.utc)
     now = datetime(2026, 8, 7, 20, 0, tzinfo=timezone.utc)
@@ -718,7 +913,95 @@ def test_mark_account_falls_back_when_surface_is_stale(tmp_path) -> None:
             }
 
         def get_option_mid(self, _occ):
-            return None
+            raise AssertionError("ordinary mark must not fetch option mids")
+
+    from optionda.market.session import MarketSession
+    from zoneinfo import ZoneInfo
+
+    et = ZoneInfo("America/New_York")
+    row = mark_account(
+        Account(name="demo", positions=[position]),
+        home=tmp_path,
+        router=Router(),
+        now=now,
+        completed_session=MarketSession(
+            session_date=date(2026, 8, 7),
+            open_at=datetime(2026, 8, 7, 9, 30, tzinfo=et),
+            close_at=datetime(2026, 8, 7, 16, 0, tzinfo=et),
+        ),
+    )[0]
+
+    expected = price_option(
+        spot=116.0,
+        strike=100.0,
+        years=years_to_expiry(position.expiry, now),
+        iv=1.20,
+        rate=0.045,
+        option_type="put",
+        style="american",
+    ).price
+    assert row.theo == pytest.approx(expected, abs=1e-4)
+    assert row.valuation_mode == "surface"
+    assert row.iv_stale is True
+    assert row.model_iv == pytest.approx(1.20)
+
+
+def test_mark_account_uses_session_reference_not_calibration_spot(tmp_path) -> None:
+    from optionda.market.session import SessionReference, save_session_reference
+
+    now = datetime(2026, 8, 14, 21, 0, tzinfo=timezone.utc)
+    position = Position(
+        occ_symbol="SPCX260918P00100000",
+        underlying="SPCX",
+        expiry=date(2026, 9, 18),
+        strike=100.0,
+        option_type="put",
+        iv_frozen=0.50,
+        iv_as_of=now,
+        entry_premium=6.7,
+    )
+    save_surface(
+        IvSurface(
+            underlying="SPCX",
+            spot=140.0,
+            as_of=now,
+            source="alpaca/chain",
+            quality={"accepted": 2, "rejected": 0},
+            session_date=date(2026, 8, 14),
+            smiles=[
+                ExpirySmile(
+                    expiry=date(2026, 9, 18),
+                    nodes=[
+                        SurfaceNode(strike=90.0, delta=-0.70, iv=1.20),
+                        SurfaceNode(strike=110.0, delta=-0.20, iv=1.20),
+                    ],
+                )
+            ],
+        ),
+        tmp_path,
+    )
+    save_session_reference(
+        SessionReference(
+            underlying="SPCX",
+            session_date=date(2026, 8, 14),
+            session_close_at=datetime(2026, 8, 14, 20, 0, tzinfo=timezone.utc),
+            close_spot=116.0,
+            source="alpaca/sip/1Day",
+            updated_at=now,
+        ),
+        tmp_path,
+    )
+
+    class Router:
+        def get_spots(self, _symbols):
+            return {
+                "SPCX": SpotQuote(
+                    symbol="SPCX", price=120.0, as_of=now, source="mock"
+                )
+            }
+
+        def get_option_mid(self, _occ):
+            raise AssertionError("ordinary mark must not fetch option mids")
 
     row = mark_account(
         Account(name="demo", positions=[position]),
@@ -726,15 +1009,45 @@ def test_mark_account_falls_back_when_surface_is_stale(tmp_path) -> None:
         router=Router(),
         now=now,
     )[0]
+    assert row.close_spot == pytest.approx(116.0)
+    assert row.spot == pytest.approx(120.0)
+    assert row.reference_session_date == date(2026, 8, 14)
 
-    expected = price_option(
-        spot=116.0,
+
+def test_mark_account_never_calls_option_mid(tmp_path) -> None:
+    now = datetime(2026, 8, 14, 21, 0, tzinfo=timezone.utc)
+    position = Position(
+        occ_symbol="SPCX260918P00100000",
+        underlying="SPCX",
+        expiry=date(2026, 9, 18),
         strike=100.0,
-        years=years_to_expiry(position.expiry, now),
-        iv=0.50,
-        rate=0.045,
         option_type="put",
-        style="american",
-    ).price
-    assert row.theo == pytest.approx(expected, abs=1e-4)
-    assert row.valuation_mode == "frozen"
+        iv_frozen=0.50,
+        iv_as_of=now,
+        entry_premium=6.7,
+    )
+
+    class Router:
+        mids = 0
+
+        def get_spots(self, _symbols):
+            return {
+                "SPCX": SpotQuote(
+                    symbol="SPCX", price=116.0, as_of=now, source="mock"
+                )
+            }
+
+        def get_option_mid(self, _occ):
+            Router.mids += 1
+            return 9.99
+
+    row = mark_account(
+        Account(name="demo", positions=[position]),
+        home=tmp_path,
+        router=Router(),
+        now=now,
+    )[0]
+    assert Router.mids == 0
+    assert row.live is None
+    assert row.iv_fallback is True
+    assert row.model_iv == pytest.approx(0.50)

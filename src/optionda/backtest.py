@@ -61,20 +61,23 @@ def recommended_sticky_delta_weight(rows: Iterable[dict[str, Any]]) -> float:
 
 def journal_rows(path: Path) -> list[dict[str, Any]]:
     """Load marked rows from an append-only optionda journal."""
-    rows: list[dict[str, Any]] = []
+    verify_rows: list[dict[str, Any]] = []
+    mark_rows: list[dict[str, Any]] = []
     if not path.exists():
-        return rows
+        return verify_rows
     for line in path.read_text(encoding="utf-8").splitlines():
         try:
             event = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if event.get("event") not in {"export", "run"}:
+        kind = event.get("event")
+        if kind not in {"verify", "export", "run"}:
             continue
+        bucket = verify_rows if kind == "verify" else mark_rows
         for row in event.get("rows", []):
             if isinstance(row, dict):
-                rows.append(row)
-    return rows
+                bucket.append(row)
+    return verify_rows or mark_rows
 
 
 def _number(value: Any) -> float | None:

@@ -115,11 +115,16 @@ class RowMark(BaseModel):
     notional: float | None
     cost: float | None = None  # avg entry premium / share
     upnl: float | None = None  # $ vs cost: (theo - cost) * mult * qty * sign
-    live: float | None = None  # live option mid / last (not Model$)
+    live: float | None = None  # live option mid / last (verify only)
     valuation_mode: Literal["surface", "frozen"] = "frozen"
     surface_iv: float | None = None
+    model_iv: float | None = None
     surface_as_of: datetime | None = None
     surface_source: str | None = None
+    surface_session_date: date | None = None
+    reference_session_date: date | None = None
+    iv_stale: bool = False
+    iv_fallback: bool = False
     model_low: float | None = None
     model_high: float | None = None
     iv_dynamics: str | None = None

@@ -219,9 +219,22 @@ def _row_record(row: RowMark) -> dict[str, Any]:
         "qty": pos.qty,
         "spot": row.spot,
         "iv": pos.iv_frozen,
+        "model_iv": row.model_iv if row.model_iv is not None else row.surface_iv,
         "iv_source": pos.iv_source,
         "valuation_mode": row.valuation_mode,
         "surface_iv": row.surface_iv,
+        "surface_session_date": (
+            row.surface_session_date.isoformat()
+            if row.surface_session_date is not None
+            else None
+        ),
+        "reference_session_date": (
+            row.reference_session_date.isoformat()
+            if row.reference_session_date is not None
+            else None
+        ),
+        "iv_stale": row.iv_stale,
+        "iv_fallback": row.iv_fallback,
         "surface_as_of": (
             row.surface_as_of.isoformat()
             if row.surface_as_of is not None
@@ -273,7 +286,7 @@ def append_export_log(
     return append_event(
         account.name,
         {
-            "event": source,  # export | run
+            "event": source,  # export | run | verify
             "feed": feed,
             "sum_model": round(total, 6),
             "sum_upnl": round(total_upnl, 6) if has_upnl else None,
@@ -282,3 +295,14 @@ def append_export_log(
         },
         home=home,
     )
+
+
+def append_verify_log(
+    account: Account,
+    rows: list[RowMark],
+    *,
+    feed: str,
+    home: Path | None = None,
+) -> Path:
+    """Append an explicit model-vs-live comparison snapshot."""
+    return append_export_log(account, rows, feed=feed, home=home, source="verify")

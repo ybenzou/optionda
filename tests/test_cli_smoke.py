@@ -72,9 +72,10 @@ def test_refresh_iv_calibrates_surface(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("OPTIONDA_ACTIVE", "demo")
     assert runner.invoke(app, ["create", "demo"]).exit_code == 0
 
-    from optionda.engine import CalibrationResult
+    from optionda.market.session import MarketSession, SessionSyncResult
     from optionda.pricing.surface import ExpirySmile, IvSurface, SurfaceNode
     from datetime import date, datetime, timezone
+    from zoneinfo import ZoneInfo
 
     surface = IvSurface(
         underlying="AAPL",
@@ -88,6 +89,13 @@ def test_refresh_iv_calibrates_surface(tmp_path, monkeypatch) -> None:
             )
         ],
         quality={"accepted": 1, "rejected": 0},
+        session_date=date(2026, 8, 14),
+    )
+    et = ZoneInfo("America/New_York")
+    session = MarketSession(
+        session_date=date(2026, 8, 14),
+        open_at=datetime(2026, 8, 14, 9, 30, tzinfo=et),
+        close_at=datetime(2026, 8, 14, 16, 0, tzinfo=et),
     )
 
     class FakeRouter:
@@ -99,20 +107,19 @@ def test_refresh_iv_calibrates_surface(tmp_path, monkeypatch) -> None:
     with (
         patch("optionda.cli.MarketRouter", return_value=FakeRouter()),
         patch(
-            "optionda.cli.calibrate_surfaces",
-            return_value=CalibrationResult(surfaces={"AAPL": surface}, errors={}),
-        ) as calibrate,
-        patch("optionda.cli.apply_surface_reference_ivs", side_effect=lambda pos, *a, **k: pos),
+            "optionda.cli.sync_completed_session",
+            return_value=SessionSyncResult(
+                completed_session=session,
+                surfaces_saved={"AAPL": surface},
+            ),
+        ) as sync,
     ):
         result = runner.invoke(app, ["refresh-iv"])
 
     assert result.exit_code == 0, result.output
-    calibrate.assert_called_once()
-    assert "ok AAPL" in result.output
-    assert "close" in result.output.lower()
-    from datetime import timedelta
-
-    assert calibrate.call_args.kwargs["max_quote_age"] == timedelta(hours=18)
+    sync.assert_called_once()
+    assert sync.call_args.kwargs["force"] is False
+    assert "session" in result.output.lower()
 
 
 def test_refresh_iv_fresh_uses_tight_age(tmp_path, monkeypatch) -> None:
@@ -120,9 +127,7 @@ def test_refresh_iv_fresh_uses_tight_age(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("OPTIONDA_ACTIVE", "demo")
     assert runner.invoke(app, ["create", "demo"]).exit_code == 0
 
-    from datetime import timedelta
-
-    from optionda.engine import CalibrationResult
+    from optionda.market.session import SessionSyncResult
 
     class FakeRouter:
         feed_name = "alpaca"
@@ -133,14 +138,15 @@ def test_refresh_iv_fresh_uses_tight_age(tmp_path, monkeypatch) -> None:
     with (
         patch("optionda.cli.MarketRouter", return_value=FakeRouter()),
         patch(
-            "optionda.cli.calibrate_surfaces",
-            return_value=CalibrationResult(surfaces={}, errors={"AAPL": "stale"}),
-        ) as calibrate,
+            "optionda.cli.sync_completed_session",
+            return_value=SessionSyncResult(errors={"AAPL": "stale"}),
+        ) as sync,
     ):
         result = runner.invoke(app, ["refresh-iv", "--fresh"])
 
     assert result.exit_code == 1, result.output
-    assert calibrate.call_args.kwargs["max_quote_age"] == timedelta(minutes=20)
+    assert sync.call_args.kwargs["force"] is True
+    assert sync.call_args.kwargs["fresh"] is True
     assert "fresh" in result.output.lower()
 
 
@@ -149,7 +155,7 @@ def test_refresh_iv_all_stale_hints_retry(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("OPTIONDA_ACTIVE", "demo")
     assert runner.invoke(app, ["create", "demo"]).exit_code == 0
 
-    from optionda.engine import CalibrationResult
+    from optionda.market.session import SessionSyncResult
 
     class FakeRouter:
         feed_name = "alpaca"
@@ -160,13 +166,13 @@ def test_refresh_iv_all_stale_hints_retry(tmp_path, monkeypatch) -> None:
     with (
         patch("optionda.cli.MarketRouter", return_value=FakeRouter()),
         patch(
-            "optionda.cli.calibrate_surfaces",
-            return_value=CalibrationResult(
-                surfaces={}, errors={"AAPL": "no usable surface nodes"}
+            "optionda.cli.sync_completed_session",
+            return_value=SessionSyncResult(
+                errors={"AAPL": "no usable surface nodes"},
             ),
         ),
     ):
-        result = runner.invoke(app, ["refresh-iv"])
+        result = runner.invoke(app, ["refresh-iv", "--fresh"])
 
     assert result.exit_code == 1, result.output
     assert "no surfaces calibrated" in result.output.lower()
@@ -350,74 +356,131 @@ def test_key_rejects_bad_credentials(tmp_path, monkeypatch) -> None:
     assert "not saved" in result.output
 
 
-def test_align_session_surfaces_only_refreshes_stale(tmp_path) -> None:
-    from rich.console import Console
+def test_verify_fetches_option_mids(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("OPTIONDA_HOME", str(tmp_path))
+    monkeypatch.setenv("OPTIONDA_ACTIVE", "demo")
+    assert runner.invoke(app, ["create", "demo"]).exit_code == 0
 
-    from optionda.cli import _align_session_surfaces
-    from optionda.config import apply_feed_defaults, load_config, save_config
-    from optionda.credentials import save_alpaca
-    from optionda.engine import CalibrationResult
-    from optionda.models import Account, Position
-    from optionda.pricing.surface import ExpirySmile
+    from optionda.market.session import SessionSyncResult
+    from optionda.models import Position, RowMark
 
-    save_alpaca("PKTEST", "SECRET", tmp_path)
-    save_config(apply_feed_defaults(load_config(tmp_path), "alpaca"), tmp_path)
+    pos = Position(
+        occ_symbol="AAPL261120C00350000",
+        underlying="AAPL",
+        expiry=date(2026, 11, 20),
+        strike=350,
+        option_type="call",
+        iv_frozen=0.28,
+        iv_as_of=datetime.now(timezone.utc),
+        entry_premium=5.20,
+    )
+    row = RowMark(
+        position=pos,
+        spot=210.0,
+        theo=18.5,
+        delta=0.62,
+        dte=120.0,
+        notional=3700.0,
+        cost=5.20,
+        upnl=2660.0,
+    )
 
-    thu = datetime(2026, 8, 13, 20, tzinfo=timezone.utc)
-    wed = datetime(2026, 8, 12, 20, tzinfo=timezone.utc)
-    friday_pre = datetime(2026, 8, 14, 6, 40, tzinfo=timezone.utc)
+    class FakeRouter:
+        feed_name = "alpaca"
+        mids = 0
 
-    def _pos(occ: str, underlying: str) -> Position:
-        return Position(
-            occ_symbol=occ,
-            underlying=underlying,
-            expiry=date(2026, 12, 18),
-            strike=100.0,
-            option_type="call",
-            iv_frozen=0.3,
-            iv_as_of=thu,
-            entry_premium=5.0,
-        )
+        def get_option_mid(self, occ):
+            FakeRouter.mids += 1
+            return 7.25
 
-    save_surface(
-        IvSurface(
-            underlying="AAPL",
-            spot=300.0,
-            as_of=thu,
-            source="test",
-            smiles=[ExpirySmile(expiry=date(2026, 11, 20), nodes=[])],
-            quality={},
+    with (
+        patch(
+            "optionda.cli.sync_completed_session",
+            return_value=SessionSyncResult(),
         ),
-        tmp_path,
-    )
-    save_surface(
-        IvSurface(
-            underlying="GOOG",
-            spot=330.0,
-            as_of=wed,
-            source="test",
-            smiles=[ExpirySmile(expiry=date(2026, 12, 18), nodes=[])],
-            quality={},
-        ),
-        tmp_path,
-    )
-    account = Account(
-        name="demo",
-        positions=[
-            _pos("AAPL261120C00350000", "AAPL"),
-            _pos("GOOG261218C00400000", "GOOG"),
-        ],
-    )
-    asked: list[list[str]] = []
+        patch("optionda.cli.mark_account", return_value=[row]),
+        patch("optionda.cli.MarketRouter", return_value=FakeRouter()),
+    ):
+        result = runner.invoke(app, ["verify"])
+    assert result.exit_code == 0, result.output
+    assert FakeRouter.mids == 1
 
-    def fake_ensure(acc, names, **kwargs):
-        asked.append(list(names))
-        assert kwargs.get("on_progress") is not None
-        return CalibrationResult()
 
-    console = Console(file=__import__("io").StringIO(), width=80)
-    with patch("optionda.cli.ensure_surfaces", side_effect=fake_ensure):
-        _align_session_surfaces(
-            account, home=tmp_path, console=console, now=friday_pre
-        )
-    assert asked == [["GOOG"]]
+def test_export_calls_session_sync(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("OPTIONDA_HOME", str(tmp_path))
+    monkeypatch.setenv("OPTIONDA_ACTIVE", "demo")
+    assert runner.invoke(app, ["create", "demo"]).exit_code == 0
+
+    from optionda.market.session import SessionSyncResult
+
+    with (
+        patch(
+            "optionda.cli.sync_completed_session",
+            return_value=SessionSyncResult(),
+        ) as sync,
+        patch("optionda.cli.mark_account", return_value=[]),
+    ):
+        result = runner.invoke(app, ["export"])
+    assert result.exit_code == 0, result.output
+    sync.assert_called_once()
+
+
+def test_run_syncs_once_at_start(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("OPTIONDA_HOME", str(tmp_path))
+    monkeypatch.setenv("OPTIONDA_ACTIVE", "demo")
+    assert runner.invoke(app, ["create", "demo"]).exit_code == 0
+
+    from optionda.market.session import SessionSyncResult
+
+    with (
+        patch(
+            "optionda.cli.sync_completed_session",
+            return_value=SessionSyncResult(),
+        ) as sync,
+        patch("optionda.cli.mark_account", return_value=[]),
+        patch("optionda.cli.time.sleep", side_effect=KeyboardInterrupt),
+    ):
+        result = runner.invoke(app, ["run"])
+    assert "stopped" in (result.output or "").lower()
+    assert sync.call_count == 1
+
+
+def test_run_resyncs_after_close_boundary(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("OPTIONDA_HOME", str(tmp_path))
+    monkeypatch.setenv("OPTIONDA_ACTIVE", "demo")
+    assert runner.invoke(app, ["create", "demo"]).exit_code == 0
+
+    from optionda.market.session import SessionSyncResult
+
+    close_at = datetime(2026, 8, 14, 20, 0, tzinfo=timezone.utc)
+    first = SessionSyncResult(next_close_at=close_at)
+    second = SessionSyncResult()
+    calls = {"n": 0}
+
+    def fake_sync(*_args, **_kwargs):
+        calls["n"] += 1
+        return first if calls["n"] == 1 else second
+
+    due = {"n": 0}
+
+    def fake_due(*_args, **_kwargs):
+        due["n"] += 1
+        return due["n"] > 1
+
+    sleeps = {"n": 0}
+
+    def fake_sleep(_seconds):
+        sleeps["n"] += 1
+        if sleeps["n"] > 20:
+            raise KeyboardInterrupt
+
+    with (
+        patch("optionda.cli.sync_completed_session", side_effect=fake_sync),
+        patch("optionda.cli.session_due", side_effect=fake_due),
+        patch("optionda.cli.mark_account", return_value=[]),
+        patch("optionda.cli.time.sleep", side_effect=fake_sleep),
+        patch("optionda.cli.resolve_poll_interval", return_value=1),
+    ):
+        result = runner.invoke(app, ["run"])
+    assert calls["n"] >= 2
+    assert result.exception is None or isinstance(result.exception, SystemExit)

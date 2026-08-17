@@ -64,13 +64,19 @@ from optionda.batch import (
     sell_from_line,
 )
 from optionda.engine import (
-    apply_surface_reference_ivs,
-    calibrate_surfaces,
-    ensure_surfaces,
+    attach_live_option_mids,
     freeze_iv_for_position,
     mark_account,
+    sync_completed_session,
 )
-from optionda.journal import append_export_log, book_path, log_path, sync_book
+from optionda.journal import (
+    append_export_log,
+    append_verify_log,
+    book_path,
+    log_path,
+    sync_book,
+)
+from optionda.market.session import session_due
 from optionda.market.alpaca import AlpacaClient, AlpacaError
 from optionda.market.router import MarketRouter, resolve_poll_interval
 from optionda.models import Position
@@ -83,12 +89,7 @@ from optionda.occ import (
     require_entry,
     resolve_qty,
 )
-from optionda.pricing.surface import (
-    is_surface_fresh,
-    last_completed_session_date,
-    load_surface,
-    sticky_delta_iv,
-)
+from optionda.pricing.surface import is_surface_fresh, load_surface, sticky_delta_iv
 from optionda.paths import resolve_home, resolve_home_info
 from optionda.promptenv import (
     install_current_env_prompt,
@@ -702,8 +703,11 @@ def add_cmd(
         console.print(
             render_batch_summary(summary, book=book_path(outcome.account.name, home))
         )
-        _ensure_close_surfaces(
-            outcome.account, [pos.underlying], home=home, console=console
+        _sync_session(
+            outcome.account,
+            home=home,
+            console=console,
+            only={pos.underlying},
         )
         return
 
@@ -726,80 +730,65 @@ def add_cmd(
         if row.status in {"ok", "merge"} and row.occ
     ]
     if added:
-        _ensure_close_surfaces(acc, added, home=home, console=console)
+        _sync_session(acc, home=home, console=console, only=set(added))
     if result.failed:
         raise typer.Exit(1)
 
 
-def _ensure_close_surfaces(
-    account,
-    underlyings: list[str],
-    *,
-    home,
-    console: Console,
-    now: datetime | None = None,
-) -> None:
-    """Build missing close IV surfaces so Spot % and Model IV use last session."""
-    names = [name.strip().upper() for name in underlyings if name]
-    if not names:
-        return
-    result = ensure_surfaces(account, names, home=home, now=now)
-    for name, surface in result.surfaces.items():
-        console.print(f"[dim]surface {name} close={surface.spot:.2f}[/dim]")
-    for name, err in result.errors.items():
-        console.print(f"[yellow]surface {name}: {err}[/yellow]")
-
-
-def _align_session_surfaces(
+def _sync_session(
     account,
     *,
     home,
     console: Console,
     now: datetime | None = None,
-) -> None:
-    """Once, before run/export: calibrate names not on the last completed close."""
-    names = sorted({pos.underlying.upper() for pos in account.positions if pos.underlying})
-    if not names:
-        return
-    if MarketRouter(home).feed_name != "alpaca":
-        return
-    current = now or datetime.now(timezone.utc)
-    stale = [
-        name
-        for name in names
-        if not _has_aligned_surface(name, home, current)
-    ]
-    if not stale:
-        return
-    session = last_completed_session_date(current)
-    label = f"align close IV {session.month}/{session.day}"
-    with _mark_progress() as progress:
-        task = progress.add_task(f"{label} 0/{len(stale)}", total=max(len(stale), 1))
+    force: bool = False,
+    fresh: bool = False,
+    only: set[str] | None = None,
+    on_progress=None,
+):
+    """Check Alpaca's completed session and freeze new close/IV when needed."""
+    result = sync_completed_session(
+        account,
+        home=home,
+        now=now,
+        force=force,
+        fresh=fresh,
+        only=only,
+        on_progress=on_progress,
+    )
+    _print_sync_result(result, console)
+    return result
 
-        def on_progress(step: str, done: int, steps: int) -> None:
-            progress.update(
-                task,
-                description=f"{label} {done}/{steps}  {step}",
-                completed=min(done, steps),
-                total=max(steps, 1),
-            )
 
-        result = ensure_surfaces(
-            account,
-            stale,
-            home=home,
-            now=current,
-            on_progress=on_progress,
+def _print_sync_result(result, console: Console) -> None:
+    if result.unavailable:
+        console.print(
+            f"[yellow]calendar/clock unavailable: {result.unavailable} — "
+            "keeping stored close/IV[/yellow]"
         )
-    for name, surface in result.surfaces.items():
-        console.print(f"[dim]surface {name} close={surface.spot:.2f}[/dim]")
-    for name, err in result.errors.items():
-        console.print(f"[yellow]surface {name}: {err}[/yellow]")
-
-
-def _has_aligned_surface(underlying: str, home, now: datetime) -> bool:
-    surface = load_surface(underlying, home)
-    return surface is not None and is_surface_fresh(surface, now)
+        return
+    session = result.completed_session
+    if session is not None:
+        console.print(
+            f"[dim]completed session {session.session_date.month}/"
+            f"{session.session_date.day}[/dim]"
+        )
+    for name, reference in result.references_saved.items():
+        console.print(
+            f"[dim]close {name} {reference.close_spot:.2f} "
+            f"({reference.source})[/dim]"
+        )
+    for name, surface in result.surfaces_saved.items():
+        day = surface.session_date
+        label = f"{day.month}/{day.day}" if day is not None else "legacy"
+        console.print(f"[dim]surface {name} IV {label}[/dim]")
+    for name, reason in result.pending_closes.items():
+        console.print(f"[yellow]close pending {name}: {reason}[/yellow]")
+    for name, reason in result.pending_surfaces.items():
+        console.print(f"[yellow]IV pending {name}: {reason}[/yellow]")
+    for name, reason in result.errors.items():
+        if name not in result.pending_surfaces:
+            console.print(f"[yellow]session {name}: {reason}[/yellow]")
 
 
 @app.command("delete")
@@ -1015,10 +1004,7 @@ def refresh_iv_cmd(
     fresh: bool = typer.Option(
         False,
         "--fresh",
-        help=(
-            "Require option quotes ≤20 minutes old (US RTH). "
-            "Default accepts last-session / close quotes up to 18h."
-        ),
+        help="Force-rebuild the latest completed session during US RTH.",
     ),
     allow_stale: bool = typer.Option(
         False,
@@ -1027,12 +1013,8 @@ def refresh_iv_cmd(
         help="Deprecated no-op; close quotes are already the default.",
     ),
 ) -> None:
-    """Calibrate Alpaca IV surfaces from last-session quotes (default) and refresh IVs."""
-    from optionda.pricing.surface import (
-        FRESH_CALIBRATION_QUOTE_AGE,
-        MAX_CALIBRATION_QUOTE_AGE,
-    )
-
+    """Sync frozen IV to the latest completed US equity session."""
+    del allow_stale
     store = _store()
     try:
         acc = store.require_current()
@@ -1045,14 +1027,11 @@ def refresh_iv_cmd(
     if router.feed_name != "alpaca":
         _err("refresh-iv needs Alpaca — run: optionda key alpaca <id> <secret>")
         raise typer.Exit(1)
-    # Default: freeze the prior session smile (desk is used outside RTH).
-    # --fresh tightens to live RTH quotes; --allow-stale kept as hidden no-op.
-    age = FRESH_CALIBRATION_QUOTE_AGE if fresh else MAX_CALIBRATION_QUOTE_AGE
-    mode = "fresh ≤20m" if fresh else "close ≤18h"
+    mode = "fresh RTH rebuild" if fresh else "latest completed session"
     n_underlyings = len({p.underlying for p in acc.positions})
     console.print(
-        f"[dim]calibrating IV surfaces via {router.feed_name} option chains"
-        f" ({mode}, {n_underlyings} underlyings)…[/dim]"
+        f"[dim]syncing IV surfaces via {router.feed_name} "
+        f"({mode}, {n_underlyings} underlyings)…[/dim]"
     )
     try:
         with _mark_progress(transient=False) as progress:
@@ -1069,50 +1048,31 @@ def refresh_iv_cmd(
                     total=steps,
                 )
 
-            result = calibrate_surfaces(
+            result = _sync_session(
                 acc,
                 home=home,
-                router=router,
-                max_quote_age=age,
+                console=console,
+                force=fresh,
+                fresh=fresh,
                 on_progress=on_progress,
             )
     except Exception as exc:  # noqa: BLE001
-        _err(f"surface calibration failed; retained existing IV*: {exc}")
+        _err(f"session sync failed; retained existing IV: {exc}")
         raise typer.Exit(1) from exc
 
-    for underlying, message in sorted(result.errors.items()):
-        console.print(f"[yellow]skip {underlying}: {message}[/yellow]")
-    for surface in result.surfaces.values():
-        accepted = surface.quality.get("accepted", 0)
-        rejected = surface.quality.get("rejected", 0)
-        console.print(
-            f"[green]ok {surface.underlying}[/green]  "
-            f"accepted={accepted} rejected={rejected}  "
-            f"as_of={surface.as_of.isoformat()}"
-        )
-
-    if not result.surfaces:
+    if result.unavailable:
+        raise typer.Exit(1)
+    if fresh and not result.surfaces_saved:
         _err(
             "no surfaces calibrated — no usable option quotes in the last "
             "session window. Retry later, or: optionda refresh-iv --fresh "
             "during US RTH"
         )
         raise typer.Exit(1)
+    if not result.surfaces_saved and result.errors and not result.pending_surfaces:
+        _err("no surfaces calibrated")
+        raise typer.Exit(1)
 
-    spots = router.get_spots([position.underlying for position in acc.positions])
-    cfg = load_config(home)
-    acc.positions = apply_surface_reference_ivs(
-        acc.positions,
-        result.surfaces,
-        spots={symbol: quote.price for symbol, quote in spots.items()},
-        rate=lambda days: rate_for_days(cfg, days),
-        dividend=lambda symbol: dividend_for_symbol(cfg, symbol),
-        now=datetime.now(timezone.utc),
-    )
-    for pos in acc.positions:
-        console.print(
-            f"  {pos.occ_symbol} IV*={pos.iv_frozen * 100:.1f}% (src={pos.iv_source})"
-        )
     store.update_positions(
         acc,
         log_refresh_iv=True,
@@ -1124,12 +1084,13 @@ def refresh_iv_cmd(
                 "accepted": surface.quality.get("accepted", 0),
                 "rejected": surface.quality.get("rejected", 0),
             }
-            for surface in result.surfaces.values()
+            for surface in result.surfaces_saved.values()
         ],
     )
+    saved = len(result.surfaces_saved)
+    pending = len(result.pending_surfaces)
     _ok(
-        f"surface calibration complete "
-        f"({len(result.surfaces)} ok, {len(result.errors)} skipped) · "
+        f"session sync complete ({saved} rebuilt, {pending} pending) · "
         f"log: {log_path(acc.name, home)}"
     )
 
@@ -1357,6 +1318,53 @@ def backtest_cmd() -> None:
     )
 
 
+@app.command("verify")
+def verify_cmd() -> None:
+    """Mark the book, then compare Model$ to live option mids (explicit only)."""
+    store = _store()
+    try:
+        acc = store.require_current()
+    except StoreError as exc:
+        _err(str(exc))
+        raise typer.Exit(1) from exc
+    home = _home_opt()
+    sync = _sync_session(acc, home=home, console=console)
+    router = MarketRouter(home)
+    total = _mark_step_total(len(acc.positions))
+    with _mark_progress() as progress:
+        task = progress.add_task(f"verify 0/{total}", total=total)
+
+        def on_progress(label: str, done: int, steps: int) -> None:
+            progress.update(
+                task,
+                completed=min(done, steps),
+                total=max(steps, 1),
+                description=label,
+            )
+
+        rows = mark_account(
+            acc,
+            home=home,
+            router=router,
+            on_progress=on_progress,
+            completed_session=sync.completed_session,
+        )
+        progress.update(task, description="live option mids…", completed=total)
+        rows = attach_live_option_mids(rows, router=router)
+        append_verify_log(acc, rows, feed=router.feed_name, home=home)
+    realized = float(realized_pnl_summary(acc.name, home)["realized"])
+    console.print(
+        render_snapshot(
+            account=acc.name,
+            feed=router.feed_name,
+            refresh_sec=resolve_poll_interval(home),
+            rows=rows,
+            realized=realized,
+            continuous=False,
+        )
+    )
+
+
 @app.command("export")
 def export_cmd() -> None:
     """Print a MODEL snapshot and append it to the account log under ~/.optionda."""
@@ -1367,7 +1375,7 @@ def export_cmd() -> None:
         _err(str(exc))
         raise typer.Exit(1) from exc
     home = _home_opt()
-    _align_session_surfaces(acc, home=home, console=console)
+    sync = _sync_session(acc, home=home, console=console)
     feed = MarketRouter(home).feed_name
     refresh = resolve_poll_interval(home)
     total = _mark_step_total(len(acc.positions))
@@ -1383,7 +1391,12 @@ def export_cmd() -> None:
                 description=label,
             )
 
-        rows = mark_account(acc, home=home, on_progress=on_progress)
+        rows = mark_account(
+            acc,
+            home=home,
+            on_progress=on_progress,
+            completed_session=sync.completed_session,
+        )
         progress.update(task, description="writing book & log…", completed=total)
         sync_book(acc, home)
         append_export_log(acc, rows, feed=feed, home=home, source="export")
@@ -1416,7 +1429,9 @@ def run_cmd() -> None:
     except StoreError as exc:
         _err(str(exc))
         raise typer.Exit(1) from exc
-    _align_session_surfaces(acc, home=home, console=console)
+    sync = _sync_session(acc, home=home, console=console)
+    next_close_at = sync.next_close_at
+    next_retry_at = sync.next_retry_at
 
     refresh = resolve_poll_interval(home)
     prev_spots: dict[str, float] = {}
@@ -1466,6 +1481,17 @@ def run_cmd() -> None:
         """Mark account. Under Live, keep the last table painted; only the header bar moves."""
         acc = store.require_current()
         router = MarketRouter(home)
+        nonlocal next_close_at, next_retry_at
+        if session_due(
+            datetime.now(timezone.utc),
+            next_close_at=next_close_at,
+            next_retry_at=next_retry_at,
+        ):
+            synced = _sync_session(acc, home=home, console=console)
+            next_close_at = synced.next_close_at
+            next_retry_at = synced.next_retry_at
+            if synced.completed_session is not None:
+                sync.completed_session = synced.completed_session
         total = _mark_step_total(len(acc.positions))
 
         if live is None:
@@ -1481,7 +1507,11 @@ def run_cmd() -> None:
                     )
 
                 rows = mark_account(
-                    acc, home=home, router=router, on_progress=on_progress
+                    acc,
+                    home=home,
+                    router=router,
+                    on_progress=on_progress,
+                    completed_session=sync.completed_session,
                 )
                 progress.update(
                     task, description="writing book & log…", completed=total
@@ -1525,7 +1555,11 @@ def run_cmd() -> None:
             ),
         )
         rows = mark_account(
-            acc, home=home, router=router, on_progress=on_live_progress
+            acc,
+            home=home,
+            router=router,
+            on_progress=on_live_progress,
+            completed_session=sync.completed_session,
         )
         _paint_live(
             live,

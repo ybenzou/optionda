@@ -93,4 +93,5 @@ def ensure_home(root: Path | str | None = None) -> Path:
     (home / "books").mkdir(parents=True, exist_ok=True)
     (home / "logs").mkdir(parents=True, exist_ok=True)
     (home / "surfaces").mkdir(parents=True, exist_ok=True)
+    (home / "session_refs").mkdir(parents=True, exist_ok=True)
     return home

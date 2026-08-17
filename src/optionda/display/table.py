@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
 from rich import box
@@ -89,6 +89,12 @@ def _fmt_iv(value: float) -> str:
     return f"{value * 100:.1f}%"
 
 
+def _date_label(value: date | None) -> str | None:
+    if value is None:
+        return None
+    return f"{value.month}/{value.day}"
+
+
 def _iv_asof_label(as_of: datetime | None) -> str | None:
     """US session calendar date for the IV used in Model$."""
     if as_of is None:
@@ -104,16 +110,56 @@ def _model_iv_cell(
     as_of: datetime | None,
     *,
     stale: bool,
+    session: date | None = None,
+    fallback: bool = False,
 ) -> Text:
     if iv is None:
         return Text("—", style=_MUTED)
     cell = Text(_fmt_iv(iv), style="cyan")
-    label = _iv_asof_label(as_of)
+    label = _date_label(session) or _iv_asof_label(as_of)
     if label is None:
         return cell
-    style = "bold yellow" if stale else _MUTED
-    cell.append(f"  {label}", style=style)
+    style = "bold yellow" if stale or fallback else _MUTED
+    suffix = f"  {label}"
+    if fallback:
+        suffix += " fb"
+    cell.append(suffix, style=style)
     return cell
+
+
+def _session_status_line(rows: list[RowMark]) -> Text | None:
+    if not rows:
+        return None
+    iv_dates = {
+        row.surface_session_date
+        for row in rows
+        if row.surface_session_date is not None
+    }
+    close_dates = {
+        row.reference_session_date
+        for row in rows
+        if row.reference_session_date is not None
+    }
+    pending = any(row.iv_stale for row in rows)
+    fallback = any(row.iv_fallback for row in rows)
+    parts: list[str] = []
+    if pending or fallback:
+        used = next(iter(sorted(iv_dates)), None)
+        if used is not None:
+            parts.append(f"IV pending, using {_date_label(used)}")
+        elif fallback:
+            parts.append("IV fallback")
+        else:
+            parts.append("IV pending")
+    elif iv_dates:
+        label = "/".join(_date_label(item) or "" for item in sorted(iv_dates))
+        parts.append(f"IV {label}")
+    if close_dates:
+        label = "/".join(_date_label(item) or "" for item in sorted(close_dates))
+        parts.append(f"close {label}")
+    if not parts:
+        return None
+    return Text("  ·  ".join(parts), style="bold yellow" if pending or fallback else _MUTED)
 
 
 FlashPhase = str  # "hot" | "warm" | "idle"
@@ -430,16 +476,26 @@ def render_snapshot(
 
     for row in rows:
         pos = row.position
-        model_iv = row.surface_iv if row.surface_iv is not None else pos.iv_frozen
+        model_iv = (
+            row.model_iv
+            if row.model_iv is not None
+            else row.surface_iv if row.surface_iv is not None else pos.iv_frozen
+        )
         iv_as_of = row.surface_as_of if row.surface_as_of is not None else pos.iv_as_of
-        iv_stale = row.valuation_mode != "surface"
+        iv_stale = row.iv_stale or row.iv_fallback or row.valuation_mode != "surface"
         if row.error:
             table.add_row(
                 Text(pos.occ_symbol, style=_OCC),
                 _side_cell(pos.side),
                 f"{pos.qty:g}",
                 "—",
-                _model_iv_cell(model_iv, iv_as_of, stale=iv_stale),
+                _model_iv_cell(
+                    model_iv,
+                    iv_as_of,
+                    stale=iv_stale,
+                    session=row.surface_session_date,
+                    fallback=row.iv_fallback,
+                ),
                 _fmt_money(pos.entry_premium),
                 Text(row.error, style="red"),
                 "—",
@@ -458,7 +514,13 @@ def render_snapshot(
                 prev_s.get(pos.id),
                 phase=phase,
             ),
-            _model_iv_cell(model_iv, iv_as_of, stale=iv_stale),
+            _model_iv_cell(
+                model_iv,
+                iv_as_of,
+                stale=iv_stale,
+                session=row.surface_session_date,
+                fallback=row.iv_fallback,
+            ),
             Text(
                 _fmt_money(row.cost if row.cost is not None else pos.entry_premium),
                 style=_NUM,
@@ -480,20 +542,22 @@ def render_snapshot(
         (f"[{account}]", "bold cyan"),
         ("  optionda", "bold bright_white"),
     )
+    status = _session_status_line(rows)
+    header = [_meta_line(
+        feed=feed,
+        refresh_sec=refresh_sec,
+        continuous=continuous,
+        phase=phase,
+        eta_sec=eta_sec,
+        poll_fraction=poll_fraction,
+        poll_label=poll_label,
+        poll_busy=poll_busy,
+    )]
+    if status is not None:
+        header.append(status)
+    header.append(table)
     desk = Panel(
-        Group(
-            _meta_line(
-                feed=feed,
-                refresh_sec=refresh_sec,
-                continuous=continuous,
-                phase=phase,
-                eta_sec=eta_sec,
-                poll_fraction=poll_fraction,
-                poll_label=poll_label,
-                poll_busy=poll_busy,
-            ),
-            table,
-        ),
+        Group(*header),
         title=title,
         title_align="left",
         border_style=border,

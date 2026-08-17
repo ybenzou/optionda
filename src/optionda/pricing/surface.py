@@ -8,11 +8,16 @@ from collections.abc import Callable
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from optionda.market.session import (
+    MAX_NODE_QUOTE_SKEW,
+    MarketSession,
+    quote_in_close_window,
+)
 from optionda.occ import OccError, parse_occ
 from optionda.paths import ensure_home
 from optionda.pricing.bs import implied_volatility, price_option, years_to_expiry
 
-SURFACE_SCHEMA_VERSION = 2
+SURFACE_SCHEMA_VERSION = 3
 MAX_QUOTE_SPREAD_RATIO = 0.50
 # Default: last-session / close quotes (desk is used mostly outside RTH).
 MAX_CALIBRATION_QUOTE_AGE = timedelta(hours=18)
@@ -51,6 +56,17 @@ class IvSurface:
     smiles: list[ExpirySmile]
     quality: dict[str, int]
     schema_version: int = SURFACE_SCHEMA_VERSION
+    session_date: date | None = None
+    session_close_at: datetime | None = None
+    legacy: bool = False
+
+    @property
+    def calibration_spot(self) -> float:
+        return self.spot
+
+    @property
+    def quote_as_of(self) -> datetime:
+        return self.as_of
 
 
 @dataclass(frozen=True)
@@ -85,8 +101,10 @@ def build_surface(
     as_of: datetime,
     source: str,
     quote_as_of: datetime | None = None,
+    target_session: MarketSession | None = None,
     max_quote_spread_ratio: float = MAX_QUOTE_SPREAD_RATIO,
     max_quote_age: timedelta = MAX_CALIBRATION_QUOTE_AGE,
+    max_node_quote_skew: timedelta = MAX_NODE_QUOTE_SKEW,
     rate: float | Callable[[float], float] = 0.045,
     dividend: float | Callable[[str], float] = 0.0,
     style: str = "american",
@@ -96,6 +114,13 @@ def build_surface(
         raise ValueError("surface spot must be > 0")
     symbol = underlying.strip().upper()
     calibration_time = quote_as_of or as_of
+    if target_session is not None and not quote_in_close_window(
+        calibration_time, target_session
+    ):
+        raise ValueError(
+            f"option quotes at {calibration_time.isoformat()} are outside the "
+            f"{target_session.session_date.isoformat()} close window"
+        )
     by_expiry: dict[date, list[SurfaceNode]] = {}
     accepted = 0
     rejected = 0
@@ -112,8 +137,8 @@ def build_surface(
         if not _has_usable_quote(
             node,
             max_quote_spread_ratio,
-            as_of=as_of,
-            max_quote_age=max_quote_age,
+            as_of=calibration_time,
+            max_quote_age=min(max_quote_age, max_node_quote_skew),
         ):
             rejected += 1
             continue
@@ -182,6 +207,16 @@ def build_surface(
     ]
     if not smiles:
         raise ValueError(f"no usable surface nodes for {symbol}")
+    session_date = (
+        target_session.session_date
+        if target_session is not None
+        else last_completed_session_date(_utc(calibration_time))
+    )
+    session_close_at = (
+        target_session.close_at
+        if target_session is not None
+        else last_completed_close_at(_utc(calibration_time))
+    )
     return IvSurface(
         underlying=symbol,
         spot=spot,
@@ -189,6 +224,10 @@ def build_surface(
         source=source,
         smiles=smiles,
         quality={"accepted": accepted, "rejected": rejected},
+        session_date=session_date,
+        session_close_at=session_close_at,
+        schema_version=SURFACE_SCHEMA_VERSION,
+        legacy=False,
     )
 
 
@@ -198,9 +237,20 @@ def save_surface(surface: IvSurface, home: Path | None = None) -> Path:
         "schema_version": surface.schema_version,
         "underlying": surface.underlying,
         "spot": surface.spot,
+        "calibration_spot": surface.calibration_spot,
         "as_of": surface.as_of.isoformat(),
+        "quote_as_of": surface.quote_as_of.isoformat(),
         "source": surface.source,
         "quality": surface.quality,
+        "session_date": (
+            surface.session_date.isoformat() if surface.session_date else None
+        ),
+        "session_close_at": (
+            surface.session_close_at.isoformat()
+            if surface.session_close_at is not None
+            else None
+        ),
+        "legacy": surface.legacy,
         "smiles": [
             {
                 "expiry": smile.expiry.isoformat(),
@@ -226,7 +276,9 @@ def save_surface(surface: IvSurface, home: Path | None = None) -> Path:
             for smile in surface.smiles
         ],
     }
-    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(path)
     return path
 
 
@@ -235,8 +287,22 @@ def load_surface(underlying: str, home: Path | None = None) -> IvSurface | None:
     if not path.exists():
         return None
     raw = json.loads(path.read_text(encoding="utf-8"))
-    if raw.get("schema_version") not in (1, SURFACE_SCHEMA_VERSION):
+    schema = int(raw.get("schema_version") or 0)
+    if schema not in (1, 2, SURFACE_SCHEMA_VERSION):
         return None
+    legacy = bool(raw.get("legacy")) or schema < SURFACE_SCHEMA_VERSION
+    as_of = _parse_ts(str(raw.get("quote_as_of") or raw["as_of"]))
+    spot = float(raw.get("calibration_spot", raw["spot"]))
+    session_date = (
+        date.fromisoformat(str(raw["session_date"]))
+        if raw.get("session_date")
+        else surface_session_date_from_as_of(as_of)
+    )
+    session_close_at = (
+        _parse_ts(str(raw["session_close_at"]))
+        if raw.get("session_close_at")
+        else last_completed_close_at(as_of)
+    )
     smiles = [
         ExpirySmile(
             expiry=date.fromisoformat(item["expiry"]),
@@ -284,12 +350,15 @@ def load_surface(underlying: str, home: Path | None = None) -> IvSurface | None:
     ]
     return IvSurface(
         underlying=str(raw["underlying"]).upper(),
-        spot=float(raw["spot"]),
-        as_of=_parse_ts(raw["as_of"]),
+        spot=spot,
+        as_of=as_of,
         source=str(raw["source"]),
         smiles=smiles,
         quality={key: int(value) for key, value in raw.get("quality", {}).items()},
-        schema_version=SURFACE_SCHEMA_VERSION,
+        schema_version=schema,
+        session_date=session_date,
+        session_close_at=session_close_at,
+        legacy=legacy,
     )
 
 
@@ -312,6 +381,8 @@ def sticky_delta_iv(
         (candidate for candidate in surface.smiles if candidate.expiry == position.expiry),
         None,
     )
+    if smile is None:
+        return None
     wing = [
         node for node in smile.nodes
         if node.option_type == position.option_type
@@ -458,8 +529,25 @@ def last_completed_close_at(now: datetime) -> datetime:
     return datetime(session.year, session.month, session.day, 16, 0, tzinfo=_ET)
 
 
+def surface_session_date_from_as_of(as_of: datetime) -> date:
+    return _utc(as_of).astimezone(_ET).date()
+
+
 def surface_session_date(surface: IvSurface) -> date:
-    return _utc(surface.as_of).astimezone(_ET).date()
+    if surface.session_date is not None:
+        return surface.session_date
+    return surface_session_date_from_as_of(surface.as_of)
+
+
+def surface_matches_session(
+    surface: IvSurface,
+    session: MarketSession,
+    *,
+    allow_legacy: bool = False,
+) -> bool:
+    if surface.legacy and not allow_legacy:
+        return False
+    return surface_session_date(surface) == session.session_date
 
 
 def is_surface_fresh(
@@ -467,6 +555,7 @@ def is_surface_fresh(
     now: datetime,
     *,
     max_age: timedelta = MAX_SURFACE_AGE,
+    session: MarketSession | None = None,
 ) -> bool:
     """True when the surface is last-session close quotes, not a pre-open freeze.
 
@@ -474,6 +563,10 @@ def is_surface_fresh(
     half-hour of that session as the close. ``max_age`` is kept for callers.
     """
     del max_age
+    if session is not None:
+        return surface_matches_session(surface, session)
+    if surface.session_date is not None and not surface.legacy:
+        return surface.session_date == last_completed_session_date(now)
     close_at = last_completed_close_at(now)
     return _utc(surface.as_of) >= _utc(close_at) - _CLOSE_QUOTE_SLACK
 

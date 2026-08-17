@@ -87,3 +87,4 @@ def test_ensure_home_creates_dirs(monkeypatch, tmp_path: Path) -> None:
     assert (root / "books").is_dir()
     assert (root / "logs").is_dir()
     assert (root / "surfaces").is_dir()
+    assert (root / "session_refs").is_dir()
