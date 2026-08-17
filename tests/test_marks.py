@@ -1,6 +1,8 @@
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from optionda.analytics import build_report
 from optionda.gui.charts import mark_xy, position_mark_xy
 from optionda.journal import log_path
@@ -85,6 +87,30 @@ def test_book_on_keeps_open_then_drops_closed(tmp_path) -> None:
     gone = book_on(events, date(2026, 3, 12))
     assert gone.lots == []
     assert gone.realized_cum == 225.0
+
+
+def test_book_on_applies_compact_refresh_iv() -> None:
+    held = book_on(
+        [
+            {
+                "ts": _ts("2026-03-10"),
+                "event": "add",
+                "id": "hood",
+                "occ": "HOOD260618C00150000",
+                "qty": 1,
+                "cost": 5.2,
+                "iv": 0.45,
+                "side": "long",
+            },
+            {
+                "ts": _ts("2026-03-11"),
+                "event": "refresh_iv",
+                "ivs": {"hood": 0.60},
+            },
+        ],
+        date(2026, 3, 11),
+    )
+    assert held.lots[0].iv == pytest.approx(0.60)
 
 
 def test_mark_lot_matches_desk_upnl_formula() -> None:

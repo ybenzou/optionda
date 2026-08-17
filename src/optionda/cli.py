@@ -984,7 +984,7 @@ def stats_cmd(
 
 @app.command("pack")
 def pack_cmd() -> None:
-    """Export active account + config + keys as a pasteable sync code (no journal/surfaces)."""
+    """Export active account + slim journal + keys as a pasteable sync code."""
     store = _store()
     try:
         packed = pack_account(store, home=_home_opt())
@@ -995,6 +995,7 @@ def pack_cmd() -> None:
     console.print(f"sha256:{packed.sha256}")
     console.print(
         f"[dim]packed {packed.account}  positions={packed.n_positions}  "
+        f"events={packed.n_events}  "
         f"creds={'yes' if packed.has_creds else 'no'}[/dim]"
     )
 
@@ -1022,7 +1023,7 @@ def unpack_cmd(
         help="skip automatic refresh-iv after import",
     ),
 ) -> None:
-    """Import a pack code: replace account, restore config/keys, then refresh-iv."""
+    """Import a pack code: replace account and journal, restore keys, then refresh-iv."""
     store = _store()
     home = _home_opt()
     block = (code or "").strip()
@@ -1088,6 +1089,7 @@ def unpack_cmd(
     _ok(
         f"unpacked {bundle.account.name}  "
         f"positions={len(bundle.account.positions)}  "
+        f"events={len(bundle.journal or [])}  "
         f"creds={'restored' if bundle.key_id else 'unchanged'}"
     )
     set_terminal_title(bundle.account.name)

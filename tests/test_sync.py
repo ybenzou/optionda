@@ -1,15 +1,20 @@
+import json
 from datetime import date, datetime, timezone
 
 import pytest
 
+from optionda.analytics import build_report, read_events
 from optionda.config import load_config, save_config
 from optionda.credentials import load_alpaca, save_alpaca
+from optionda.journal import append_event, log_path
+from optionda.marks import book_on
 from optionda.models import AppConfig, Position
 from optionda.store import AccountStore
 from optionda.sync import (
     PREFIX,
     SyncError,
     decode_code,
+    encode_payload,
     fingerprint,
     pack_account,
     unpack_code,
@@ -121,3 +126,100 @@ def test_decode_rejects_garbage() -> None:
         decode_code("not-a-code")
     with pytest.raises(SyncError):
         decode_code(PREFIX + "@@@@")
+
+
+def _fat_journal(tmp_path, monkeypatch) -> AccountStore:
+    store = AccountStore(tmp_path)
+    store.create("desk")
+    monkeypatch.setenv("OPTIONDA_ACTIVE", "desk")
+    store.add_position(None, _pos())
+    account = store.load("desk")
+    account.positions[0] = account.positions[0].model_copy(update={"iv_frozen": 0.55})
+    store.update_positions(account, log_refresh_iv=True)
+    append_event(
+        "desk",
+        {
+            "event": "export",
+            "feed": "alpaca",
+            "sum_model": 1.0,
+            "n": 1,
+            "rows": [{"occ": "SPCX260918P00100000", "qty": 2, "upnl": 10.0}],
+        },
+        home=tmp_path,
+    )
+    store.sell_position(None, account.positions[0].id, qty=1, exit_premium=7.1)
+    return store
+
+
+def test_pack_keeps_commands_and_iv_changes_only(tmp_path, monkeypatch) -> None:
+    store = _fat_journal(tmp_path, monkeypatch)
+    packed = pack_account(store, home=tmp_path)
+    bundle = decode_code(packed.code)
+    kinds = [event.get("event") for event in bundle.journal]
+    assert kinds == ["add", "refresh_iv", "sell"]
+    assert packed.n_events == 3
+    for event in bundle.journal:
+        assert "book" not in event
+        assert "rows" not in event
+        assert "surfaces" not in event
+    refresh = bundle.journal[1]
+    assert refresh["ivs"]
+    assert all(isinstance(value, float) and value > 0 for value in refresh["ivs"].values())
+
+
+def test_unpack_writes_slim_journal_for_stats(tmp_path, monkeypatch) -> None:
+    src = _fat_journal(tmp_path / "src", monkeypatch)
+    packed = pack_account(src, home=tmp_path / "src")
+    dest = tmp_path / "dest"
+    other = AccountStore(dest)
+    unpack_code(other, packed.code, home=dest, overwrite=True)
+
+    events = read_events(log_path("desk", dest))
+    assert [event.get("event") for event in events] == ["add", "refresh_iv", "sell"]
+    assert all("book" not in event for event in events)
+
+    held = book_on(events, date(2099, 1, 1))
+    assert len(held.lots) == 1
+    assert held.lots[0].qty == pytest.approx(1.0)
+    assert held.lots[0].iv == pytest.approx(0.55)
+    assert held.realized_cum > 0
+
+    report = build_report("desk", dest, with_marks=False)
+    assert report.n_sells == 1
+    assert len(report.open_lots) == 1
+    assert report.open_lots[0].occ == "SPCX260918P00100000"
+
+
+def test_v1_pack_does_not_replace_destination_journal(tmp_path, monkeypatch) -> None:
+    src = AccountStore(tmp_path / "src")
+    src.create("desk")
+    monkeypatch.setenv("OPTIONDA_ACTIVE", "desk")
+    src.add_position(None, _pos())
+    account = json.loads(src.load("desk").model_dump_json())
+    packed = encode_payload(
+        {"v": 1, "account": account, "config": {}, "creds": None}
+    )
+
+    dest = tmp_path / "dest"
+    dest_store = AccountStore(dest)
+    dest_store.create("desk")
+    log_path("desk", dest).write_text(
+        '{"ts":"2026-03-10T20:00:00+00:00","event":"add","id":"keep","occ":"HOOD260618C00150000","qty":1,"cost":1,"iv":0.4}\n',
+        encoding="utf-8",
+    )
+    unpack_code(dest_store, packed.code, home=dest, overwrite=True)
+    kept = read_events(log_path("desk", dest))
+    assert kept[0]["id"] == "keep"
+
+
+def test_invalid_journal_rejects_unpack(tmp_path, monkeypatch) -> None:
+    store = AccountStore(tmp_path)
+    store.create("desk")
+    monkeypatch.setenv("OPTIONDA_ACTIVE", "desk")
+    store.add_position(None, _pos())
+    account = json.loads(store.load("desk").model_dump_json())
+    packed = encode_payload(
+        {"v": 2, "account": account, "config": {}, "creds": None, "journal": "nope"}
+    )
+    with pytest.raises(SyncError, match="journal"):
+        decode_code(packed.code)

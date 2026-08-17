@@ -139,6 +139,14 @@ def _apply_event(
                 lots.pop(str(row.get("id") or ""), None)
         return
     if kind == "refresh_iv":
+        ivs = event.get("ivs") if isinstance(event.get("ivs"), dict) else {}
+        for position_id, raw_iv in ivs.items():
+            current = lots.get(str(position_id))
+            if current is None:
+                continue
+            iv = _as_float(raw_iv)
+            if iv is not None and iv > 0:
+                current.iv = iv
         book = event.get("book") if isinstance(event.get("book"), list) else []
         for row in book:
             if not isinstance(row, dict):

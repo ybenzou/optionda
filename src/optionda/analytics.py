@@ -645,6 +645,30 @@ def build_report(
         elif kind in {"run", "export"}:
             book = _parse_book(event)
 
+    if book.source is None:
+        from optionda.marks import book_on
+
+        replayed = book_on(raw, end)
+        book = BookSnapshot(
+            source="replay",
+            n=len(replayed.lots),
+            rows=[
+                {
+                    "occ": lot.occ,
+                    "underlying": lot.underlying,
+                    "side": lot.side,
+                    "option_type": lot.option_type,
+                    "qty": lot.qty,
+                    "cost": lot.cost,
+                    "upnl": None,
+                    "notional": None,
+                    "dte": None,
+                    "model": None,
+                }
+                for lot in replayed.lots
+            ],
+        )
+
     sells = [item for item in sells_all if in_period(item.et_date, start, end)]
     entries = [item for item in entries_all if in_period(item.et_date, start, end)]
     lots = [item for item in _closed_lots(sells_all, first_open) if in_period(item.et_date, start, end)]

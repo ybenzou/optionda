@@ -1,4 +1,4 @@
-"""Clipboard sync: pack / unpack account snapshot (no journal, no surfaces)."""
+"""Clipboard sync: pack / unpack account + slim journal (no surfaces)."""
 
 from __future__ import annotations
 
@@ -11,11 +11,51 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from optionda.analytics import read_events
 from optionda.config import load_config, save_config
 from optionda.credentials import load_alpaca, save_alpaca
-from optionda.journal import sync_book
+from optionda.journal import log_path, replace_log, sync_book
 from optionda.models import Account, AppConfig
 from optionda.store import AccountStore, StoreError
+
+PACK_VERSION = 2
+_SUPPORTED_VERSIONS = {1, 2}
+_MUTATION_EVENTS = {"add", "merge", "sell", "delete", "refresh_iv"}
+_ADD_KEYS = (
+    "ts",
+    "account",
+    "event",
+    "id",
+    "occ",
+    "side",
+    "qty_added",
+    "cost_added",
+    "qty",
+    "cost",
+    "qty_before",
+    "cost_before",
+    "iv",
+    "iv_source",
+    "dte_at_entry",
+)
+_SELL_KEYS = (
+    "ts",
+    "account",
+    "event",
+    "id",
+    "occ",
+    "side",
+    "qty_sold",
+    "exit",
+    "avg_cost",
+    "multiplier",
+    "realized",
+    "qty_remaining",
+    "closed",
+    "dte_at_exit",
+    "hold_days",
+)
+_DELETE_ROW_KEYS = ("id", "occ", "qty", "side")
 
 PREFIX = "oda1."
 _OBFUSCATE_LABEL = b"optionda-pack-v1"
@@ -32,6 +72,7 @@ class PackResult:
     account: str
     n_positions: int
     has_creds: bool
+    n_events: int = 0
 
 
 @dataclass(frozen=True)
@@ -40,6 +81,7 @@ class Bundle:
     config: AppConfig
     key_id: str | None
     secret: str | None
+    journal: list[dict[str, Any]] | None = None
 
 
 def fingerprint(code: str) -> str:
@@ -92,12 +134,90 @@ def _decode_creds(blob: dict[str, Any] | None) -> tuple[str | None, str | None]:
     return key_id, secret
 
 
+def _copy_keys(event: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
+    return {key: event[key] for key in keys if key in event and event[key] is not None}
+
+
+def _ivs_from_event(event: dict[str, Any]) -> dict[str, float]:
+    raw = event.get("ivs")
+    if isinstance(raw, dict):
+        ivs: dict[str, float] = {}
+        for position_id, value in raw.items():
+            try:
+                iv = float(value)
+            except (TypeError, ValueError):
+                continue
+            if iv > 0:
+                ivs[str(position_id)] = iv
+        return ivs
+    ivs = {}
+    book = event.get("book") if isinstance(event.get("book"), list) else []
+    for row in book:
+        if not isinstance(row, dict):
+            continue
+        position_id = str(row.get("id") or "")
+        try:
+            iv = float(row.get("iv"))
+        except (TypeError, ValueError):
+            continue
+        if position_id and iv > 0:
+            ivs[position_id] = iv
+    return ivs
+
+
+def slim_journal(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep mutation commands + IV changes; drop book/export snapshots."""
+    slim: list[dict[str, Any]] = []
+    for event in events:
+        kind = event.get("event")
+        if kind not in _MUTATION_EVENTS:
+            continue
+        if kind == "refresh_iv":
+            ivs = _ivs_from_event(event)
+            if not ivs:
+                continue
+            row: dict[str, Any] = {"event": "refresh_iv", "ivs": ivs}
+            if event.get("ts") is not None:
+                row["ts"] = event["ts"]
+            if event.get("account") is not None:
+                row["account"] = event["account"]
+            slim.append(row)
+            continue
+        if kind == "delete":
+            removed: list[dict[str, Any]] = []
+            for item in event.get("removed") or []:
+                if isinstance(item, dict):
+                    removed.append(_copy_keys(item, _DELETE_ROW_KEYS))
+            row = {"event": "delete", "removed": removed}
+            if event.get("ts") is not None:
+                row["ts"] = event["ts"]
+            if event.get("account") is not None:
+                row["account"] = event["account"]
+            slim.append(row)
+            continue
+        keys = _SELL_KEYS if kind == "sell" else _ADD_KEYS
+        slim.append(_copy_keys(event, keys))
+    return slim
+
+
+def _parse_journal(payload: dict[str, Any], version: int) -> list[dict[str, Any]] | None:
+    if version < 2:
+        return None
+    raw = payload.get("journal")
+    if raw is None:
+        return []
+    if not isinstance(raw, list) or any(not isinstance(item, dict) for item in raw):
+        raise SyncError("invalid pack journal")
+    return raw
+
+
 def build_payload(
     account: Account,
     config: AppConfig,
     *,
     key_id: str | None,
     secret: str | None,
+    journal: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     creds: dict[str, str] | None = None
     if key_id and secret:
@@ -105,10 +225,11 @@ def build_payload(
     # Keep packaged default pointing at this book.
     cfg = config.model_copy(update={"default_account": account.name})
     return {
-        "v": 1,
+        "v": PACK_VERSION,
         "account": json.loads(account.model_dump_json()),
         "config": cfg.model_dump(mode="json"),
         "creds": creds,
+        "journal": journal or [],
     }
 
 
@@ -123,6 +244,7 @@ def encode_payload(payload: dict[str, Any]) -> PackResult:
         account=account,
         n_positions=len(positions),
         has_creds=bool(payload.get("creds")),
+        n_events=len(payload.get("journal") or []),
     )
 
 
@@ -135,15 +257,28 @@ def decode_code(code: str) -> Bundle:
         payload = json.loads(raw.decode("utf-8"))
     except (ValueError, zlib.error, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise SyncError(f"corrupt sync code: {exc}") from exc
-    if int(payload.get("v", 0)) != 1:
+    try:
+        version = int(payload.get("v", 0))
+    except (TypeError, ValueError) as exc:
+        raise SyncError(f"unsupported pack version: {payload.get('v')!r}") from exc
+    if version not in _SUPPORTED_VERSIONS:
         raise SyncError(f"unsupported pack version: {payload.get('v')!r}")
     try:
         account = Account.model_validate(payload["account"])
         config = AppConfig.model_validate(payload.get("config") or {})
+        journal = _parse_journal(payload, version)
+    except SyncError:
+        raise
     except Exception as exc:  # noqa: BLE001 — pydantic + key errors
         raise SyncError(f"invalid pack payload: {exc}") from exc
     key_id, secret = _decode_creds(payload.get("creds"))
-    return Bundle(account=account, config=config, key_id=key_id, secret=secret)
+    return Bundle(
+        account=account,
+        config=config,
+        key_id=key_id,
+        secret=secret,
+        journal=journal,
+    )
 
 
 def pack_account(
@@ -151,7 +286,7 @@ def pack_account(
     *,
     home: Path | None = None,
 ) -> PackResult:
-    """Pack the active account + config + obfuscated Alpaca keys."""
+    """Pack the active account + slim journal + obfuscated Alpaca keys."""
     try:
         account = store.require_current()
     except StoreError as exc:
@@ -159,11 +294,13 @@ def pack_account(
     root = home if home is not None else store.home
     config = load_config(root)
     creds = load_alpaca(root)
+    journal = slim_journal(read_events(log_path(account.name, root)))
     payload = build_payload(
         account,
         config,
         key_id=creds.key_id if creds else None,
         secret=creds.secret if creds else None,
+        journal=journal,
     )
     return encode_payload(payload)
 
@@ -190,6 +327,8 @@ def apply_bundle(
     )
     if bundle.key_id and bundle.secret:
         save_alpaca(bundle.key_id, bundle.secret, root)
+    if bundle.journal is not None:
+        replace_log(name, bundle.journal, home=root)
     store.activate(name)
     return bundle.account
 

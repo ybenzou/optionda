@@ -88,6 +88,25 @@ def append_event(
     return path
 
 
+def replace_log(
+    account: str,
+    events: list[dict[str, Any]],
+    *,
+    home: Path | None = None,
+) -> Path:
+    """Replace one account journal. Used by unpack, not by live commands."""
+    path = log_path(account, home)
+    if not events:
+        path.write_text("", encoding="utf-8")
+        return path
+    lines = [
+        json.dumps(event, ensure_ascii=False, separators=(",", ":"))
+        for event in events
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
 def _iso_ts(value: datetime | None) -> str | None:
     if value is None:
         return None
