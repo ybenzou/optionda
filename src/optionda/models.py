@@ -138,4 +138,8 @@ class RowMark(BaseModel):
     spot_source: str | None = None
     # Underlying print used when the IV surface was frozen (close / quote-time spot).
     close_spot: float | None = None
+    # Last-session option mid (or close-spot model) for the held OCC.
+    close_premium: float | None = None
+    # Per-share Model$ minus that close premium.
+    theo_chg: float | None = None
     error: str | None = None

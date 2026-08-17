@@ -4,13 +4,16 @@ from optionda.display.table import (
     _dir_style,
     _inline_bar,
     _iv_asof_label,
+    _model_cell,
     _model_iv_cell,
     _money_flash,
     _move_direction,
     _pnl_flash,
+    _premium_chg,
     _spot_cell,
     _spot_chg_pct,
     render_snapshot,
+    sort_desk_rows,
 )
 from optionda.models import Position, RowMark
 
@@ -73,6 +76,22 @@ def test_spot_chg_pct_vs_close():
     assert "+3.6%" in cell.plain
 
 
+def test_model_cell_shows_dollar_chg_vs_close():
+    up = _premium_chg(12.00, 10.80)
+    assert up is not None
+    assert "+1.20" in up.plain
+    assert "green" in str(up.style)
+
+    down = _premium_chg(10.45, 10.80)
+    assert down is not None
+    assert "-0.35" in down.plain
+    assert "red" in str(down.style)
+
+    cell = _model_cell(12.00, 10.80, None, phase="idle")
+    assert "12.00" in cell.plain
+    assert "+1.20" in cell.plain
+
+
 def test_model_iv_shows_et_session_date():
     as_of = datetime(2026, 8, 12, 20, 5, tzinfo=timezone.utc)  # 16:05 ET
     label = _iv_asof_label(as_of)
@@ -122,3 +141,45 @@ def test_continuous_desk_has_no_bottom_live_caption() -> None:
     panel = group.renderables[0]
     table = panel.renderable.renderables[-1]
     assert table.caption is None
+
+
+def _row(occ: str, notional: float | None) -> RowMark:
+    return RowMark(
+        position=Position(
+            occ_symbol=occ,
+            underlying=occ[:4],
+            expiry=date(2026, 12, 18),
+            strike=100.0,
+            option_type="call",
+            qty=1,
+            side="long",
+            iv_frozen=0.25,
+            iv_as_of=datetime(2026, 8, 12, 20, tzinfo=timezone.utc),
+            entry_premium=3.5,
+        ),
+        spot=100.0,
+        theo=None if notional is None else notional / 100.0,
+        delta=0.2,
+        dte=90.0,
+        notional=notional,
+        cost=3.5,
+        upnl=None,
+        error="no spot" if notional is None else None,
+    )
+
+
+def test_desk_rows_sort_by_abs_notional() -> None:
+    ordered = sort_desk_rows(
+        [
+            _row("CSCO261218C00130000", 1086.0),
+            _row("HOOD261218C00150000", 909.0),
+            _row("AVGO261218C00500000", 3350.0),
+            _row("BADX261218C00100000", None),
+        ]
+    )
+    assert [row.position.occ_symbol[:4] for row in ordered] == [
+        "AVGO",
+        "CSCO",
+        "HOOD",
+        "BADX",
+    ]

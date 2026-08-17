@@ -157,6 +157,54 @@ def test_session_reference_round_trip(tmp_path) -> None:
     assert loaded.session_date == date(2026, 8, 14)
 
 
+def test_close_premiums_round_trip_and_merge(tmp_path) -> None:
+    from optionda.market.session import (
+        ClosePremiums,
+        load_close_premiums,
+        merge_close_premiums,
+        save_close_premiums,
+    )
+
+    first = ClosePremiums(
+        underlying="skhy",
+        session_date=date(2026, 8, 14),
+        premiums={"SKHY261218C00020000": 10.80},
+        source="alpaca/chain",
+        updated_at=datetime(2026, 8, 14, 20, 5, tzinfo=timezone.utc),
+    )
+    path = save_close_premiums(first, tmp_path)
+    loaded = load_close_premiums("SKHY", tmp_path)
+    assert path == tmp_path / "close_mids" / "SKHY.json"
+    assert loaded is not None
+    assert loaded.premiums["SKHY261218C00020000"] == pytest.approx(10.80)
+
+    merged = merge_close_premiums(
+        loaded,
+        ClosePremiums(
+            underlying="SKHY",
+            session_date=date(2026, 8, 14),
+            premiums={"SKHY261218C00025000": 8.10},
+            source="alpaca/chain",
+            updated_at=datetime(2026, 8, 14, 20, 6, tzinfo=timezone.utc),
+        ),
+    )
+    assert merged.premiums["SKHY261218C00020000"] == pytest.approx(10.80)
+    assert merged.premiums["SKHY261218C00025000"] == pytest.approx(8.10)
+
+    replaced = merge_close_premiums(
+        loaded,
+        ClosePremiums(
+            underlying="SKHY",
+            session_date=date(2026, 8, 17),
+            premiums={"SKHY261218C00020000": 12.00},
+            source="alpaca/chain",
+            updated_at=datetime(2026, 8, 17, 20, 5, tzinfo=timezone.utc),
+        ),
+    )
+    assert replaced.session_date == date(2026, 8, 17)
+    assert replaced.premiums == {"SKHY261218C00020000": 12.00}
+
+
 def test_market_session_identity() -> None:
     session = MarketSession(
         session_date=date(2026, 8, 14),

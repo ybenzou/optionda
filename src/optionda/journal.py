@@ -257,6 +257,8 @@ def _row_record(row: RowMark) -> dict[str, Any]:
         "cost": row.cost if row.cost is not None else pos.entry_premium,
         "live": row.live,
         "model": row.theo,
+        "close_premium": row.close_premium,
+        "theo_chg": row.theo_chg,
         "upnl": row.upnl,
         "notional": row.notional,
         "delta": row.delta,

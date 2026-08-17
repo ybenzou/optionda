@@ -290,6 +290,33 @@ def _spot_cell(
     return cell
 
 
+def _premium_chg(theo: float | None, close_premium: float | None) -> Text | None:
+    """Colored dollar move vs last-session option close."""
+    if theo is None or close_premium is None:
+        return None
+    chg = theo - close_premium
+    if abs(chg) < 0.005:
+        return Text(" (0.00)", style=_MUTED)
+    if chg > 0:
+        return Text(f" (+{chg:.2f})", style="bold green")
+    return Text(f" ({chg:.2f})", style="bold red")
+
+
+def _model_cell(
+    theo: float | None,
+    close_premium: float | None,
+    previous: float | None,
+    *,
+    phase: FlashPhase,
+) -> Text:
+    cell = Text()
+    cell.append_text(_money_flash(theo, previous, phase=phase))
+    chg = _premium_chg(theo, close_premium)
+    if chg is not None:
+        cell.append_text(chg)
+    return cell
+
+
 def _border_style(
     *,
     continuous: bool,
@@ -368,6 +395,17 @@ def _footer_upnl(
     return _pnl_text(value)
 
 
+def sort_desk_rows(rows: list[RowMark]) -> list[RowMark]:
+    """Largest live position value first; unmarked / error rows stay last."""
+
+    def key(row: RowMark) -> tuple[int, float, str]:
+        if row.notional is None:
+            return (1, 0.0, row.position.occ_symbol)
+        return (0, -abs(row.notional), row.position.occ_symbol)
+
+    return sorted(rows, key=key)
+
+
 def render_snapshot(
     *,
     account: str,
@@ -388,6 +426,7 @@ def render_snapshot(
     poll_busy: bool = False,
 ) -> Group:
     """Single framed desk: meta + positions + column-aligned totals."""
+    rows = sort_desk_rows(rows)
     prev_s = prev_spots or {}
     prev_t = prev_theos or {}
     prev_n = prev_notionals or {}
@@ -455,7 +494,7 @@ def render_snapshot(
         "Model IV", justify="right", style="cyan", footer="", min_width=12
     )
     table.add_column("Cost", justify="right", style=_NUM, footer=cost_footer, min_width=6)
-    table.add_column("Model$", justify="right", footer=model_footer, min_width=8)
+    table.add_column("Model$", justify="right", footer=model_footer, min_width=14)
     table.add_column("uPnL$", justify="right", footer=upnl_footer, min_width=9)
     table.add_column("Delta", justify="right", style=_MUTED, footer="", min_width=5)
     table.add_column("DTE", justify="right", style=_MUTED, footer="", min_width=4)
@@ -525,7 +564,12 @@ def render_snapshot(
                 _fmt_money(row.cost if row.cost is not None else pos.entry_premium),
                 style=_NUM,
             ),
-            _money_flash(row.theo, prev_t.get(pos.id), phase=phase),
+            _model_cell(
+                row.theo,
+                row.close_premium,
+                prev_t.get(pos.id),
+                phase=phase,
+            ),
             _pnl_flash(row.upnl, prev_u.get(pos.id), phase=phase),
             Text(
                 f"{row.delta:.3f}" if row.delta is not None else "—",

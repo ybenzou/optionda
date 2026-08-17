@@ -1668,8 +1668,35 @@ def run_cmd() -> None:
             )
             time.sleep(0.1)
 
+    def _idle_until(live: Live, acc, router, rows, seconds: float) -> None:
+        """Wait out the unused part of the refresh interval; skip if fetch already used it."""
+        if seconds <= 0:
+            return
+        deadline = time.monotonic() + seconds
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
+            frac = min(1.0, 1.0 - (left / seconds))
+            eta = max(1, int(left) if left == int(left) else int(left) + 1)
+            _paint_live(
+                live,
+                _panel(
+                    acc,
+                    router,
+                    rows,
+                    eta=eta,
+                    flash_phase="idle",
+                    poll_fraction=frac,
+                    poll_label=f"{eta}s",
+                    poll_busy=False,
+                ),
+            )
+            time.sleep(min(0.125, left))
+
     # First mark before Live — same progress bar as export
     try:
+        cycle_started = time.monotonic()
         acc, router, rows = _fetch_rows(live=None)
         _commit_prev(rows)
 
@@ -1679,25 +1706,9 @@ def run_cmd() -> None:
             screen=True,
         ) as live:
             while True:
-                for remaining in range(refresh, 0, -1):
-                    for sub in range(8):
-                        elapsed = (refresh - remaining) + (sub + 1) / 8.0
-                        frac = min(1.0, elapsed / refresh)
-                        _paint_live(
-                            live,
-                            _panel(
-                                acc,
-                                router,
-                                rows,
-                                eta=remaining,
-                                flash_phase="idle",
-                                poll_fraction=frac,
-                                poll_label=f"{remaining}s",
-                                poll_busy=False,
-                            ),
-                        )
-                        time.sleep(0.125)
-                # Keep prior baselines / table body while header bar shows fetch progress.
+                remain = refresh - (time.monotonic() - cycle_started)
+                _idle_until(live, acc, router, rows, remain)
+                cycle_started = time.monotonic()
                 acc, router, rows = _fetch_rows(
                     live=live,
                     hold_acc=acc,

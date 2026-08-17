@@ -7,6 +7,7 @@ from optionda.engine import (
     calibrate_surfaces,
     ensure_surfaces,
     mark_account,
+    resolve_close_premium,
 )
 from optionda.models import Account, Position, SpotQuote
 from optionda.pricing.bs import price_option, years_to_expiry
@@ -15,6 +16,7 @@ from optionda.pricing.surface import (
     IvSurface,
     SurfaceNode,
     build_surface,
+    close_premium_from_surface,
     load_surface,
     save_surface,
     sticky_delta_iv,
@@ -304,6 +306,11 @@ def test_calibrate_surfaces_persists_each_held_underlying(tmp_path) -> None:
     stored = load_surface("SPCX", tmp_path)
     assert stored is not None
     assert stored.source == "alpaca/chain"
+    from optionda.market.session import load_close_premiums
+
+    book = load_close_premiums("SPCX", tmp_path)
+    assert book is not None
+    assert book.premiums["SPCX260918P00100000"] == pytest.approx(6.23)
 
 
 def test_ensure_surfaces_skips_fresh_and_calibrates_missing(tmp_path) -> None:
@@ -1051,3 +1058,232 @@ def test_mark_account_never_calls_option_mid(tmp_path) -> None:
     assert row.live is None
     assert row.iv_fallback is True
     assert row.model_iv == pytest.approx(0.50)
+
+
+def test_close_premium_from_surface_exact_and_interpolated() -> None:
+    surface = IvSurface(
+        underlying="SKHY",
+        spot=20.0,
+        as_of=datetime(2026, 8, 14, 20, 0, tzinfo=timezone.utc),
+        source="alpaca/chain",
+        quality={"accepted": 2, "rejected": 0},
+        session_date=date(2026, 8, 14),
+        smiles=[
+            ExpirySmile(
+                expiry=date(2026, 12, 18),
+                nodes=[
+                    SurfaceNode(
+                        strike=20.0,
+                        delta=0.45,
+                        iv=0.40,
+                        option_type="call",
+                        premium=10.80,
+                    ),
+                    SurfaceNode(
+                        strike=25.0,
+                        delta=0.30,
+                        iv=0.38,
+                        option_type="call",
+                        premium=8.10,
+                    ),
+                ],
+            )
+        ],
+    )
+    exact = Position(
+        occ_symbol="SKHY261218C00020000",
+        underlying="SKHY",
+        expiry=date(2026, 12, 18),
+        strike=20.0,
+        option_type="call",
+        iv_frozen=0.40,
+        iv_as_of=surface.as_of,
+        entry_premium=11.0,
+    )
+    between = exact.model_copy(
+        update={"occ_symbol": "SKHY261218C00022500", "strike": 22.5}
+    )
+    assert close_premium_from_surface(surface, exact) == pytest.approx(10.80)
+    assert close_premium_from_surface(surface, between) == pytest.approx(9.45)
+
+
+def test_mark_account_uses_stored_close_premium(tmp_path) -> None:
+    from optionda.market.session import (
+        ClosePremiums,
+        SessionReference,
+        save_close_premiums,
+        save_session_reference,
+    )
+
+    now = datetime(2026, 8, 16, 14, 0, tzinfo=timezone.utc)
+    position = Position(
+        occ_symbol="SKHY261218C00020000",
+        underlying="SKHY",
+        expiry=date(2026, 12, 18),
+        strike=20.0,
+        option_type="call",
+        iv_frozen=0.40,
+        iv_as_of=now,
+        entry_premium=11.0,
+    )
+    save_surface(
+        IvSurface(
+            underlying="SKHY",
+            spot=20.0,
+            as_of=datetime(2026, 8, 14, 20, 0, tzinfo=timezone.utc),
+            source="alpaca/chain",
+            quality={"accepted": 1, "rejected": 0},
+            session_date=date(2026, 8, 14),
+            smiles=[
+                ExpirySmile(
+                    expiry=date(2026, 12, 18),
+                    nodes=[
+                        SurfaceNode(
+                            strike=20.0,
+                            delta=0.45,
+                            iv=0.40,
+                            option_type="call",
+                            premium=10.80,
+                        )
+                    ],
+                )
+            ],
+        ),
+        tmp_path,
+    )
+    save_session_reference(
+        SessionReference(
+            underlying="SKHY",
+            session_date=date(2026, 8, 14),
+            session_close_at=datetime(2026, 8, 14, 20, 0, tzinfo=timezone.utc),
+            close_spot=20.0,
+            source="alpaca/sip/1Day",
+            updated_at=now,
+        ),
+        tmp_path,
+    )
+    save_close_premiums(
+        ClosePremiums(
+            underlying="SKHY",
+            session_date=date(2026, 8, 14),
+            premiums={"SKHY261218C00020000": 10.80},
+            source="alpaca/chain",
+            updated_at=now,
+        ),
+        tmp_path,
+    )
+
+    class Router:
+        def get_spots(self, _symbols):
+            return {
+                "SKHY": SpotQuote(
+                    symbol="SKHY", price=21.0, as_of=now, source="mock"
+                )
+            }
+
+        def get_option_mid(self, _occ):
+            raise AssertionError("ordinary mark must not fetch option mids")
+
+    row = mark_account(
+        Account(name="demo", positions=[position]),
+        home=tmp_path,
+        router=Router(),
+        now=now,
+    )[0]
+    assert row.close_premium == pytest.approx(10.80)
+    assert row.theo is not None
+    assert row.theo_chg == pytest.approx(row.theo - 10.80)
+
+
+def test_mark_account_uses_surface_premium_when_book_missing(tmp_path) -> None:
+    now = datetime(2026, 8, 16, 14, 0, tzinfo=timezone.utc)
+    position = Position(
+        occ_symbol="SKHY261218C00020000",
+        underlying="SKHY",
+        expiry=date(2026, 12, 18),
+        strike=20.0,
+        option_type="call",
+        iv_frozen=0.40,
+        iv_as_of=now,
+        entry_premium=11.0,
+    )
+    save_surface(
+        IvSurface(
+            underlying="SKHY",
+            spot=20.0,
+            as_of=datetime(2026, 8, 14, 20, 0, tzinfo=timezone.utc),
+            source="alpaca/chain",
+            quality={"accepted": 1, "rejected": 0},
+            session_date=date(2026, 8, 14),
+            smiles=[
+                ExpirySmile(
+                    expiry=date(2026, 12, 18),
+                    nodes=[
+                        SurfaceNode(
+                            strike=20.0,
+                            delta=0.45,
+                            iv=0.40,
+                            option_type="call",
+                            premium=10.80,
+                        )
+                    ],
+                )
+            ],
+        ),
+        tmp_path,
+    )
+
+    class Router:
+        def get_spots(self, _symbols):
+            return {
+                "SKHY": SpotQuote(
+                    symbol="SKHY", price=21.0, as_of=now, source="mock"
+                )
+            }
+
+        def get_option_mid(self, _occ):
+            raise AssertionError("ordinary mark must not fetch option mids")
+
+    row = mark_account(
+        Account(name="demo", positions=[position]),
+        home=tmp_path,
+        router=Router(),
+        now=now,
+    )[0]
+    assert row.close_premium == pytest.approx(10.80)
+    assert row.theo_chg == pytest.approx(row.theo - 10.80)
+
+
+def test_resolve_close_premium_models_at_close_spot() -> None:
+    now = datetime(2026, 8, 14, 20, 0, tzinfo=timezone.utc)
+    position = Position(
+        occ_symbol="SKHY261218C00020000",
+        underlying="SKHY",
+        expiry=date(2026, 12, 18),
+        strike=20.0,
+        option_type="call",
+        iv_frozen=0.40,
+        iv_as_of=now,
+        entry_premium=11.0,
+    )
+    expected = price_option(
+        spot=20.0,
+        strike=20.0,
+        years=years_to_expiry(position.expiry, now),
+        iv=0.40,
+        rate=0.045,
+        option_type="call",
+        style="american",
+        greeks=False,
+    ).price
+    close_px = resolve_close_premium(
+        position,
+        book=None,
+        surface=None,
+        close_spot=20.0,
+        session_close_at=now,
+        rate=0.045,
+        dividend=0.0,
+        style="american",
+    )
+    assert close_px == pytest.approx(expected)

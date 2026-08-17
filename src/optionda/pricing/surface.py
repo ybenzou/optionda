@@ -416,6 +416,22 @@ def sticky_delta_iv(
     return iv
 
 
+def close_premium_from_surface(surface: IvSurface, position: Any) -> float | None:
+    """Last-session option mid from the frozen smile: exact strike, else interpolate."""
+    smile = next(
+        (candidate for candidate in surface.smiles if candidate.expiry == position.expiry),
+        None,
+    )
+    if smile is None:
+        return None
+    wing = [
+        node
+        for node in smile.nodes
+        if node.option_type == position.option_type and node.premium is not None
+    ]
+    return _interpolate_premium_by_strike(wing, position.strike)
+
+
 def sticky_strike_iv(surface: IvSurface, position: Any) -> float | None:
     """Read IV at the same strike from the same option-type wing."""
     smile = next(
@@ -586,6 +602,34 @@ def _interpolate_iv_by_delta(
             ratio = (target_delta - lower.delta) / width
             return lower.iv + ratio * (upper.iv - lower.iv)
     return ordered[-1].iv
+
+
+def _interpolate_premium_by_strike(
+    nodes: list[SurfaceNode],
+    target_strike: float,
+) -> float | None:
+    if not nodes:
+        return None
+    ordered = sorted(nodes, key=lambda node: node.strike)
+    exact = next(
+        (node for node in ordered if abs(node.strike - target_strike) < 1e-6),
+        None,
+    )
+    if exact is not None and exact.premium is not None:
+        return exact.premium
+    if target_strike < ordered[0].strike or target_strike > ordered[-1].strike:
+        return None
+    for lower, upper in zip(ordered, ordered[1:]):
+        if lower.strike <= target_strike <= upper.strike:
+            if lower.premium is None or upper.premium is None:
+                return None
+            width = upper.strike - lower.strike
+            if width <= 0:
+                return lower.premium
+            ratio = (target_strike - lower.strike) / width
+            return lower.premium + ratio * (upper.premium - lower.premium)
+    last = ordered[-1].premium
+    return last
 
 
 def _interpolate_iv_by_strike(

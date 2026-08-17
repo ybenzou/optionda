@@ -7,17 +7,22 @@ from pathlib import Path
 
 from optionda.config import dividend_for_symbol, load_config, rate_for_days
 from optionda.market.router import MarketDataError, MarketRouter
+from optionda.market.iv_mid import quote_mid
 from optionda.market.session import (
     CLOSE_GRACE,
+    ClosePremiums,
     CompletedSessionState,
     MarketSession,
     SessionError,
     SessionReference,
     SessionSyncResult,
+    load_close_premiums,
     load_pending_state,
     load_session_reference,
+    merge_close_premiums,
     next_retry_at,
     resolve_completed_session,
+    save_close_premiums,
     save_pending_state,
     save_session_reference,
 )
@@ -28,11 +33,13 @@ from optionda.pricing.surface import (
     MAX_CALIBRATION_QUOTE_AGE,
     IvSurface,
     build_surface,
+    close_premium_from_surface,
     is_surface_fresh,
     load_surface,
     save_surface,
     estimate_overnight_iv,
     sticky_delta_iv,
+    sticky_strike_iv,
     surface_matches_session,
     surface_session_date,
 )
@@ -129,6 +136,16 @@ def calibrate_surfaces(
             )
             save_surface(surface, home)
             result.surfaces[underlying] = surface
+            if surface.session_date is not None:
+                persist_close_premiums(
+                    underlying,
+                    session_date=surface.session_date,
+                    snapshots=snapshots,
+                    positions=account.positions,
+                    source=surface.source,
+                    home=home,
+                    now=current,
+                )
             report(f"{underlying} ok", index + 1)
         except Exception as exc:  # noqa: BLE001
             result.errors[underlying] = str(exc)
@@ -408,6 +425,129 @@ def apply_surface_reference_ivs(
     return refreshed
 
 
+def harvest_close_premiums(
+    underlying: str,
+    *,
+    session_date: date,
+    snapshots: dict[str, dict],
+    positions: list[Position],
+    source: str,
+    now: datetime | None = None,
+) -> ClosePremiums:
+    """Pull held-OCC mids from the same close chain used to freeze IV."""
+    premiums: dict[str, float] = {}
+    symbol = underlying.strip().upper()
+    for position in positions:
+        if position.underlying != symbol:
+            continue
+        node = snapshots.get(position.occ_symbol)
+        if node is None:
+            continue
+        mid = quote_mid(node)
+        if mid is not None and mid > 0:
+            premiums[position.occ_symbol] = mid
+    return ClosePremiums(
+        underlying=symbol,
+        session_date=session_date,
+        premiums=premiums,
+        source=source,
+        updated_at=now or datetime.now(timezone.utc),
+    )
+
+
+def persist_close_premiums(
+    underlying: str,
+    *,
+    session_date: date,
+    snapshots: dict[str, dict],
+    positions: list[Position],
+    source: str,
+    home: Path | None = None,
+    now: datetime | None = None,
+) -> ClosePremiums:
+    incoming = harvest_close_premiums(
+        underlying,
+        session_date=session_date,
+        snapshots=snapshots,
+        positions=positions,
+        source=source,
+        now=now,
+    )
+    if not incoming.premiums:
+        existing = load_close_premiums(underlying, home)
+        if existing is not None and existing.session_date == session_date:
+            return existing
+        return incoming
+    merged = merge_close_premiums(load_close_premiums(underlying, home), incoming)
+    save_close_premiums(merged, home)
+    return merged
+
+
+def _session_aligned_book(
+    book: ClosePremiums | None,
+    *,
+    reference_session: date | None,
+    surface_session: date | None,
+) -> ClosePremiums | None:
+    if book is None:
+        return None
+    if reference_session is not None and book.session_date != reference_session:
+        return None
+    if (
+        reference_session is None
+        and surface_session is not None
+        and book.session_date != surface_session
+    ):
+        return None
+    return book
+
+
+def resolve_close_premium(
+    pos: Position,
+    *,
+    book: ClosePremiums | None,
+    surface: IvSurface | None,
+    close_spot: float | None,
+    session_close_at: datetime | None,
+    rate: float,
+    dividend: float,
+    style: str,
+) -> float | None:
+    """Close option price: stored mid, surface node/interp, else close-spot model."""
+    if book is not None:
+        stored = book.premiums.get(pos.occ_symbol)
+        if stored is not None and stored > 0:
+            return stored
+    if surface is not None:
+        from_surface = close_premium_from_surface(surface, pos)
+        if from_surface is not None and from_surface > 0:
+            return from_surface
+    if close_spot is None or close_spot <= 0:
+        return None
+    as_of = session_close_at
+    if as_of is None and surface is not None:
+        as_of = surface.session_close_at or surface.as_of
+    if as_of is None:
+        return None
+    close_iv = sticky_strike_iv(surface, pos) if surface is not None else None
+    if close_iv is None:
+        close_iv = pos.iv_frozen
+    try:
+        return price_option(
+            spot=close_spot,
+            strike=pos.strike,
+            years=years_to_expiry(pos.expiry, as_of),
+            iv=close_iv,
+            rate=rate,
+            dividend=dividend,
+            option_type=pos.option_type,
+            style=style,
+            greeks=False,
+        ).price
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def attach_live_option_mids(
     rows: list[RowMark],
     *,
@@ -469,6 +609,10 @@ def mark_account(
     }
     references = {
         underlying: load_session_reference(underlying, home)
+        for underlying in set(underlyings)
+    }
+    close_books = {
+        underlying: load_close_premiums(underlying, home)
         for underlying in set(underlyings)
     }
 
@@ -620,6 +764,26 @@ def mark_account(
             upnl = None
             if cost is not None:
                 upnl = (result.price - cost) * pos.multiplier * pos.qty * sign
+            book = _session_aligned_book(
+                close_books.get(pos.underlying),
+                reference_session=reference_session,
+                surface_session=surface_session,
+            )
+            close_premium = resolve_close_premium(
+                pos,
+                book=book,
+                surface=surface,
+                close_spot=close_spot,
+                session_close_at=(
+                    reference.session_close_at if reference is not None else None
+                ),
+                rate=rate,
+                dividend=dividend,
+                style=cfg.option_style,
+            )
+            theo_chg = (
+                result.price - close_premium if close_premium is not None else None
+            )
             rows.append(
                 RowMark(
                     position=pos,
@@ -659,6 +823,8 @@ def mark_account(
                     spot_as_of=spot_q.as_of,
                     spot_source=spot_q.source,
                     close_spot=close_spot,
+                    close_premium=close_premium,
+                    theo_chg=theo_chg,
                 )
             )
         except Exception as exc:  # noqa: BLE001

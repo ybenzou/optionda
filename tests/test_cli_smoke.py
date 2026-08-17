@@ -482,7 +482,7 @@ def test_run_resyncs_after_close_boundary(tmp_path, monkeypatch) -> None:
         patch("optionda.cli.session_due", side_effect=fake_due),
         patch("optionda.cli.mark_account", return_value=[]),
         patch("optionda.cli.time.sleep", side_effect=fake_sleep),
-        patch("optionda.cli.resolve_poll_interval", return_value=1),
+        patch("optionda.cli.resolve_poll_interval", return_value=0),
     ):
         result = runner.invoke(app, ["run"])
     assert calls["n"] >= 2

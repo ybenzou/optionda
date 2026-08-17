@@ -226,6 +226,94 @@ def load_session_reference(
     )
 
 
+CLOSE_PREMIUM_SCHEMA = 1
+
+
+@dataclass(frozen=True)
+class ClosePremiums:
+    underlying: str
+    session_date: date
+    premiums: dict[str, float]
+    source: str
+    updated_at: datetime
+    schema_version: int = CLOSE_PREMIUM_SCHEMA
+
+
+def close_mids_dir(home: Path | None = None) -> Path:
+    root = ensure_home(home)
+    path = root / "close_mids"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def close_mids_path(underlying: str, home: Path | None = None) -> Path:
+    return close_mids_dir(home) / f"{underlying.strip().upper()}.json"
+
+
+def save_close_premiums(book: ClosePremiums, home: Path | None = None) -> Path:
+    path = close_mids_path(book.underlying, home)
+    payload = {
+        "schema_version": book.schema_version,
+        "underlying": book.underlying,
+        "session_date": book.session_date.isoformat(),
+        "premiums": {occ: float(mid) for occ, mid in sorted(book.premiums.items())},
+        "source": book.source,
+        "updated_at": book.updated_at.isoformat(),
+    }
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(path)
+    return path
+
+
+def load_close_premiums(
+    underlying: str, home: Path | None = None
+) -> ClosePremiums | None:
+    path = close_mids_path(underlying, home)
+    if not path.exists():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(raw, dict) or not raw.get("session_date"):
+        return None
+    premiums: dict[str, float] = {}
+    for occ, mid in (raw.get("premiums") or {}).items():
+        try:
+            value = float(mid)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            premiums[str(occ).strip().upper()] = value
+    return ClosePremiums(
+        underlying=str(raw.get("underlying", underlying)).upper(),
+        session_date=date.fromisoformat(str(raw["session_date"])),
+        premiums=premiums,
+        source=str(raw.get("source") or "unknown"),
+        updated_at=_parse_ts(str(raw.get("updated_at") or datetime.now(timezone.utc))),
+        schema_version=int(raw.get("schema_version", CLOSE_PREMIUM_SCHEMA)),
+    )
+
+
+def merge_close_premiums(
+    existing: ClosePremiums | None,
+    incoming: ClosePremiums,
+) -> ClosePremiums:
+    if existing is None or existing.session_date != incoming.session_date:
+        return incoming
+    merged = dict(existing.premiums)
+    merged.update(incoming.premiums)
+    return ClosePremiums(
+        underlying=incoming.underlying,
+        session_date=incoming.session_date,
+        premiums=merged,
+        source=incoming.source,
+        updated_at=incoming.updated_at,
+        schema_version=incoming.schema_version,
+    )
+
+
 def pending_state_path(home: Path | None = None) -> Path:
     return ensure_home(home) / "session_sync.json"
 
