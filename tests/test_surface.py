@@ -1060,6 +1060,60 @@ def test_mark_account_never_calls_option_mid(tmp_path) -> None:
     assert row.model_iv == pytest.approx(0.50)
 
 
+def test_mark_account_progress_keeps_fetch_and_mark_separate(tmp_path) -> None:
+    now = datetime(2026, 8, 14, 21, 0, tzinfo=timezone.utc)
+    positions = [
+        Position(
+            occ_symbol="SKHY261016C00200000",
+            underlying="SKHY",
+            expiry=date(2026, 10, 16),
+            strike=200.0,
+            option_type="call",
+            iv_frozen=0.40,
+            iv_as_of=now,
+            entry_premium=6.92,
+        ),
+        Position(
+            occ_symbol="AAPL261120C00350000",
+            underlying="AAPL",
+            expiry=date(2026, 11, 20),
+            strike=350.0,
+            option_type="call",
+            iv_frozen=0.25,
+            iv_as_of=now,
+            entry_premium=4.51,
+        ),
+    ]
+
+    class Router:
+        def get_spots(self, symbols):
+            return {
+                name: SpotQuote(symbol=name, price=100.0, as_of=now, source="mock")
+                for name in symbols
+            }
+
+        def get_option_mid(self, _occ):
+            raise AssertionError("ordinary mark must not fetch option mids")
+
+    events: list[tuple[str, int, int]] = []
+    mark_account(
+        Account(name="demo", positions=positions),
+        home=tmp_path,
+        router=Router(),
+        now=now,
+        on_progress=lambda label, done, total: events.append((label, done, total)),
+    )
+    fetch = [(label, done, total) for label, done, total in events if label.startswith("1/2 fetch")]
+    mark = [(label, done, total) for label, done, total in events if label.startswith("2/2 mark")]
+    assert fetch
+    assert all(total == 1 for _, _, total in fetch)
+    assert mark
+    assert all(total == 2 for _, _, total in mark)
+    assert mark[0][1] == 0
+    assert mark[-1][1] == 2
+    assert not any(total == 3 for _, _, total in events)
+
+
 def test_close_premium_from_surface_exact_and_interpolated() -> None:
     surface = IvSurface(
         underlying="SKHY",

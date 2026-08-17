@@ -38,9 +38,18 @@ def test_verify_attaches_live_mids_without_changing_model(tmp_path) -> None:
     rows = mark_account(account, home=tmp_path, router=Router(), now=now)
     assert rows[0].live is None
     model = rows[0].theo
-    verified = attach_live_option_mids(rows, router=Router())
+    events: list[tuple[str, int, int]] = []
+    verified = attach_live_option_mids(
+        rows,
+        router=Router(),
+        on_progress=lambda label, done, total: events.append((label, done, total)),
+        phase_index=3,
+        phase_count=3,
+    )
     assert verified[0].live == 7.25
     assert verified[0].theo == model
+    assert events[0][0].startswith("3/3 live")
+    assert all(total == 1 for _, _, total in events)
 
 
 def test_backtest_prefers_verify_journal_and_reads_legacy(tmp_path: Path) -> None:

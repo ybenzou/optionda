@@ -748,26 +748,9 @@ def _sync_session(
     announce: bool = True,
 ):
     """Check Alpaca's completed session and freeze new close/IV when needed."""
-    names = sorted(
-        {
-            pos.underlying.upper()
-            for pos in account.positions
-            if pos.underlying and (only is None or pos.underlying.upper() in only)
-        }
-    )
     if on_progress is None:
-        n = max(len(names), 1)
         with _mark_progress() as progress:
-            task = progress.add_task(f"session 0/{n}", total=n)
-
-            def wrapped(label: str, done: int, steps: int) -> None:
-                progress.update(
-                    task,
-                    description=f"session {done}/{steps}  {label}",
-                    completed=min(done, steps),
-                    total=max(steps, 1),
-                )
-
+            task = progress.add_task("1/2 fetch", total=2)
             result = sync_completed_session(
                 account,
                 home=home,
@@ -775,7 +758,7 @@ def _sync_session(
                 force=force,
                 fresh=fresh,
                 only=only,
-                on_progress=wrapped,
+                on_progress=_bind_progress(progress, task),
             )
     else:
         result = sync_completed_session(
@@ -1067,26 +1050,14 @@ def refresh_iv_cmd(
     )
     try:
         with _mark_progress(transient=False) as progress:
-            task = progress.add_task(
-                f"refresh-iv 0/{max(n_underlyings, 1)}",
-                total=max(n_underlyings, 1),
-            )
-
-            def on_progress(label: str, done: int, steps: int) -> None:
-                progress.update(
-                    task,
-                    description=f"refresh-iv {done}/{steps}  {label}",
-                    completed=done,
-                    total=steps,
-                )
-
+            task = progress.add_task("1/2 fetch", total=2)
             result = _sync_session(
                 acc,
                 home=home,
                 console=console,
                 force=fresh,
                 fresh=fresh,
-                on_progress=on_progress,
+                on_progress=_bind_progress(progress, task),
             )
     except Exception as exc:  # noqa: BLE001
         _err(f"session sync failed; retained existing IV: {exc}")
@@ -1142,8 +1113,19 @@ def _mark_progress(*, transient: bool = True) -> Progress:
     )
 
 
-def _mark_step_total(n_positions: int) -> int:
-    return ((1 if n_positions else 0) + n_positions) or 1
+def _bind_progress(progress: Progress, task_id) -> object:
+    """Keep the bar on the current phase's own sub-progress (1/1 fetch, 3/11 mark)."""
+
+    def on_progress(label: str, done: int, steps: int) -> None:
+        total = max(steps, 1)
+        progress.update(
+            task_id,
+            completed=min(max(done, 0), total),
+            total=total,
+            description=label,
+        )
+
+    return on_progress
 
 
 @app.command("surface")
@@ -1187,21 +1169,20 @@ def surface_cmd(
     from optionda.pricing.bs import years_to_expiry
 
     now = datetime.now(timezone.utc)
-    total = len(tickers) + 2  # spots + build HTML
+    n_mesh = max(len(tickers), 1)
     panels: list = []
 
     with _mark_progress(transient=False) as progress:
-        task = progress.add_task(f"surface 0/{total}", total=total)
+        task = progress.add_task("1/2 fetch", total=1)
+        on_progress = _bind_progress(progress, task)
 
-        def bump(label: str, done: int) -> None:
-            progress.update(
-                task,
-                description=f"surface {done}/{total}  {label}",
-                completed=done,
-                total=total,
-            )
+        def bump_fetch(detail: str, done: int) -> None:
+            on_progress(f"1/2 fetch  {detail}", done, 1)
 
-        bump("spots…", 0)
+        def bump_mesh(detail: str, done: int) -> None:
+            on_progress(f"2/2 mesh  {detail}", done, n_mesh)
+
+        bump_fetch("spots…", 0)
         rows: list = []
         book_tickers = {pos.underlying for pos in acc.positions} & set(tickers)
         if book_tickers:
@@ -1257,10 +1238,10 @@ def surface_cmd(
                     )
             except Exception:  # noqa: BLE001
                 rows = []
-        bump("spots ready", 1)
+        bump_fetch("spots ready", 1)
 
         for index, ticker in enumerate(tickers):
-            bump(f"{ticker} mesh…", 1 + index)
+            bump_mesh(f"{ticker}…", index)
             surface = load_surface(ticker, home)
             if surface is None:
                 console.print(
@@ -1297,7 +1278,7 @@ def surface_cmd(
             _err("no surfaces to open — run optionda refresh-iv first")
             raise typer.Exit(1)
 
-        bump("building HTML…", total - 1)
+        bump_mesh("building HTML…", n_mesh)
         try:
             fig = open_plotly_surfaces(panels)
             html_path = show_figure_in_browser(fig)
@@ -1305,7 +1286,7 @@ def surface_cmd(
             _err(str(exc))
             _err("install: pip install 'optionda[viz]'")
             raise typer.Exit(1) from exc
-        bump("done", total)
+        bump_mesh("done", n_mesh)
 
     names = ", ".join(grid.underlying for grid, _ in panels)
     _ok(f"opened {len(panels)} surface(s) in one browser tab: {names}")
@@ -1362,27 +1343,23 @@ def verify_cmd() -> None:
     home = _home_opt()
     sync = _sync_session(acc, home=home, console=console)
     router = MarketRouter(home)
-    total = _mark_step_total(len(acc.positions))
     with _mark_progress() as progress:
-        task = progress.add_task(f"verify 0/{total}", total=total)
-
-        def on_progress(label: str, done: int, steps: int) -> None:
-            progress.update(
-                task,
-                completed=min(done, steps),
-                total=max(steps, 1),
-                description=label,
-            )
-
+        task = progress.add_task("1/3 fetch", total=1)
+        on_progress = _bind_progress(progress, task)
         rows = mark_account(
             acc,
             home=home,
             router=router,
             on_progress=on_progress,
             completed_session=sync.completed_session,
+            phase_count=3,
         )
         rows = attach_live_option_mids(
-            rows, router=router, on_progress=on_progress
+            rows,
+            router=router,
+            on_progress=on_progress,
+            phase_index=3,
+            phase_count=3,
         )
         append_verify_log(acc, rows, feed=router.feed_name, home=home)
     realized = float(realized_pnl_summary(acc.name, home)["realized"])
@@ -1411,26 +1388,22 @@ def export_cmd() -> None:
     sync = _sync_session(acc, home=home, console=console)
     feed = MarketRouter(home).feed_name
     refresh = resolve_poll_interval(home)
-    total = _mark_step_total(len(acc.positions))
-
     with _mark_progress() as progress:
-        task = progress.add_task(f"export 0/{total}", total=total)
-
-        def on_progress(label: str, done: int, steps: int) -> None:
-            progress.update(
-                task,
-                completed=min(done, steps),
-                total=max(steps, 1),
-                description=label,
-            )
-
+        task = progress.add_task("1/2 fetch", total=1)
+        on_progress = _bind_progress(progress, task)
         rows = mark_account(
             acc,
             home=home,
             on_progress=on_progress,
             completed_session=sync.completed_session,
         )
-        progress.update(task, description="writing book & log…", completed=total)
+        n_pos = max(len(acc.positions), 1)
+        progress.update(
+            task,
+            description="2/2 mark  writing…",
+            completed=n_pos,
+            total=n_pos,
+        )
         sync_book(acc, home)
         append_export_log(acc, rows, feed=feed, home=home, source="export")
 
@@ -1515,7 +1488,6 @@ def run_cmd() -> None:
         acc = store.require_current()
         router = MarketRouter(home)
         nonlocal next_close_at, next_retry_at
-        total = _mark_step_total(len(acc.positions))
 
         def _maybe_sync(on_progress, *, announce: bool) -> None:
             nonlocal next_close_at, next_retry_at
@@ -1538,18 +1510,10 @@ def run_cmd() -> None:
                 sync.completed_session = synced.completed_session
 
         if live is None:
+            _maybe_sync(None, announce=True)
             with _mark_progress() as progress:
-                task = progress.add_task(f"run 0/{total}", total=total)
-
-                def on_progress(label: str, done: int, steps: int) -> None:
-                    progress.update(
-                        task,
-                        completed=min(done, steps),
-                        total=max(steps, 1),
-                        description=label,
-                    )
-
-                _maybe_sync(on_progress, announce=True)
+                task = progress.add_task("1/2 fetch", total=1)
+                on_progress = _bind_progress(progress, task)
                 rows = mark_account(
                     acc,
                     home=home,
@@ -1557,8 +1521,12 @@ def run_cmd() -> None:
                     on_progress=on_progress,
                     completed_session=sync.completed_session,
                 )
+                n_pos = max(len(acc.positions), 1)
                 progress.update(
-                    task, description="writing book & log…", completed=total
+                    task,
+                    description="2/2 mark  writing…",
+                    completed=n_pos,
+                    total=n_pos,
                 )
                 sync_book(acc, home)
                 append_export_log(
@@ -1573,7 +1541,8 @@ def run_cmd() -> None:
 
         def on_live_progress(label: str, done: int, steps: int) -> None:
             frac = min(done, steps) / max(steps, 1)
-            short = label if len(label) <= 42 else label[:39] + "…"
+            text = f"{label}  {done}/{steps}"
+            short = text if len(text) <= 48 else text[:45] + "…"
             _paint_live(
                 live,
                 _panel(

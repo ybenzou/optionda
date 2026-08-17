@@ -148,16 +148,23 @@ def test_same_session_makes_zero_network_calls(tmp_path) -> None:
         clock=_clock(datetime(2026, 8, 14, 21, 0, tzinfo=timezone.utc)),
         sessions=[_session(THURSDAY), _session(FRIDAY)],
     )
+    events: list[tuple[str, int, int]] = []
     result = sync_completed_session(
         _account("AAPL"),
         home=tmp_path,
         router=router,
+        on_progress=lambda label, done, total: events.append((label, done, total)),
     )
     assert result.completed_session is not None
     assert result.completed_session.session_date == FRIDAY
     assert router.daily_calls == []
     assert router.chain_calls == []
     assert result.surfaces_saved == {}
+    fetch = [item for item in events if item[0].startswith("1/2 fetch")]
+    chain = [item for item in events if item[0].startswith("2/2 chain")]
+    assert fetch
+    assert all(total == 2 for _, _, total in fetch)
+    assert chain[-1] == ("2/2 chain  ready", 1, 1)
 
 
 def test_new_session_fetches_close_and_chain_once(tmp_path) -> None:

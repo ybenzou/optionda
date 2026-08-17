@@ -47,6 +47,25 @@ from optionda.pricing.surface import (
 ProgressCallback = Callable[[str, int, int], None]
 
 
+def emit_progress(
+    on_progress: ProgressCallback | None,
+    *,
+    phase_index: int,
+    phase_count: int,
+    phase: str,
+    detail: str,
+    done: int,
+    total: int,
+) -> None:
+    """Report one phase's own sub-progress: ``1/2 fetch  spots`` with ``0/1``."""
+    if on_progress is None:
+        return
+    label = f"{phase_index}/{phase_count} {phase}"
+    if detail:
+        label = f"{label}  {detail}"
+    on_progress(label, done, max(total, 1))
+
+
 @dataclass
 class CalibrationResult:
     surfaces: dict[str, IvSurface] = field(default_factory=dict)
@@ -206,13 +225,29 @@ def sync_completed_session(
     if only is not None:
         want = {name.strip().upper() for name in only}
         underlyings = [name for name in underlyings if name in want]
-    total = max(len(underlyings), 1)
+    def report_fetch(detail: str, done: int, total: int = 2) -> None:
+        emit_progress(
+            on_progress,
+            phase_index=1,
+            phase_count=2,
+            phase="fetch",
+            detail=detail,
+            done=done,
+            total=total,
+        )
 
-    def report(label: str, done: int = 0) -> None:
-        if on_progress is not None:
-            on_progress(label, done, total)
+    def report_chain(detail: str, done: int, total: int) -> None:
+        emit_progress(
+            on_progress,
+            phase_index=2,
+            phase_count=2,
+            phase="chain",
+            detail=detail,
+            done=done,
+            total=total,
+        )
 
-    report("clock / calendar…", 0)
+    report_fetch("clock / calendar…", 0)
     try:
         state = fetch_completed_session(market)
     except (MarketDataError, SessionError, Exception) as exc:  # noqa: BLE001
@@ -225,9 +260,9 @@ def sync_completed_session(
     result.next_close_at = state.next_close_at
     if not underlyings:
         return result
-    report(
+    report_fetch(
         f"session {target.session_date.month}/{target.session_date.day}",
-        0,
+        1,
     )
 
     pending = load_pending_state(home)
@@ -259,7 +294,7 @@ def sync_completed_session(
     ]
     if need_close:
         shown = " ".join(need_close[:6]) + ("…" if len(need_close) > 6 else "")
-        report(f"daily close {shown}", 0)
+        report_fetch(f"daily close {shown}", 1)
         try:
             closes = market.get_daily_closes(need_close, target.session_date)
         except Exception as exc:  # noqa: BLE001
@@ -301,17 +336,22 @@ def sync_completed_session(
             continue
         need_iv.append(name)
 
+    report_fetch("session ready", 2)
     if not need_iv:
-        report("session ready", total)
+        report_chain("ready", 1, 1)
     if need_iv:
         age = FRESH_CALIBRATION_QUOTE_AGE if fresh else MAX_CALIBRATION_QUOTE_AGE
+
+        def on_chain(label: str, done: int, total: int) -> None:
+            report_chain(label, done, total)
+
         calibrated = calibrate_surfaces(
             account,
             home=home,
             router=market,
             now=now or current,
             max_quote_age=age,
-            on_progress=on_progress,
+            on_progress=on_chain,
             only=need_iv,
             target_session=target,
         )
@@ -553,20 +593,36 @@ def attach_live_option_mids(
     *,
     router: MarketRouter,
     on_progress: ProgressCallback | None = None,
+    phase_index: int = 3,
+    phase_count: int = 3,
 ) -> list[RowMark]:
     """Fetch live option mids for an explicit verify/backtest path only."""
     attached: list[RowMark] = []
     total = max(len(rows), 1)
     for index, row in enumerate(rows, start=1):
-        if on_progress is not None:
-            on_progress(f"live mid {row.position.occ_symbol}", index - 1, total)
+        emit_progress(
+            on_progress,
+            phase_index=phase_index,
+            phase_count=phase_count,
+            phase="live",
+            detail=row.position.occ_symbol,
+            done=index - 1,
+            total=total,
+        )
         try:
             live = router.get_option_mid(row.position.occ_symbol)
         except Exception:  # noqa: BLE001
             live = None
         attached.append(row.model_copy(update={"live": live}))
-    if on_progress is not None:
-        on_progress("live mids ready", total, total)
+    emit_progress(
+        on_progress,
+        phase_index=phase_index,
+        phase_count=phase_count,
+        phase="live",
+        detail="done",
+        done=total,
+        total=total,
+    )
     return attached
 
 
@@ -578,28 +634,44 @@ def mark_account(
     now: datetime | None = None,
     on_progress: ProgressCallback | None = None,
     completed_session: MarketSession | None = None,
+    phase_count: int = 2,
 ) -> list[RowMark]:
     cfg = load_config(home)
     market = router or MarketRouter(home)
     underlyings = [p.underlying for p in account.positions]
     n_pos = len(account.positions)
-    total_steps = (1 if underlyings else 0) + max(n_pos, 0)
-    done = 0
 
-    def report(label: str) -> None:
-        if on_progress is not None:
-            on_progress(label, done, max(total_steps, 1))
+    def report_fetch(detail: str, done: int) -> None:
+        emit_progress(
+            on_progress,
+            phase_index=1,
+            phase_count=phase_count,
+            phase="fetch",
+            detail=detail,
+            done=done,
+            total=1,
+        )
+
+    def report_mark(detail: str, done: int) -> None:
+        emit_progress(
+            on_progress,
+            phase_index=2,
+            phase_count=phase_count,
+            phase="mark",
+            detail=detail,
+            done=done,
+            total=max(n_pos, 1),
+        )
 
     uniq = sorted(set(underlyings))
-    report(
-        "fetching spots · " + (" ".join(uniq[:6]) + ("…" if len(uniq) > 6 else ""))
+    report_fetch(
+        "spots · " + (" ".join(uniq[:6]) + ("…" if len(uniq) > 6 else ""))
         if uniq
-        else "no positions"
+        else "no positions",
+        0,
     )
     spots = market.get_spots(underlyings) if underlyings else {}
-    if underlyings:
-        done = 1
-        report("spots ready · loading IV surfaces")
+    report_fetch("spots ready", 1)
 
     current = now or datetime.now(timezone.utc)
     rows: list[RowMark] = []
@@ -617,7 +689,7 @@ def mark_account(
     }
 
     for index, pos in enumerate(account.positions, start=1):
-        report(f"marking {index}/{n_pos}  {pos.occ_symbol}")
+        report_mark(pos.occ_symbol, index - 1)
         spot_q = spots.get(pos.underlying)
         reference = references.get(pos.underlying)
         close_spot = reference.close_spot if reference is not None else None
@@ -639,7 +711,6 @@ def mark_account(
                     error="no spot",
                 )
             )
-            done += 1
             continue
         try:
             t = years_to_expiry(pos.expiry, current)
@@ -841,9 +912,7 @@ def mark_account(
                     error=str(exc),
                 )
             )
-        done += 1
-    if on_progress is not None:
-        on_progress("done", max(total_steps, 1), max(total_steps, 1))
+    report_mark("done", max(n_pos, 1))
     return rows
 
 
