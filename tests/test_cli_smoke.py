@@ -457,8 +457,11 @@ def test_run_resyncs_after_close_boundary(tmp_path, monkeypatch) -> None:
     second = SessionSyncResult()
     calls = {"n": 0}
 
-    def fake_sync(*_args, **_kwargs):
+    progress_hooks: list[object] = []
+
+    def fake_sync(*_args, **kwargs):
         calls["n"] += 1
+        progress_hooks.append(kwargs.get("on_progress"))
         return first if calls["n"] == 1 else second
 
     due = {"n": 0}
@@ -483,4 +486,5 @@ def test_run_resyncs_after_close_boundary(tmp_path, monkeypatch) -> None:
     ):
         result = runner.invoke(app, ["run"])
     assert calls["n"] >= 2
+    assert all(hook is not None for hook in progress_hooks)
     assert result.exception is None or isinstance(result.exception, SystemExit)

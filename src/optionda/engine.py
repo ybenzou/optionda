@@ -412,15 +412,21 @@ def attach_live_option_mids(
     rows: list[RowMark],
     *,
     router: MarketRouter,
+    on_progress: ProgressCallback | None = None,
 ) -> list[RowMark]:
     """Fetch live option mids for an explicit verify/backtest path only."""
     attached: list[RowMark] = []
-    for row in rows:
+    total = max(len(rows), 1)
+    for index, row in enumerate(rows, start=1):
+        if on_progress is not None:
+            on_progress(f"live mid {row.position.occ_symbol}", index - 1, total)
         try:
             live = router.get_option_mid(row.position.occ_symbol)
         except Exception:  # noqa: BLE001
             live = None
         attached.append(row.model_copy(update={"live": live}))
+    if on_progress is not None:
+        on_progress("live mids ready", total, total)
     return attached
 
 

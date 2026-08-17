@@ -745,6 +745,7 @@ def _sync_session(
     fresh: bool = False,
     only: set[str] | None = None,
     on_progress=None,
+    announce: bool = True,
 ):
     """Check Alpaca's completed session and freeze new close/IV when needed."""
     names = sorted(
@@ -786,7 +787,8 @@ def _sync_session(
             only=only,
             on_progress=on_progress,
         )
-    _print_sync_result(result, console)
+    if announce:
+        _print_sync_result(result, console)
     return result
 
 
@@ -1379,8 +1381,9 @@ def verify_cmd() -> None:
             on_progress=on_progress,
             completed_session=sync.completed_session,
         )
-        progress.update(task, description="live option mids…", completed=total)
-        rows = attach_live_option_mids(rows, router=router)
+        rows = attach_live_option_mids(
+            rows, router=router, on_progress=on_progress
+        )
         append_verify_log(acc, rows, feed=router.feed_name, home=home)
     realized = float(realized_pnl_summary(acc.name, home)["realized"])
     console.print(
@@ -1512,17 +1515,27 @@ def run_cmd() -> None:
         acc = store.require_current()
         router = MarketRouter(home)
         nonlocal next_close_at, next_retry_at
-        if session_due(
-            datetime.now(timezone.utc),
-            next_close_at=next_close_at,
-            next_retry_at=next_retry_at,
-        ):
-            synced = _sync_session(acc, home=home, console=console)
+        total = _mark_step_total(len(acc.positions))
+
+        def _maybe_sync(on_progress, *, announce: bool) -> None:
+            nonlocal next_close_at, next_retry_at
+            if not session_due(
+                datetime.now(timezone.utc),
+                next_close_at=next_close_at,
+                next_retry_at=next_retry_at,
+            ):
+                return
+            synced = _sync_session(
+                acc,
+                home=home,
+                console=console,
+                on_progress=on_progress,
+                announce=announce,
+            )
             next_close_at = synced.next_close_at
             next_retry_at = synced.next_retry_at
             if synced.completed_session is not None:
                 sync.completed_session = synced.completed_session
-        total = _mark_step_total(len(acc.positions))
 
         if live is None:
             with _mark_progress() as progress:
@@ -1536,6 +1549,7 @@ def run_cmd() -> None:
                         description=label,
                     )
 
+                _maybe_sync(on_progress, announce=True)
                 rows = mark_account(
                     acc,
                     home=home,
@@ -1584,6 +1598,7 @@ def run_cmd() -> None:
                 poll_busy=True,
             ),
         )
+        _maybe_sync(on_live_progress, announce=False)
         rows = mark_account(
             acc,
             home=home,
