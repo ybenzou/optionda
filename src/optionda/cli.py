@@ -747,15 +747,45 @@ def _sync_session(
     on_progress=None,
 ):
     """Check Alpaca's completed session and freeze new close/IV when needed."""
-    result = sync_completed_session(
-        account,
-        home=home,
-        now=now,
-        force=force,
-        fresh=fresh,
-        only=only,
-        on_progress=on_progress,
+    names = sorted(
+        {
+            pos.underlying.upper()
+            for pos in account.positions
+            if pos.underlying and (only is None or pos.underlying.upper() in only)
+        }
     )
+    if on_progress is None:
+        n = max(len(names), 1)
+        with _mark_progress() as progress:
+            task = progress.add_task(f"session 0/{n}", total=n)
+
+            def wrapped(label: str, done: int, steps: int) -> None:
+                progress.update(
+                    task,
+                    description=f"session {done}/{steps}  {label}",
+                    completed=min(done, steps),
+                    total=max(steps, 1),
+                )
+
+            result = sync_completed_session(
+                account,
+                home=home,
+                now=now,
+                force=force,
+                fresh=fresh,
+                only=only,
+                on_progress=wrapped,
+            )
+    else:
+        result = sync_completed_session(
+            account,
+            home=home,
+            now=now,
+            force=force,
+            fresh=fresh,
+            only=only,
+            on_progress=on_progress,
+        )
     _print_sync_result(result, console)
     return result
 

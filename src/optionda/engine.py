@@ -185,6 +185,17 @@ def sync_completed_session(
     """Align official closes and frozen IV to the latest completed session."""
     market = router or MarketRouter(home)
     result = SessionSyncResult()
+    underlyings = sorted({position.underlying for position in account.positions})
+    if only is not None:
+        want = {name.strip().upper() for name in only}
+        underlyings = [name for name in underlyings if name in want]
+    total = max(len(underlyings), 1)
+
+    def report(label: str, done: int = 0) -> None:
+        if on_progress is not None:
+            on_progress(label, done, total)
+
+    report("clock / calendar…", 0)
     try:
         state = fetch_completed_session(market)
     except (MarketDataError, SessionError, Exception) as exc:  # noqa: BLE001
@@ -195,12 +206,12 @@ def sync_completed_session(
     current = state.source_timestamp
     result.completed_session = target
     result.next_close_at = state.next_close_at
-    underlyings = sorted({position.underlying for position in account.positions})
-    if only is not None:
-        want = {name.strip().upper() for name in only}
-        underlyings = [name for name in underlyings if name in want]
     if not underlyings:
         return result
+    report(
+        f"session {target.session_date.month}/{target.session_date.day}",
+        0,
+    )
 
     pending = load_pending_state(home)
     pending_session = pending.get("session_date")
@@ -230,6 +241,8 @@ def sync_completed_session(
         if _reference_session(name, home) != target.session_date
     ]
     if need_close:
+        shown = " ".join(need_close[:6]) + ("…" if len(need_close) > 6 else "")
+        report(f"daily close {shown}", 0)
         try:
             closes = market.get_daily_closes(need_close, target.session_date)
         except Exception as exc:  # noqa: BLE001
@@ -271,6 +284,8 @@ def sync_completed_session(
             continue
         need_iv.append(name)
 
+    if not need_iv:
+        report("session ready", total)
     if need_iv:
         age = FRESH_CALIBRATION_QUOTE_AGE if fresh else MAX_CALIBRATION_QUOTE_AGE
         calibrated = calibrate_surfaces(
