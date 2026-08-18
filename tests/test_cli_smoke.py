@@ -29,7 +29,7 @@ def test_book_shows_positions(tmp_path, monkeypatch) -> None:
     assert "empty book" in empty.output
 
     with patch(
-        "optionda.cli.freeze_iv_for_position",
+        "optionda.batch.freeze_iv_for_position",
         side_effect=lambda p, **kw: p.model_copy(update={"iv_frozen": 0.28}),
     ):
         add = runner.invoke(
@@ -210,7 +210,7 @@ def test_cli_create_add_export(tmp_path, monkeypatch) -> None:
         cli_router.feed_name = "yahoo"
 
         # freeze_iv uses MarketRouter(home) inside engine — patch there
-        with patch("optionda.cli.freeze_iv_for_position", side_effect=lambda p, **kw: p.model_copy(update={"iv_frozen": 0.28})):
+        with patch("optionda.batch.freeze_iv_for_position", side_effect=lambda p, **kw: p.model_copy(update={"iv_frozen": 0.28})):
             add = runner.invoke(
                 app,
                 [
@@ -304,9 +304,6 @@ def test_add_one_liner_mixes_buy_and_sell(tmp_path, monkeypatch) -> None:
     assert runner.invoke(app, ["create", "demo"]).exit_code == 0
 
     with patch(
-        "optionda.cli.freeze_iv_for_position",
-        side_effect=lambda p, **kw: p.model_copy(update={"iv_frozen": 0.40}),
-    ), patch(
         "optionda.batch.freeze_iv_for_position",
         side_effect=lambda p, **kw: p.model_copy(update={"iv_frozen": 0.40}),
     ):

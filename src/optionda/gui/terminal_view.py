@@ -6,7 +6,7 @@ import html
 
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPen, QTextCursor, QTextDocument
-from PySide6.QtWidgets import QSizePolicy, QTextEdit, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QLabel, QSizePolicy, QTextEdit, QVBoxLayout, QWidget
 
 from optionda.gui.richview import wrap_desk_html
 from optionda.gui.theme import PROMPT, mono_font
@@ -79,8 +79,19 @@ class TerminalView(QWidget):
         super().__init__(parent)
         self.history = _Pane(self, "term")
         self.live = _Pane(self, "termLive")
-        self.desk = _DashFrame(self.live, self)
+        self._status = QLabel()
+        self._status.setObjectName("liveChrome")
+        self._status.setFont(mono_font(12))
+        self._status.hide()
+        inner = QWidget()
+        inner_l = QVBoxLayout(inner)
+        inner_l.setContentsMargins(0, 0, 0, 0)
+        inner_l.setSpacing(0)
+        inner_l.addWidget(self._status, 0)
+        inner_l.addWidget(self.live, 1)
+        self.desk = _DashFrame(inner, self)
         self.desk.hide()
+        self._chrome: dict = {}
         self._cell: tuple[float, float] | None = None
         self.history.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
@@ -161,7 +172,51 @@ class TerminalView(QWidget):
         cursor.movePosition(QTextCursor.MoveOperation.Start)
         self.live.setTextCursor(cursor)
 
+    def set_live_chrome(self, chrome: dict, *, keep_table: bool = True) -> None:
+        from optionda.display.table import format_chrome_plain
+
+        self._chrome = dict(chrome)
+        text = str(chrome.get("text") or "").strip()
+        if not text:
+            text = format_chrome_plain(
+                spin=chrome.get("spin"),
+                poll_label=chrome.get("poll_label"),
+                poll_busy=bool(chrome.get("poll_busy")),
+                poll_done=chrome.get("poll_done"),
+                poll_total=chrome.get("poll_total"),
+                eta_sec=chrome.get("eta"),
+            )
+        self._status.setText(text)
+        self._status.setVisible(bool(text))
+        if self.history.isHidden():
+            self.history.show()
+        if self.desk.isHidden():
+            self.desk.show()
+        if keep_table and self.live.toPlainText():
+            self.live.show()
+        elif not keep_table:
+            self.live.hide()
+        self._fit_history()
+
+    def bump_live_spin(self) -> bool:
+        if not self._chrome.get("poll_busy"):
+            return False
+        from optionda.display.table import spinner_frame
+
+        tick = int(self._chrome.get("_tick") or 0) + 1
+        self._chrome["_tick"] = tick
+        self._chrome["spin"] = spinner_frame(tick)
+        self._chrome.pop("text", None)
+        self.set_live_chrome(self._chrome, keep_table=bool(self.live.toPlainText()))
+        return True
+
+    def chrome_busy(self) -> bool:
+        return bool(self._chrome.get("poll_busy"))
+
     def clear_live(self) -> None:
+        self._chrome = {}
+        self._status.clear()
+        self._status.hide()
         self.live.clear()
         self.live.hide()
         self.desk.hide()
@@ -173,3 +228,8 @@ class TerminalView(QWidget):
         self.history.clear()
         self.clear_live()
         self._fit_history()
+
+    def begin_turn(self, command_line: str) -> None:
+        """One command, one page: drop the previous transcript first."""
+        self.clear_term()
+        self.append_block(command_line)

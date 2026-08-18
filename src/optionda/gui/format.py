@@ -44,6 +44,19 @@ def month_title(day: date) -> str:
     return day.strftime("%b %Y")
 
 
+POS_OCC_W = 18
+POS_PNL_W = 9
+
+
+def format_position_row(name: str, pnl: str, status: str) -> str:
+    """Fixed columns so variable OCC lengths stay aligned."""
+    if len(name) > POS_OCC_W:
+        name = name[: POS_OCC_W - 1] + "."
+    if len(pnl) > POS_PNL_W:
+        pnl = pnl[-POS_PNL_W:]
+    return f"{name:<{POS_OCC_W}} {pnl:>{POS_PNL_W}}  {status}"
+
+
 def occ_short(occ: str) -> str:
     raw = (occ or "?").upper()
     if len(raw) >= 15 and raw[-9] in {"C", "P"}:

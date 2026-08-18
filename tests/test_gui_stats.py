@@ -21,6 +21,28 @@ def _journal(tmp_path) -> None:
     )
 
 
+def test_stats_ops_left_chart_tabs_right(tmp_path, qtbot) -> None:
+    from optionda.gui.stats_view import StatsView
+
+    _journal(tmp_path)
+    view = StatsView("demo", tmp_path, period="all")
+    qtbot.addWidget(view)
+    assert view.tabs.tabText(0) == "Performance"
+    assert view.tabs.tabText(1) == "Behavior"
+    assert view.tabs.widget(0) is view.chart
+    assert view.tabs.widget(1) is view.behavior
+    assert view._side.indexOf(view.calendar) == 0
+    assert view._side.indexOf(view.positions) == 1
+    assert view._main.indexOf(view._side) == 0
+    assert view._main.indexOf(view.tabs) == 1
+    assert not hasattr(view.calendar, "_detail")
+    codes = [view.positions.list.item(i).text() for i in range(view.positions.list.count())]
+    assert codes[0] == "ALL"
+    assert "AAPL" in codes[1]
+    assert all("open" not in row and "closed" not in row for row in codes)
+    assert all("+" not in row and "-" not in row for row in codes)
+
+
 def test_stats_view_period_and_reload(tmp_path, qtbot) -> None:
     from optionda.gui.stats_view import StatsView
 
@@ -45,6 +67,81 @@ def test_stats_view_period_and_reload(tmp_path, qtbot) -> None:
     assert "Realized P&L" in view.kpi._line.text()
 
 
+def test_calendar_day_cells_stack_number_and_pnl(tmp_path, qtbot) -> None:
+    from optionda.gui.stats_view import StatsView
+
+    _journal(tmp_path)
+    view = StatsView("demo", tmp_path, period="all")
+    qtbot.addWidget(view)
+    view.resize(1280, 800)
+    view.show()
+    qtbot.waitExposed(view)
+    view.refresh_visible()
+    marked_days = [
+        item.day
+        for item in view.report.calendar
+        if item.mark_delta or item.realized
+    ]
+    assert marked_days
+    target = marked_days[-1]
+    view.calendar._month = target.replace(day=1)
+    view.calendar._selected = target
+    view.calendar._paint()
+    live = [button for button in view.calendar._buttons if button.isEnabled()]
+    assert live
+    assert min(button.height() for button in live) >= 44
+    marked = [button for button in live if button._pnl.text()]
+    assert marked
+    for button in marked:
+        assert button._pnl.geometry().top() >= button._day.geometry().bottom()
+        assert button._day.text().isdigit()
+
+
+def test_stats_left_calendar_fits_and_list_is_tall(tmp_path, qtbot) -> None:
+    from PySide6.QtWidgets import QApplication
+
+    from optionda.gui.stats_view import StatsView
+
+    _journal(tmp_path)
+    view = StatsView("demo", tmp_path, period="all")
+    qtbot.addWidget(view)
+    view.resize(1280, 800)
+    view.show()
+    qtbot.waitExposed(view)
+    view.refresh_visible()
+    QApplication.processEvents()
+    assert view.calendar.width() >= 360
+    assert view.positions.height() >= 240
+    box = view.calendar.rect()
+    for button in view.calendar._buttons:
+        if button.isVisible() and button.isEnabled():
+            assert box.contains(button.geometry())
+
+
+def test_stats_restores_splitters_after_hide(tmp_path, qtbot) -> None:
+    from PySide6.QtWidgets import QApplication
+
+    from optionda.gui.stats_view import StatsView
+
+    _journal(tmp_path)
+    view = StatsView("demo", tmp_path, period="all")
+    qtbot.addWidget(view)
+    view.resize(1280, 800)
+    view.show()
+    qtbot.waitExposed(view)
+    view.apply_layout(1280, 800)
+    QApplication.processEvents()
+    view.hide()
+    view._main.setSizes([0, 0])
+    view._side.setSizes([0, 0])
+    view.show()
+    qtbot.waitExposed(view)
+    QApplication.processEvents()
+    view.refresh_visible()
+    assert min(view._main.sizes()) >= 40
+    assert min(view._side.sizes()) >= 40
+
+
 def test_position_clicks_keep_chart_in_view(tmp_path, qtbot) -> None:
     from optionda.gui.stats_view import StatsView
 
@@ -66,6 +163,74 @@ def test_position_clicks_keep_chart_in_view(tmp_path, qtbot) -> None:
             assert y1 > y0
             assert min(xs) <= x1 and max(xs) >= x0
             assert min(ys) <= y1 and max(ys) >= y0
+
+
+def test_performance_last_label_stays_inside_plot(tmp_path, qtbot) -> None:
+    from PySide6.QtWidgets import QApplication
+
+    from optionda.gui.stats_view import StatsView
+
+    _journal(tmp_path)
+    view = StatsView("demo", tmp_path, period="all")
+    qtbot.addWidget(view)
+    view.resize(1280, 800)
+    view.show()
+    qtbot.waitExposed(view)
+    view.refresh_visible()
+    QApplication.processEvents()
+    xs, _ys = view.chart._line.getData()
+    x0, x1 = view.chart.plot.viewRange()[0]
+    span = max(xs) - min(xs) or 1.0
+    assert x1 >= max(xs) + span * 0.08
+    tip = view.chart._tip
+    tip_box = tip.mapRectToScene(tip.boundingRect())
+    plot_box = view.chart.plot.getPlotItem().vb.sceneBoundingRect()
+    assert tip_box.right() <= plot_box.right() + 1
+    assert tip_box.left() >= plot_box.left() - 1
+
+
+def test_run_foreground_claims_identity_before_qt() -> None:
+    import inspect
+
+    from optionda.gui import launch
+
+    src = inspect.getsource(launch.run_foreground)
+    claim_at = src.find("claim_windows_identity")
+    qt_at = src.find("PySide6")
+    assert claim_at >= 0
+    assert qt_at >= 0
+    assert claim_at < qt_at
+
+
+def test_main_window_reapplies_chrome_on_winid_change(tmp_path, qtbot, monkeypatch) -> None:
+    from PySide6.QtCore import QEvent
+
+    from optionda.gui.main_window import MainWindow
+
+    calls = {"n": 0}
+
+    def fake(_window) -> None:
+        calls["n"] += 1
+
+    monkeypatch.setattr("optionda.gui.main_window.apply_native_chrome", fake)
+    _journal(tmp_path)
+    window = MainWindow("demo", tmp_path, period="all", initial_view="term")
+    qtbot.addWidget(window)
+    before = calls["n"]
+    window.changeEvent(QEvent(QEvent.Type.WinIdChange))
+    assert calls["n"] > before
+
+
+def test_apply_native_chrome_before_first_show(tmp_path, qtbot) -> None:
+    from optionda.gui.main_window import MainWindow
+    from optionda.gui.theme import apply_native_chrome
+
+    _journal(tmp_path)
+    window = MainWindow("demo", tmp_path, period="all", initial_view="term")
+    qtbot.addWidget(window)
+    apply_native_chrome(window)
+    assert int(window.winId()) != 0
+    assert not window.windowIcon().isNull()
 
 
 def test_window_uses_optionda_icon(tmp_path, qtbot) -> None:
@@ -187,7 +352,7 @@ def test_prompt_runs_help_in_terminal(tmp_path, qtbot) -> None:
     assert "help" in window.terminal.history.toPlainText()
     assert "activate" in window.terminal.history.toPlainText()
     assert window._input.text() == ""
-    assert window._stack.currentWidget() is window.terminal
+    assert window._stack.currentWidget() is not window.stats
 
 
 def test_main_window_shortcuts(tmp_path, qtbot) -> None:
@@ -211,3 +376,72 @@ def test_main_window_shortcuts(tmp_path, qtbot) -> None:
     window.apply_layout = window.stats.apply_layout
     window.stats.apply_layout(800, 500)
     window.stats.apply_layout(1280, 800)
+
+
+def test_begin_turn_replaces_transcript(qtbot) -> None:
+    from optionda.gui.terminal_view import TerminalView
+
+    view = TerminalView()
+    qtbot.addWidget(view)
+    view.append_block("old command")
+    view.append_block("old output")
+    view.begin_turn("PS main> [optionda] export")
+    text = view.history.toPlainText()
+    assert "old command" not in text
+    assert "old output" not in text
+    assert "export" in text
+
+
+def test_submit_starts_a_fresh_command_page(tmp_path, qtbot) -> None:
+    from optionda.gui.main_window import MainWindow
+
+    _journal(tmp_path)
+    window = MainWindow("demo", tmp_path, period="all", initial_view="term")
+    qtbot.addWidget(window)
+    window.show()
+    window.terminal.append_block("leftover add panel")
+    window._input.setText("help")
+    window._submit()
+    text = window.terminal.history.toPlainText()
+    assert "leftover add panel" not in text
+    assert "help" in text.lower()
+
+
+def test_window_has_page_tabs_instead_of_hint(tmp_path, qtbot) -> None:
+    from optionda.gui.main_window import MainWindow
+
+    _journal(tmp_path)
+    window = MainWindow("demo", tmp_path, period="all", initial_view="term")
+    qtbot.addWidget(window)
+    window.show()
+    assert window.tab_count() == 1
+    assert window.tab_title(0) == "term"
+    assert window.current_tab() == 0
+    message = (window.statusBar().currentMessage() or "").lower()
+    assert "enter runs" not in message
+    assert window._new_tab is not None
+
+
+def test_plus_keeps_other_pages(tmp_path, qtbot) -> None:
+    from optionda.gui.main_window import MainWindow
+
+    _journal(tmp_path)
+    window = MainWindow("demo", tmp_path, period="all", initial_view="term")
+    qtbot.addWidget(window)
+    window.show()
+    window.terminal.append_block("keep page one")
+    window.add_tab()
+    assert window.tab_count() == 2
+    assert window.current_tab() == 1
+    assert window.tab_title(1).startswith("term")
+    window._input.setText("help")
+    window._submit()
+    assert "help" in window.terminal.history.toPlainText()
+    assert window.tab_title(1) == "help"
+    window.set_current_tab(0)
+    assert "keep page one" in window.terminal.history.toPlainText()
+    assert "help" not in window.terminal.history.toPlainText()
+    window.close_tab(1)
+    assert window.tab_count() == 1
+    window.close_tab(0)
+    assert window.tab_count() == 1

@@ -288,6 +288,28 @@ def format_poll_status(
     return _fit_width(body)
 
 
+def format_chrome_plain(
+    *,
+    spin: str | None = None,
+    poll_label: str | None = None,
+    poll_busy: bool = False,
+    poll_done: int | None = None,
+    poll_total: int | None = None,
+    eta_sec: int | None = None,
+) -> str:
+    """Plain status text for the window chrome line (no full-page HTML)."""
+    status = format_poll_status(
+        poll_label,
+        busy=poll_busy,
+        done=poll_done,
+        total=poll_total,
+        eta_sec=eta_sec,
+    )
+    if poll_busy and spin:
+        return f"{spin}  {status}".rstrip()
+    return status.rstrip()
+
+
 def _inline_bar(
     fraction: float,
     *,
@@ -462,6 +484,43 @@ def _footer_upnl(
     return _pnl_text(value)
 
 
+def _desk_kpis(
+    *,
+    realized: float | None,
+    today: float | None,
+) -> Text | None:
+    """One line under the table: rPnL / tPnL, not stuffed into column footers."""
+    bits: list[Text] = []
+    if realized is not None:
+        item = Text.assemble(("rPnL ", "dim cyan"))
+        item.append_text(_pnl_text(realized))
+        bits.append(item)
+    if today is not None:
+        item = Text.assemble(("tPnL ", "dim cyan"))
+        item.append_text(_pnl_text(today))
+        bits.append(item)
+    if not bits:
+        return None
+    line = Text()
+    for index, item in enumerate(bits):
+        if index:
+            line.append("    ", style=_MUTED)
+        line.append_text(item)
+    return line
+
+
+def today_model_pnl(row: RowMark) -> float | None:
+    """Dollar P&L vs last-session close: Model$ paren move × qty × 100 × side."""
+    if row.theo_chg is None:
+        if row.theo is None or row.close_premium is None:
+            return None
+        chg = row.theo - row.close_premium
+    else:
+        chg = row.theo_chg
+    sign = 1.0 if row.position.side == "long" else -1.0
+    return chg * row.position.multiplier * row.position.qty * sign
+
+
 def sort_desk_rows(rows: list[RowMark]) -> list[RowMark]:
     """Largest live position value first; unmarked / error rows stay last."""
 
@@ -511,6 +570,8 @@ def render_snapshot(
     total_prev = 0.0
     total_upnl = 0.0
     has_upnl = False
+    today_total = 0.0
+    has_today = False
     for row in rows:
         if row.notional is not None:
             total += row.notional
@@ -520,6 +581,10 @@ def render_snapshot(
         if row.upnl is not None:
             total_upnl += row.upnl
             has_upnl = True
+        day = today_model_pnl(row)
+        if day is not None:
+            today_total += day
+            has_today = True
 
     model_footer = _footer_money(
         total,
@@ -535,7 +600,10 @@ def render_snapshot(
         if has_upnl
         else Text("—", style=_MUTED)
     )
-    realized_footer = _pnl_text(realized) if realized is not None else Text("")
+    kpis = _desk_kpis(
+        realized=realized,
+        today=today_total if has_today else None,
+    )
 
     table = Table(
         show_header=True,
@@ -557,21 +625,41 @@ def render_snapshot(
         no_wrap=True,
         overflow="fold",
     )
-    cost_footer: Text | str = ""
-    if realized is not None:
-        cost_footer = Text.assemble(("rPnL ", "dim cyan"))
-        cost_footer.append_text(realized_footer)
     table.add_column("Side", justify="center", footer="", width=5)
     table.add_column("Qty", justify="right", style=_NUM, footer="", min_width=3)
-    table.add_column("Spot", justify="right", footer="", min_width=14)
+    table.add_column("Spot", justify="right", footer="", min_width=14, no_wrap=True)
     table.add_column(
-        "Model IV", justify="right", style="cyan", footer="", min_width=12
+        "Model IV",
+        justify="right",
+        style="cyan",
+        footer="",
+        min_width=12,
+        no_wrap=True,
     )
-    table.add_column("Cost", justify="right", style=_NUM, footer=cost_footer, min_width=6)
-    table.add_column("Model$", justify="right", footer=model_footer, min_width=14)
-    table.add_column("uPnL$", justify="right", footer=upnl_footer, min_width=9)
-    table.add_column("Delta", justify="right", style=_MUTED, footer="", min_width=5)
-    table.add_column("DTE", justify="right", style=_MUTED, footer="", min_width=4)
+    table.add_column(
+        "Cost",
+        justify="right",
+        style=_NUM,
+        footer="",
+        min_width=7,
+        no_wrap=True,
+    )
+    table.add_column(
+        "Model$",
+        justify="right",
+        footer=model_footer,
+        min_width=16,
+        no_wrap=True,
+    )
+    table.add_column(
+        "uPnL$",
+        justify="right",
+        footer=upnl_footer,
+        min_width=10,
+        no_wrap=True,
+    )
+    table.add_column("Delta", justify="right", style=_MUTED, footer="", min_width=6)
+    table.add_column("DTE", justify="right", style=_MUTED, footer="", min_width=5)
 
     if not rows:
         table.add_row(
@@ -677,12 +765,19 @@ def render_snapshot(
         spin=spin,
         session=status,
     )]
-    for note in notes or []:
+    shown_notes = [
+        note
+        for note in notes or []
+        if not note.startswith("completed session")
+    ]
+    for note in shown_notes:
         header.append(Text(note, style=_MUTED))
     header.append(table)
+    if kpis is not None:
+        header.append(kpis)
     if not framed:
         return Group(title, *header)
-    used = 5 + max(len(rows), 1) + len(notes or [])
+    used = 5 + max(len(rows), 1) + len(shown_notes) + (1 if kpis is not None else 0)
     pad = max(0, min_lines - used)
     if pad:
         header.append(Text("\n".join([" "] * pad)))

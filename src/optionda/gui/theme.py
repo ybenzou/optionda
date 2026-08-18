@@ -103,9 +103,12 @@ QPushButton:checked, QPushButton#primary {{
 QPushButton#calDay {{
     background: transparent;
     border: none;
-    padding: 2px 1px;
-    min-width: 40px;
-    min-height: 40px;
+    padding: 0;
+    min-width: 36px;
+    min-height: 46px;
+}}
+QLabel#calDayNum, QLabel#calDayPnl {{
+    background: transparent;
 }}
 QPushButton#calDay[tone="pos"] {{
     color: {GREEN};
@@ -134,6 +137,40 @@ QTabBar::tab {{
 QTabBar::tab:selected {{
     color: {PROMPT};
     background: transparent;
+}}
+QTabBar#pageTabs::tab {{
+    background: transparent;
+    color: {MUTED};
+    padding: 4px 10px;
+    margin: 0 2px;
+    min-width: 48px;
+    border: none;
+}}
+QTabBar#pageTabs::tab:selected, QTabBar#chartTabs::tab:selected {{
+    color: {PROMPT};
+    border-bottom: 1px solid {PROMPT};
+}}
+QTabBar#chartTabs::tab {{
+    background: transparent;
+    color: {MUTED};
+    padding: 4px 10px;
+    margin: 0 8px 0 0;
+    min-width: 72px;
+    border: none;
+}}
+QTabBar#pageTabs::close-button {{
+    color: {MUTED};
+}}
+QPushButton#newTab {{
+    background: transparent;
+    color: {MUTED};
+    border: none;
+    padding: 2px 8px;
+    min-width: 22px;
+    min-height: 20px;
+}}
+QPushButton#newTab:hover {{
+    color: {BRIGHT};
 }}
 QTableWidget {{
     background: {BG};
@@ -221,6 +258,12 @@ QTextEdit#termLive {{
     font-size: 12pt;
     selection-background-color: #264f78;
 }}
+QLabel#liveChrome {{
+    background: transparent;
+    color: {PROMPT};
+    padding: 0 4px 6px 4px;
+    font-size: 12pt;
+}}
 """
 
 
@@ -297,8 +340,57 @@ def app_icon() -> QIcon:
     return icon
 
 
+def _set_win32_icons(hwnd: int) -> None:
+    import ctypes
+
+    bundled = _assets_dir() / "app.ico"
+    if not bundled.is_file():
+        return
+    user32 = ctypes.windll.user32
+    image_icon = 1
+    load_from_file = 0x0010
+    default_size = 0x0040
+    handle = user32.LoadImageW(
+        None,
+        str(bundled.resolve()),
+        image_icon,
+        0,
+        0,
+        load_from_file | default_size,
+    )
+    if not handle:
+        return
+    wm_seticon = 0x0080
+    user32.SendMessageW(hwnd, wm_seticon, 0, handle)
+    user32.SendMessageW(hwnd, wm_seticon, 1, handle)
+    gclp_hicon = -14
+    gclp_hiconsm = -34
+    if hasattr(user32, "SetClassLongPtrW"):
+        user32.SetClassLongPtrW(hwnd, gclp_hicon, handle)
+        user32.SetClassLongPtrW(hwnd, gclp_hiconsm, handle)
+
+
+def _refresh_win32_frame(hwnd: int) -> None:
+    import ctypes
+
+    swp_nosize = 0x0001
+    swp_nomove = 0x0002
+    swp_nozorder = 0x0004
+    swp_noactivate = 0x0010
+    swp_framechanged = 0x0020
+    ctypes.windll.user32.SetWindowPos(
+        hwnd,
+        0,
+        0,
+        0,
+        0,
+        0,
+        swp_nomove | swp_nosize | swp_nozorder | swp_noactivate | swp_framechanged,
+    )
+
+
 def apply_native_chrome(window) -> None:
-    """Re-apply icon after the HWND exists, and use a dark Windows title bar."""
+    """Theme the HWND before the first paint: icon, dark caption, rounded corners."""
     icon = app_icon()
     window.setWindowIcon(icon)
     app = QApplication.instance()
@@ -310,15 +402,19 @@ def apply_native_chrome(window) -> None:
         import ctypes
 
         hwnd = int(window.winId())
-        value = ctypes.c_int(1)
         dwm = ctypes.windll.dwmapi
+        dark = ctypes.c_int(1)
         for attr in (20, 19):
             dwm.DwmSetWindowAttribute(
                 hwnd,
                 attr,
-                ctypes.byref(value),
-                ctypes.sizeof(value),
+                ctypes.byref(dark),
+                ctypes.sizeof(dark),
             )
+        corner = ctypes.c_int(2)  # DWMWCP_ROUND
+        dwm.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(corner), ctypes.sizeof(corner))
+        _set_win32_icons(hwnd)
+        _refresh_win32_frame(hwnd)
     except Exception:  # noqa: BLE001
         return
 

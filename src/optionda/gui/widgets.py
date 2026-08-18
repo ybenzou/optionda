@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -72,7 +73,7 @@ class PerformanceChart(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 8, 8, 8)
+        layout.setContentsMargins(8, 8, 16, 8)
         layout.setSpacing(4)
         self._title = QLabel("Performance")
         self._title.setObjectName("title")
@@ -87,10 +88,14 @@ class PerformanceChart(QWidget):
         self.plot.setStyleSheet("border: none; background: transparent;")
         self.plot.showGrid(x=True, y=True, alpha=0.08)
         self.plot.getPlotItem().hideButtons()
-        self.plot.getPlotItem().setContentsMargins(4, 4, 8, 4)
+        self.plot.getPlotItem().setContentsMargins(4, 10, 24, 4)
         self.plot.getAxis("left").setWidth(56)
+        self.plot.getAxis("right").setWidth(12)
         self.plot.getAxis("bottom").setHeight(28)
-        for name in ("left", "bottom"):
+        self.plot.showAxis("right", show=True)
+        self.plot.getAxis("right").setStyle(showValues=False)
+        self.plot.getAxis("right").setTicks([])
+        for name in ("left", "bottom", "right"):
             axis_item = self.plot.getAxis(name)
             axis_item.setPen(pg.mkPen(HAIR))
             axis_item.setTextPen(MUTED)
@@ -108,8 +113,8 @@ class PerformanceChart(QWidget):
             symbolBrush=GREEN,
             symbolPen=pg.mkPen(BG),
         )
-        self._tip = pg.TextItem(color=TEXT, anchor=(0, 1))
-        self.plot.addItem(self._tip)
+        self._tip = pg.TextItem(color=TEXT, anchor=(1, 1))
+        self.plot.addItem(self._tip, ignoreBounds=True)
         self._proxy = pg.SignalProxy(
             self.plot.scene().sigMouseMoved,
             rateLimit=40,
@@ -137,8 +142,7 @@ class PerformanceChart(QWidget):
             self._tip.setText("no marks in this window")
             return
         last_day = (report.mark_curve or report.cumulative or [(report.as_of, 0.0)])[-1][0]
-        self._tip.setText(f"{last_day.isoformat()}  {signed_money(ys[-1])}")
-        self._tip.setPos(xs[-1], ys[-1])
+        self._place_tip(xs[-1], ys[-1], f"{last_day.isoformat()}  {signed_money(ys[-1])}")
 
     def _show_position(self, report: StatsReport, position_id: str) -> None:
         label = position_id
@@ -161,13 +165,10 @@ class PerformanceChart(QWidget):
         if not sells:
             open_lot = next((lot for lot in report.open_lots if lot.position_id == position_id), None)
             mark = signed_money(open_lot.upnl) if open_lot is not None else "—"
-            self._tip.setText(f"open  mark {mark}")
-            if xs:
-                self._tip.setPos(xs[-1], ys[-1])
+            self._place_tip(xs[-1] if xs else 0.0, ys[-1] if xs else 0.0, f"open  mark {mark}")
             return
         last_x, last_y, last_day = sells[-1]
-        self._tip.setText(f"{last_day.isoformat()}  {signed_money(last_y)}")
-        self._tip.setPos(last_x, last_y)
+        self._place_tip(last_x, last_y, f"{last_day.isoformat()}  {signed_money(last_y)}")
 
     def _apply_series(
         self,
@@ -192,8 +193,18 @@ class PerformanceChart(QWidget):
             pad = max(abs(y0) * 0.12, 1.0)
             y0, y1 = y0 - pad, y1 + pad
         self.plot.enableAutoRange(enable=False)
-        self.plot.setXRange(x0, x1, padding=0.04)
-        self.plot.setYRange(y0, y1, padding=0.12)
+        span = x1 - x0
+        self.plot.setXRange(x0 - span * 0.04, x1 + span * 0.12, padding=0)
+        self.plot.setYRange(y0, y1, padding=0.16)
+
+    def _place_tip(self, x: float, y: float, text: str) -> None:
+        self._tip.setText(text)
+        x0, x1 = self.plot.viewRange()[0]
+        y0, y1 = self.plot.viewRange()[1]
+        near_right = x >= x0 + (x1 - x0) * 0.62
+        near_top = y >= y0 + (y1 - y0) * 0.70
+        self._tip.setAnchor((1.0 if near_right else 0.0, 0.0 if near_top else 1.0))
+        self._tip.setPos(x, y)
 
     def _on_mouse(self, event) -> None:
         if not self._sells:
@@ -203,8 +214,58 @@ class PerformanceChart(QWidget):
             return
         mouse = self.plot.getPlotItem().vb.mapSceneToView(pos)
         nearest = min(self._sells, key=lambda item: abs(item[0] - mouse.x()))
-        self._tip.setText(f"{nearest[2].isoformat()}  {signed_money(nearest[1])}")
-        self._tip.setPos(nearest[0], nearest[1])
+        self._place_tip(nearest[0], nearest[1], f"{nearest[2].isoformat()}  {signed_money(nearest[1])}")
+
+
+class CalDayButton(QPushButton):
+    """One calendar cell: day number on top, compact P&L under it."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("calDay")
+        self.setCheckable(True)
+        self.setEnabled(False)
+        self.setMinimumSize(36, 46)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        stack = QVBoxLayout(self)
+        stack.setContentsMargins(2, 4, 2, 4)
+        stack.setSpacing(0)
+        self._day = QLabel("")
+        self._day.setObjectName("calDayNum")
+        self._day.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom)
+        self._day.setFont(mono_font(11))
+        self._pnl = QLabel("")
+        self._pnl.setObjectName("calDayPnl")
+        self._pnl.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
+        self._pnl.setFont(mono_font(9))
+        stack.addWidget(self._day, 1)
+        stack.addWidget(self._pnl, 1)
+
+    def set_cell(self, day: date | None, pnl: str, tone: str, selected: bool) -> None:
+        if day is None:
+            self._day.setText("")
+            self._pnl.setText("")
+            self.setEnabled(False)
+            self.setChecked(False)
+            self.setProperty("day", "")
+            self.setProperty("tone", "neutral")
+            self._color_labels("neutral", False)
+            _polish(self)
+            return
+        self._day.setText(str(day.day))
+        self._pnl.setText(pnl)
+        self.setEnabled(True)
+        self.setProperty("day", day.isoformat())
+        self.setProperty("tone", tone)
+        self.setChecked(selected)
+        self._color_labels(tone, selected)
+        _polish(self)
+
+    def _color_labels(self, tone: str, selected: bool) -> None:
+        ink = BG if selected else TEXT
+        mark = BG if selected else _tone_color(tone) if tone != "neutral" else MUTED
+        self._day.setStyleSheet(f"color: {ink}; background: transparent;")
+        self._pnl.setStyleSheet(f"color: {mark}; background: transparent;")
 
 
 class CalendarWidget(QWidget):
@@ -215,8 +276,10 @@ class CalendarWidget(QWidget):
         self._month = date.today().replace(day=1)
         self._selected: date | None = None
         self._days: dict[date, DailyPnl] = {}
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setMinimumSize(360, 280)
         root = QVBoxLayout(self)
-        root.setContentsMargins(8, 8, 0, 8)
+        root.setContentsMargins(0, 8, 8, 0)
         root.setSpacing(4)
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
@@ -231,30 +294,32 @@ class CalendarWidget(QWidget):
         header.addWidget(self._next)
         root.addLayout(header)
         self._grid = QGridLayout()
-        self._grid.setSpacing(0)
+        self._grid.setHorizontalSpacing(4)
+        self._grid.setVerticalSpacing(4)
         self._grid.setContentsMargins(0, 0, 0, 0)
         for col, name in enumerate(("Su", "Mo", "Tu", "We", "Th", "Fr", "Sa")):
             label = QLabel(name)
             label.setObjectName("muted")
             label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self._grid.addWidget(label, 0, col)
-        self._buttons: list[QPushButton] = []
+        self._grid.setRowMinimumHeight(0, 18)
+        self._grid.setRowStretch(0, 0)
+        self._buttons: list[CalDayButton] = []
         self._group = QButtonGroup(self)
         self._group.setExclusive(True)
         for index in range(42):
-            button = QPushButton("")
-            button.setObjectName("calDay")
-            button.setCheckable(True)
-            button.setEnabled(False)
+            button = CalDayButton()
             button.clicked.connect(self._on_click)
             self._group.addButton(button)
-            self._grid.addWidget(button, 1 + index // 7, index % 7)
+            row, col = 1 + index // 7, index % 7
+            self._grid.addWidget(button, row, col)
             self._buttons.append(button)
-        root.addLayout(self._grid)
-        self._detail = QLabel("no sells on this day")
-        self._detail.setObjectName("muted")
-        self._detail.setWordWrap(True)
-        root.addWidget(self._detail)
+        for col in range(7):
+            self._grid.setColumnStretch(col, 1)
+        for row in range(1, 7):
+            self._grid.setRowStretch(row, 1)
+            self._grid.setRowMinimumHeight(row, 46)
+        root.addLayout(self._grid, 1)
 
     def show_report(self, report: StatsReport, selected: date | None = None) -> None:
         self._days = daily_map(report)
@@ -301,52 +366,22 @@ class CalendarWidget(QWidget):
         self._label.setText(f"Calendar  {month_title(self._month)}")
         cells = month_cells(self._month.year, self._month.month)
         for button, cell in zip(self._buttons, cells):
-            if cell is None:
-                button.setText("")
-                button.setEnabled(False)
-                button.setChecked(False)
-                button.setProperty("day", "")
-                button.setProperty("tone", "neutral")
-                _polish(button)
-                continue
-            daily = self._days.get(cell)
-            text = f"{cell.day}"
+            daily = self._days.get(cell) if cell is not None else None
             shown = None
+            pnl = ""
+            tone = "neutral"
             if daily is not None:
                 shown = daily.mark_delta if daily.mark_delta is not None else daily.realized
-                text += f"\n{signed_money(shown, compact=True)}"
-            button.setText(text)
-            button.setEnabled(True)
-            button.setProperty("day", cell.isoformat())
-            tone = "neutral"
-            if shown is not None:
-                tone = "pos" if shown > 0 else "neg" if shown < 0 else "neutral"
-            button.setProperty("tone", tone)
-            button.setChecked(cell == self._selected)
-            _polish(button)
-        daily = self._days.get(self._selected) if self._selected else None
-        if daily is None:
-            self._detail.setText("no marks on this day")
-            return
-        if daily.total is None and not daily.sells:
-            self._detail.setText("no sells on this day")
-            return
-        lines = []
-        if daily.total is not None:
-            lines.append(
-                f"{daily.day.isoformat()}  total {signed_money(daily.total)}  "
-                f"day {signed_money(daily.mark_delta)}"
-            )
-            if daily.open_upnl is not None:
-                lines.append(f"open mark {signed_money(daily.open_upnl)}")
-        if daily.sells:
-            lines.append(
-                f"realized {signed_money(daily.realized)}  "
-                f"{daily.n_sells} sell{'s' if daily.n_sells != 1 else ''}"
-            )
-        for sell in daily.sells:
-            lines.append(f"{occ_short(sell.occ)}  {signed_money(sell.realized)}")
-        self._detail.setText("\n".join(lines))
+                if shown is not None:
+                    pnl = signed_money(shown, compact=True)
+                    tone = "pos" if shown > 0 else "neg" if shown < 0 else "neutral"
+            button.set_cell(cell, pnl, tone, cell is not None and cell == self._selected)
+        for week in range(6):
+            used = any(cells[week * 7 + col] is not None for col in range(7))
+            for col in range(7):
+                self._buttons[week * 7 + col].setVisible(used)
+            self._grid.setRowStretch(week + 1, 1 if used else 0)
+            self._grid.setRowMinimumHeight(week + 1, 46 if used else 0)
 
 
 class PositionList(QWidget):
@@ -362,6 +397,9 @@ class PositionList(QWidget):
         layout.addWidget(title)
         self.list = QListWidget()
         self.list.setFont(mono_font(11))
+        self.list.setUniformItemSizes(True)
+        self.list.setTextElideMode(Qt.TextElideMode.ElideNone)
+        self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.list.currentItemChanged.connect(self._on_current)
         self.list.itemClicked.connect(self._on_item)
@@ -370,24 +408,18 @@ class PositionList(QWidget):
     def show_report(self, report: StatsReport) -> None:
         self.list.blockSignals(True)
         self.list.clear()
-        book = QListWidgetItem(
-            f"ALL    {signed_money(report.realized)}    {report.n_closed} closed"
-        )
+        book = QListWidgetItem("ALL")
         book.setData(Qt.ItemDataRole.UserRole, "")
         self.list.addItem(book)
         for lot in report.open_lots:
-            item = QListWidgetItem(
-                f"{occ_short(lot.occ)}    {signed_money(lot.upnl)}    open"
-            )
+            item = QListWidgetItem(occ_short(lot.occ))
             item.setData(Qt.ItemDataRole.UserRole, lot.position_id)
-            item.setForeground(QColor(CYAN if lot.upnl is None or lot.upnl >= 0 else RED))
+            item.setForeground(QColor(CYAN))
             self.list.addItem(item)
         for lot in report.closed_lots:
-            item = QListWidgetItem(
-                f"{occ_short(lot.occ)}    {signed_money(lot.realized)}    closed"
-            )
+            item = QListWidgetItem(occ_short(lot.occ))
             item.setData(Qt.ItemDataRole.UserRole, lot.position_id)
-            item.setForeground(QColor(GREEN if lot.realized >= 0 else RED))
+            item.setForeground(QColor(MUTED))
             self.list.addItem(item)
         self.list.setCurrentRow(0)
         self.list.blockSignals(False)
@@ -411,9 +443,6 @@ class BehaviorWidget(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 0, 0)
         layout.setSpacing(4)
-        title = QLabel("Behavior")
-        title.setObjectName("title")
-        layout.addWidget(title)
         import pyqtgraph as pg
 
         pg.setConfigOptions(antialias=True)

@@ -247,6 +247,33 @@ def test_mark_series_uses_closes_and_cache(tmp_path) -> None:
     assert [item.total for item in second] == [item.total for item in first]
 
 
+def test_close_cache_refetches_when_claimed_range_missing_weekday(tmp_path) -> None:
+    from optionda.marks import _merge_close_cache, _resolve_closes
+
+    _merge_close_cache(
+        tmp_path,
+        "HOOD",
+        {date(2026, 8, 14): _close("HOOD", date(2026, 8, 14), 80.0)},
+        date(2026, 8, 12),
+        date(2026, 8, 17),
+    )
+    closer = _closer(
+        {
+            ("HOOD", date(2026, 8, 14)): 80.0,
+            ("HOOD", date(2026, 8, 17)): 82.0,
+        }
+    )
+    found = _resolve_closes(
+        ["HOOD"],
+        date(2026, 8, 12),
+        date(2026, 8, 17),
+        tmp_path,
+        closer,
+    )
+    assert closer.calls["n"] == 1
+    assert found[("HOOD", date(2026, 8, 17))].close == 82.0
+
+
 def test_build_report_mark_curve_and_charts(tmp_path) -> None:
     _journal(tmp_path)
     table = {

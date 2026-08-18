@@ -10,4 +10,5 @@ build/
 .venv/
 venv/
 .tmp-home/
+*.oda
 .DS_Store

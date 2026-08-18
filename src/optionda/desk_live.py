@@ -28,6 +28,7 @@ from optionda.paths import ensure_home
 from optionda.store import AccountStore, realized_pnl_summary
 
 Paint = Callable[[Any], None]
+Chrome = Callable[[dict[str, Any]], None]
 Note = Callable[[str], None]
 Stop = Callable[[], bool]
 Tick = Callable[[float, str, bool], None]
@@ -40,11 +41,6 @@ def sync_notes(result) -> list[str]:
             f"calendar/clock unavailable: {result.unavailable} — keeping stored close/IV"
         )
         return lines
-    session = result.completed_session
-    if session is not None:
-        lines.append(
-            f"completed session {session.session_date.month}/{session.session_date.day}"
-        )
     for name, reference in result.references_saved.items():
         lines.append(f"close {name} {reference.close_spot:.2f} ({reference.source})")
     for name, surface in result.surfaces_saved.items():
@@ -96,6 +92,7 @@ class DeskRunner:
         store: AccountStore,
         paint: Paint,
         should_stop: Stop | None = None,
+        on_chrome: Chrome | None = None,
         on_note: Note | None = None,
         on_tick: Tick | None = None,
         native_bar: bool = False,
@@ -106,7 +103,9 @@ class DeskRunner:
         self.store = store
         self.paint = paint
         self.should_stop = should_stop or (lambda: False)
+        self.on_chrome = on_chrome
         self.on_note = on_note
+        self._realized: float | None = None
         self.on_tick = on_tick
         self.native_bar = native_bar
         self._size = size
@@ -146,10 +145,57 @@ class DeskRunner:
         self.cols = cols
         self.rows = rows
 
+    def _refresh_realized(self, account: str) -> None:
+        self._realized = float(realized_pnl_summary(account, self.home)["realized"])
+
+    def _realized_value(self, account: str) -> float:
+        if self._realized is None:
+            self._refresh_realized(account)
+        return float(self._realized or 0.0)
+
+    def _chrome_from(self, view: dict[str, Any]) -> dict[str, Any]:
+        from optionda.display.table import format_chrome_plain
+
+        return {
+            "spin": view.get("spin"),
+            "poll_label": view.get("poll_label"),
+            "poll_busy": view.get("poll_busy", False),
+            "poll_done": view.get("poll_done"),
+            "poll_total": view.get("poll_total"),
+            "poll_fraction": view.get("poll_fraction", 0.0),
+            "eta": view.get("eta"),
+            "text": format_chrome_plain(
+                spin=view.get("spin"),
+                poll_label=view.get("poll_label"),
+                poll_busy=view.get("poll_busy", False),
+                poll_done=view.get("poll_done"),
+                poll_total=view.get("poll_total"),
+                eta_sec=view.get("eta"),
+            ),
+        }
+
+    def _update_view(self, **fields: Any) -> dict[str, Any]:
+        with self._view_lock:
+            if self.last_view is None:
+                self.last_view = {}
+            self.last_view.update(fields)
+            if self.last_view.get("poll_busy") and "spin" not in fields:
+                self.last_view["spin"] = self._next_spin()
+            return dict(self.last_view)
+
+    def _push_chrome(self, view: dict[str, Any] | None = None) -> None:
+        if self.on_chrome is None:
+            return
+        if view is None:
+            with self._view_lock:
+                view = dict(self.last_view) if self.last_view else {}
+        self.on_chrome(self._chrome_from(view))
+
     def _snapshot(self, view: dict[str, Any]):
         acc = view["acc"]
         router = view["router"]
-        realized = float(realized_pnl_summary(acc.name, self.home)["realized"])
+        realized = self._realized_value(acc.name)
+        chrome_out = self.on_chrome is not None
         return render_snapshot(
             account=acc.name,
             feed=router.feed_name,
@@ -161,14 +207,14 @@ class DeskRunner:
             prev_upnls=self.prev_upnls or None,
             realized=realized,
             continuous=view["continuous"],
-            spin=view.get("spin"),
-            eta_sec=view.get("eta"),
+            spin=None if chrome_out else view.get("spin"),
+            eta_sec=None if chrome_out else view.get("eta"),
             flash_phase=view.get("flash_phase", "idle"),
-            poll_fraction=view.get("poll_fraction", 0.0),
-            poll_label=view.get("poll_label"),
-            poll_busy=view.get("poll_busy", False),
-            poll_done=view.get("poll_done"),
-            poll_total=view.get("poll_total"),
+            poll_fraction=0.0 if chrome_out else view.get("poll_fraction", 0.0),
+            poll_label=None if chrome_out else view.get("poll_label"),
+            poll_busy=False if chrome_out else view.get("poll_busy", False),
+            poll_done=None if chrome_out else view.get("poll_done"),
+            poll_total=None if chrome_out else view.get("poll_total"),
             min_lines=self.rows,
             header_bar=False,
             notes=list(self.notes),
@@ -183,14 +229,16 @@ class DeskRunner:
             return ascii_spinner(self._spin)
         return spinner_frame(self._spin)
 
-    def bump_spin(self) -> str | None:
-        from optionda.gui.richview import renderable_html
-
+    def bump_spin(self) -> str | dict[str, Any] | None:
         with self._view_lock:
             if self.last_view is None or not self.last_view.get("poll_busy"):
                 return None
             self.last_view["spin"] = self._next_spin()
             view = dict(self.last_view)
+        if self.on_chrome is not None:
+            return self._chrome_from(view)
+        from optionda.gui.richview import renderable_html
+
         return renderable_html(self._snapshot(view), self.cols)
 
     def html_at(self, cols: int, rows: int) -> str | None:
@@ -241,6 +289,23 @@ class DeskRunner:
             self.last_view = view
         return self._snapshot(view)
 
+    def _poll(
+        self,
+        acc,
+        router,
+        rows,
+        *,
+        full: bool = False,
+        **fields: Any,
+    ) -> None:
+        self._check()
+        if self.on_chrome is None or full or self.last_view is None:
+            self.paint(self._panel(acc, router, rows, **fields))
+            self._push_chrome()
+            return
+        view = self._update_view(**fields)
+        self._push_chrome(view)
+
     def _sync(self, acc, on_progress, *, announce: bool) -> None:
         if not session_due(
             datetime.now(timezone.utc),
@@ -276,6 +341,7 @@ class DeskRunner:
     def fetch_first(self, *, console: Console | None = None):
         acc = self.store.require_current()
         router = MarketRouter(self.home)
+        self._refresh_realized(acc.name)
         if console is not None:
             with _mark_progress(console) as progress:
                 task = progress.add_task("1/2 fetch", total=1)
@@ -307,30 +373,25 @@ class DeskRunner:
             hold_rows: list = []
 
             def on_progress(label: str, done: int, steps: int) -> None:
-                self._check()
-                frac = min(done, steps) / max(steps, 1)
-                self.paint(
-                    self._panel(
-                        acc,
-                        router,
-                        hold_rows,
-                        poll_fraction=frac,
-                        poll_label=label,
-                        poll_busy=True,
-                        poll_done=done,
-                        poll_total=steps,
-                    )
-                )
-
-            self.paint(
-                self._panel(
+                self._poll(
                     acc,
                     router,
                     hold_rows,
-                    poll_fraction=0.0,
-                    poll_label="updating…",
+                    poll_fraction=min(done, steps) / max(steps, 1),
+                    poll_label=label,
                     poll_busy=True,
+                    poll_done=done,
+                    poll_total=steps,
                 )
+
+            self._poll(
+                acc,
+                router,
+                hold_rows,
+                poll_fraction=0.0,
+                poll_label="updating…",
+                poll_busy=True,
+                full=True,
             )
             result = sync_completed_session(
                 acc, home=self.home, on_progress=on_progress
@@ -355,33 +416,29 @@ class DeskRunner:
     def fetch_live(self, acc, router, rows):
         nxt = self.store.require_current()
         nxt_router = MarketRouter(self.home)
+        self._refresh_realized(nxt.name)
 
         def on_live_progress(label: str, done: int, steps: int) -> None:
-            self._check()
-            frac = min(done, steps) / max(steps, 1)
-            self.paint(
-                self._panel(
-                    acc,
-                    router,
-                    rows,
-                    poll_fraction=frac,
-                    poll_label=label,
-                    poll_busy=True,
-                    poll_done=done,
-                    poll_total=steps,
-                    flash_phase="idle",
-                )
-            )
-
-        self.paint(
-            self._panel(
+            self._poll(
                 acc,
                 router,
                 rows,
-                poll_fraction=0.0,
-                poll_label="updating…",
+                poll_fraction=min(done, steps) / max(steps, 1),
+                poll_label=label,
                 poll_busy=True,
+                poll_done=done,
+                poll_total=steps,
+                flash_phase="idle",
             )
+
+        self._poll(
+            acc,
+            router,
+            rows,
+            poll_fraction=0.0,
+            poll_label="updating…",
+            poll_busy=True,
+            full=True,
         )
         self._sync(nxt, on_live_progress, announce=False)
         marked = mark_account(
@@ -391,15 +448,13 @@ class DeskRunner:
             on_progress=on_live_progress,
             completed_session=self.completed_session,
         )
-        self.paint(
-            self._panel(
-                acc,
-                router,
-                rows,
-                poll_fraction=1.0,
-                poll_label="writing…",
-                poll_busy=True,
-            )
+        self._poll(
+            acc,
+            router,
+            rows,
+            poll_fraction=1.0,
+            poll_label="writing…",
+            poll_busy=True,
         )
         sync_book(nxt, self.home)
         append_export_log(
@@ -408,6 +463,34 @@ class DeskRunner:
         return nxt, nxt_router, marked
 
     def play_flash(self, acc, router, rows) -> None:
+        if self.on_chrome is not None:
+            self._check()
+            self.paint(
+                self._panel(
+                    acc,
+                    router,
+                    rows,
+                    eta=self.refresh,
+                    flash_phase="hot",
+                    poll_fraction=1.0,
+                    poll_label="0s",
+                )
+            )
+            time.sleep(self.flash_hot_sec)
+            self._check()
+            self.paint(
+                self._panel(
+                    acc,
+                    router,
+                    rows,
+                    eta=self.refresh,
+                    flash_phase="warm",
+                    poll_fraction=1.0,
+                    poll_label="0s",
+                )
+            )
+            time.sleep(self.flash_warm_sec)
+            return
         deadline_hot = time.monotonic() + self.flash_hot_sec
         while time.monotonic() < deadline_hot:
             self._check()
@@ -450,18 +533,28 @@ class DeskRunner:
                 break
             frac = min(1.0, 1.0 - (left / seconds))
             eta = max(1, int(left) if left == int(left) else int(left) + 1)
-            self.paint(
-                self._panel(
-                    acc,
-                    router,
-                    rows,
+            if self.on_chrome is not None:
+                view = self._update_view(
                     eta=eta,
                     flash_phase="idle",
                     poll_fraction=frac,
                     poll_label=f"{eta}s",
                     poll_busy=False,
                 )
-            )
+                self._push_chrome(view)
+            else:
+                self.paint(
+                    self._panel(
+                        acc,
+                        router,
+                        rows,
+                        eta=eta,
+                        flash_phase="idle",
+                        poll_fraction=frac,
+                        poll_label=f"{eta}s",
+                        poll_busy=False,
+                    )
+                )
             time.sleep(min(0.125, left))
 
     def run_once(self, *, source: str = "export") -> None:
@@ -472,34 +565,30 @@ class DeskRunner:
         for line in sync_notes(result):
             self._note(line)
         hold_rows: list = []
+        self._refresh_realized(acc.name)
 
         def on_progress(label: str, done: int, steps: int) -> None:
-            self._check()
-            frac = min(done, steps) / max(steps, 1)
-            self.paint(
-                self._panel(
-                    acc,
-                    router,
-                    hold_rows,
-                    poll_fraction=frac,
-                    poll_label=label,
-                    poll_busy=True,
-                    poll_done=done,
-                    poll_total=steps,
-                    continuous=True,
-                )
-            )
-
-        self.paint(
-            self._panel(
+            self._poll(
                 acc,
                 router,
                 hold_rows,
-                poll_fraction=0.0,
-                poll_label="updating…",
+                poll_fraction=min(done, steps) / max(steps, 1),
+                poll_label=label,
                 poll_busy=True,
+                poll_done=done,
+                poll_total=steps,
                 continuous=True,
             )
+
+        self._poll(
+            acc,
+            router,
+            hold_rows,
+            poll_fraction=0.0,
+            poll_label="updating…",
+            poll_busy=True,
+            continuous=True,
+            full=True,
         )
         rows = mark_account(
             acc,

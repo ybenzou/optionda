@@ -54,18 +54,9 @@ from rich.progress import (
 )
 from rich.table import Table
 
-from optionda.batch import (
-    BatchResult,
-    BatchRow,
-    add_batch,
-    merge_detail,
-    ok_detail,
-    render_batch_summary,
-    sell_from_line,
-)
+from optionda.batch import add_batch, render_batch_summary
 from optionda.engine import (
     attach_live_option_mids,
-    freeze_iv_for_position,
     mark_account,
     sync_completed_session,
 )
@@ -79,16 +70,7 @@ from optionda.journal import (
 from optionda.market.session import session_due
 from optionda.market.alpaca import AlpacaClient, AlpacaError
 from optionda.market.router import MarketRouter, resolve_poll_interval
-from optionda.models import Position
-from optionda.occ import (
-    OccError,
-    as_sell_line,
-    format_occ,
-    parse_leg_line,
-    parse_occ,
-    require_entry,
-    resolve_qty,
-)
+from optionda.occ import OccError, format_occ, parse_occ
 from optionda.pricing.surface import is_surface_fresh, load_surface, sticky_delta_iv
 from optionda.paths import resolve_home, resolve_home_info
 from optionda.promptenv import (
@@ -625,101 +607,6 @@ def add_cmd(
         except (ValueError, OSError) as exc:
             _err(str(exc))
             raise typer.Exit(1) from exc
-
-    # One line: quiet path; many lines: progress bar
-    if len(lines) == 1:
-        if as_sell_line(lines[0]) is not None:
-            try:
-                row = sell_from_line(store, lines[0], qty=qty)
-            except (StoreError, OccError) as exc:
-                _err(str(exc))
-                raise typer.Exit(1) from exc
-            acc = store.require_current()
-            sync_book(acc, home)
-            console.print(
-                render_batch_summary(
-                    BatchResult(sold=1, rows=[row]),
-                    book=book_path(acc.name, home),
-                )
-            )
-            return
-        try:
-            leg = parse_leg_line(lines[0])
-            cost = require_entry(leg.entry, entry)
-            line_qty = resolve_qty(leg.qty, qty)
-            parts = leg.parts
-        except OccError as exc:
-            _err(str(exc))
-            raise typer.Exit(1) from exc
-        draft = Position(
-            occ_symbol=parts.occ_symbol,
-            underlying=parts.underlying,
-            expiry=parts.expiry,
-            strike=parts.strike,
-            option_type=parts.option_type,
-            qty=line_qty,
-            side=side_n,  # type: ignore[arg-type]
-            iv_frozen=iv if iv is not None else 0.01,
-            iv_as_of=datetime.now(timezone.utc),
-            entry_premium=cost,
-        )
-        if iv is None:
-            console.print(f"[dim]fetching IV from {MarketRouter(home).feed_name}…[/dim]")
-        try:
-            draft = freeze_iv_for_position(draft, iv=iv, home=home)
-            outcome = store.add_position(None, draft)
-        except StoreError as exc:
-            _err(str(exc))
-            raise typer.Exit(1) from exc
-        except Exception as exc:  # noqa: BLE001
-            if iv is None:
-                _err(
-                    f"could not fetch IV ({exc}). "
-                    "Use a listed OCC symbol, or pass --iv 0.32 as fallback."
-                )
-            else:
-                _err(str(exc))
-            raise typer.Exit(1) from exc
-        pos = outcome.position
-        src = pos.iv_source or ("manual" if iv is not None else "market")
-        if outcome.merged:
-            summary = BatchResult(
-                merged=1,
-                rows=[
-                    BatchRow(
-                        status="merge",
-                        label=pos.occ_symbol,
-                        occ=pos.occ_symbol,
-                        iv=pos.iv_frozen,
-                        source=src,
-                        detail=merge_detail(outcome),
-                    )
-                ],
-            )
-        else:
-            summary = BatchResult(
-                ok=1,
-                rows=[
-                    BatchRow(
-                        status="ok",
-                        label=pos.occ_symbol,
-                        occ=pos.occ_symbol,
-                        iv=pos.iv_frozen,
-                        source=src,
-                        detail=ok_detail(pos),
-                    )
-                ],
-            )
-        console.print(
-            render_batch_summary(summary, book=book_path(outcome.account.name, home))
-        )
-        _sync_session(
-            outcome.account,
-            home=home,
-            console=console,
-            only={pos.underlying},
-        )
-        return
 
     result = add_batch(
         store,

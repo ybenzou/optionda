@@ -26,6 +26,20 @@ def test_occ_short() -> None:
     assert occ_short("HOOD261218C00150000").endswith("C")
 
 
+def test_position_row_columns_line_up() -> None:
+    from optionda.gui.format import POS_OCC_W, POS_PNL_W, format_position_row
+
+    short = format_position_row("AAPL 11/20 350C", "+200", "open")
+    long = format_position_row("AVGO 12/18 500C", "+3,350", "closed")
+    book = format_position_row("ALL", "+725", "2 closed")
+    status_at = POS_OCC_W + 1 + POS_PNL_W + 2
+    assert short[status_at:].startswith("open")
+    assert long[status_at:].startswith("closed")
+    assert book[status_at:].startswith("2 closed")
+    assert short[POS_OCC_W + 1 : POS_OCC_W + 1 + POS_PNL_W].endswith("+200")
+    assert long[POS_OCC_W + 1 : POS_OCC_W + 1 + POS_PNL_W].endswith("+3,350")
+
+
 def test_step_xy_starts_at_zero_and_jumps_on_sell_days() -> None:
     report = StatsReport(
         account="demo",
@@ -269,3 +283,80 @@ def test_run_app_foreground_skips_popen(tmp_path) -> None:
         run_app("demo", tmp_path, period="1m", initial_view="stats", foreground=True)
     spawn.assert_not_called()
     foreground.assert_called_once()
+
+
+def test_realized_is_read_once_per_cycle(tmp_path, monkeypatch) -> None:
+    from optionda.desk_live import DeskRunner
+    from optionda.market.router import MarketRouter
+    from optionda.store import AccountStore
+
+    monkeypatch.setenv("OPTIONDA_HOME", str(tmp_path))
+    monkeypatch.setenv("OPTIONDA_ACTIVE", "demo")
+    store = AccountStore(tmp_path)
+    store.create("demo")
+    store.activate("demo")
+    calls = {"n": 0}
+
+    def fake_summary(account, home=None):
+        calls["n"] += 1
+        return {"realized": 12.0, "n_sells": 1, "by_occ": {}}
+
+    monkeypatch.setattr("optionda.desk_live.realized_pnl_summary", fake_summary)
+    runner = DeskRunner(home=tmp_path, store=store, paint=lambda *_: None)
+    acc = store.require_current()
+    router = MarketRouter(tmp_path)
+    runner._panel(acc, router, [], eta=5)
+    runner._panel(acc, router, [], eta=4)
+    runner._panel(acc, router, [], eta=3)
+    assert calls["n"] == 1
+
+
+def test_idle_until_uses_chrome_not_full_paint(tmp_path, monkeypatch) -> None:
+    from optionda.desk_live import DeskRunner
+    from optionda.market.router import MarketRouter
+    from optionda.store import AccountStore
+
+    monkeypatch.setenv("OPTIONDA_HOME", str(tmp_path))
+    monkeypatch.setenv("OPTIONDA_ACTIVE", "demo")
+    store = AccountStore(tmp_path)
+    store.create("demo")
+    store.activate("demo")
+    paints: list[object] = []
+    chromes: list[object] = []
+    runner = DeskRunner(
+        home=tmp_path,
+        store=store,
+        paint=paints.append,
+        on_chrome=chromes.append,
+    )
+    acc = store.require_current()
+    router = MarketRouter(tmp_path)
+    runner._panel(acc, router, [])
+    paints.clear()
+    runner.idle_until(acc, router, [], 0.05)
+    assert paints == []
+    assert chromes
+
+
+def test_add_batch_reports_progress(tmp_path, monkeypatch) -> None:
+    from optionda.batch import add_batch
+    from optionda.store import AccountStore
+
+    store = AccountStore(tmp_path)
+    store.create("demo")
+    monkeypatch.setenv("OPTIONDA_ACTIVE", "demo")
+    seen: list[tuple[str, int, int]] = []
+
+    def freeze(pos, **kwargs):
+        return pos.model_copy(update={"iv_frozen": 0.4, "iv_source": "test"})
+
+    monkeypatch.setattr("optionda.batch.freeze_iv_for_position", freeze)
+    add_batch(
+        store,
+        ["AAPL 261120 350 C x1 @ 3.50", "IBM 261218 300 C x1 @ 4.70"],
+        home=tmp_path,
+        on_progress=lambda label, done, steps: seen.append((label, done, steps)),
+    )
+    assert seen
+    assert seen[-1][2] == 2
+    assert any("add" in label for label, _d, _s in seen)

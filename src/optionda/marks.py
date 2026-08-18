@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import asdict, dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
@@ -443,7 +443,7 @@ def _resolve_closes(
         for day, item in cached.items():
             if start <= day <= end:
                 found[(symbol, day)] = item
-        if not covered or start < covered[0] or end > covered[1]:
+        if _close_range_stale(cached, covered, start, end):
             missing.append(symbol)
     if missing and closer is not None:
         fetched = closer(missing, start, end)
@@ -455,6 +455,27 @@ def _resolve_closes(
             if symbol not in fetched:
                 _merge_close_cache(home, symbol, {}, start, end)
     return found
+
+
+def _last_weekday(day: date) -> date:
+    cursor = day
+    while cursor.weekday() > 4:
+        cursor -= timedelta(days=1)
+    return cursor
+
+
+def _close_range_stale(
+    cached: dict[date, DailyClose],
+    covered: tuple[date, date] | None,
+    start: date,
+    end: date,
+) -> bool:
+    if not covered:
+        return True
+    if start < covered[0] or end > covered[1]:
+        return True
+    last_session = _last_weekday(end)
+    return start <= last_session <= end and last_session not in cached
 
 
 def _closes_path(home: Path, symbol: str) -> Path:
@@ -510,11 +531,15 @@ def _merge_close_cache(
 ) -> None:
     cached, covered = _read_close_cache(home, symbol)
     cached.update(series)
-    range_start = start
-    range_end = end
-    if covered is not None:
-        range_start = min(covered[0], start)
-        range_end = max(covered[1], end)
+    bar_days = list(cached)
+    if bar_days:
+        range_start = min(bar_days)
+        range_end = max(bar_days)
+        if covered is not None:
+            range_start = min(covered[0], range_start)
+    else:
+        range_start = start
+        range_end = start - timedelta(days=1)
     payload = {
         "range_start": range_start.isoformat(),
         "range_end": range_end.isoformat(),

@@ -11,9 +11,10 @@ from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeEl
 from rich.table import Table
 from rich.text import Text
 
-from optionda.engine import freeze_iv_for_position
+from optionda.engine import freeze_iv_for_position, sync_completed_session
+from optionda.journal import sync_book
 from optionda.models import Position, Side
-from optionda.occ import OccError, as_sell_line, parse_leg_line, require_entry, resolve_qty
+from optionda.occ import OccError, as_sell_line, parse_leg_line, parse_occ, require_entry, resolve_qty
 from optionda.store import AccountStore, StoreError
 
 
@@ -190,6 +191,77 @@ def render_batch_summary(result: BatchResult, *, book: Path | None = None) -> Pa
     )
 
 
+def _add_one_line(
+    store: AccountStore,
+    line: str,
+    out: BatchResult,
+    *,
+    qty: float,
+    side: Side,
+    iv: float | None,
+    entry: float | None,
+    home: Path | None,
+) -> None:
+    try:
+        if as_sell_line(line) is not None:
+            row = sell_from_line(store, line, qty=qty)
+            out.sold += 1
+            out.rows.append(row)
+            return
+        leg = parse_leg_line(line)
+        cost = require_entry(leg.entry, entry)
+        line_qty = resolve_qty(leg.qty, qty)
+        parts = leg.parts
+        draft = Position(
+            occ_symbol=parts.occ_symbol,
+            underlying=parts.underlying,
+            expiry=parts.expiry,
+            strike=parts.strike,
+            option_type=parts.option_type,
+            qty=line_qty,
+            side=side,
+            iv_frozen=iv if iv is not None else 0.01,
+            iv_as_of=datetime.now(timezone.utc),
+            entry_premium=cost,
+        )
+        draft = freeze_iv_for_position(draft, iv=iv, home=home)
+        outcome = store.add_position(None, draft)
+        pos = outcome.position
+        if outcome.merged:
+            out.merged += 1
+            out.rows.append(
+                BatchRow(
+                    status="merge",
+                    label=line,
+                    occ=pos.occ_symbol,
+                    iv=pos.iv_frozen,
+                    source=pos.iv_source or "market",
+                    detail=merge_detail(outcome),
+                )
+            )
+            return
+        out.ok += 1
+        out.rows.append(
+            BatchRow(
+                status="ok",
+                label=line,
+                occ=pos.occ_symbol,
+                iv=pos.iv_frozen,
+                source=pos.iv_source or "market",
+                detail=ok_detail(pos),
+            )
+        )
+    except StoreError as exc:
+        msg = str(exc)
+        out.failed += 1
+        out.errors.append(f"{line}: {msg}")
+        out.rows.append(BatchRow(status="fail", label=line, occ=line, detail=msg))
+    except (OccError, Exception) as exc:  # noqa: BLE001
+        out.failed += 1
+        out.errors.append(f"{line}: {exc}")
+        out.rows.append(BatchRow(status="fail", label=line, occ=line, detail=str(exc)))
+
+
 def add_batch(
     store: AccountStore,
     lines: list[str],
@@ -200,89 +272,96 @@ def add_batch(
     entry: float | None = None,
     home: Path | None = None,
     console: Console | None = None,
+    on_progress=None,
 ) -> BatchResult:
     out = BatchResult()
-    con = console or Console()
     store.require_current()
-    total = len(lines)
+    total = max(len(lines), 1)
 
-    with Progress(
-        SpinnerColumn(style="cyan"),
-        TextColumn("[cyan]{task.description}[/cyan]"),
-        BarColumn(bar_width=28, complete_style="cyan", finished_style="green"),
-        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-        TextColumn("•"),
-        TextColumn("{task.completed}/{task.total}"),
-        TimeElapsedColumn(),
-        console=con,
-        transient=True,  # clear bar when done — summary panel follows
-    ) as progress:
-        task = progress.add_task(f"adding 0/{total}", total=total)
-        for index, line in enumerate(lines, start=1):
-            short = line if len(line) <= 36 else line[:33] + "…"
-            progress.update(task, description=f"adding {index}/{total}  {short}")
-            try:
-                if as_sell_line(line) is not None:
-                    row = sell_from_line(store, line, qty=qty)
-                    out.sold += 1
-                    out.rows.append(row)
-                else:
-                    leg = parse_leg_line(line)
-                    cost = require_entry(leg.entry, entry)
-                    line_qty = resolve_qty(leg.qty, qty)
-                    parts = leg.parts
-                    draft = Position(
-                        occ_symbol=parts.occ_symbol,
-                        underlying=parts.underlying,
-                        expiry=parts.expiry,
-                        strike=parts.strike,
-                        option_type=parts.option_type,
-                        qty=line_qty,
-                        side=side,
-                        iv_frozen=iv if iv is not None else 0.01,
-                        iv_as_of=datetime.now(timezone.utc),
-                        entry_premium=cost,
-                    )
-                    draft = freeze_iv_for_position(draft, iv=iv, home=home)
-                    outcome = store.add_position(None, draft)
-                    pos = outcome.position
-                    if outcome.merged:
-                        out.merged += 1
-                        out.rows.append(
-                            BatchRow(
-                                status="merge",
-                                label=line,
-                                occ=pos.occ_symbol,
-                                iv=pos.iv_frozen,
-                                source=pos.iv_source or "market",
-                                detail=merge_detail(outcome),
-                            )
-                        )
-                    else:
-                        out.ok += 1
-                        out.rows.append(
-                            BatchRow(
-                                status="ok",
-                                label=line,
-                                occ=pos.occ_symbol,
-                                iv=pos.iv_frozen,
-                                source=pos.iv_source or "market",
-                                detail=ok_detail(pos),
-                            )
-                        )
-            except StoreError as exc:
-                msg = str(exc)
-                out.failed += 1
-                out.errors.append(f"{line}: {msg}")
-                out.rows.append(
-                    BatchRow(status="fail", label=line, occ=line, detail=msg)
-                )
-            except (OccError, Exception) as exc:  # noqa: BLE001
-                out.failed += 1
-                out.errors.append(f"{line}: {exc}")
-                out.rows.append(
-                    BatchRow(status="fail", label=line, occ=line, detail=str(exc))
-                )
-            progress.advance(task)
+    def report(label: str, done: int, steps: int) -> None:
+        if on_progress is not None:
+            on_progress(label, done, steps)
 
+    def one(index: int, line: str) -> str:
+        short = line if len(line) <= 36 else line[:33] + "…"
+        label = f"add {index}/{total}  {short}"
+        report(label, index - 1, total)
+        _add_one_line(
+            store,
+            line,
+            out,
+            qty=qty,
+            side=side,
+            iv=iv,
+            entry=entry,
+            home=home,
+        )
+        report(label, index, total)
+        return label
+
+    if console is not None:
+        with Progress(
+            SpinnerColumn(style="cyan"),
+            TextColumn("[cyan]{task.description}[/cyan]"),
+            BarColumn(bar_width=28, complete_style="cyan", finished_style="green"),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            TextColumn("•"),
+            TextColumn("{task.completed}/{task.total}"),
+            TimeElapsedColumn(),
+            console=console,
+            transient=True,
+        ) as progress:
+            task = progress.add_task(f"add 0/{total}", total=total)
+            for index, line in enumerate(lines, start=1):
+                label = one(index, line)
+                progress.update(task, description=label, completed=index, total=total)
+        return out
+
+    for index, line in enumerate(lines, start=1):
+        one(index, line)
     return out
+
+
+def run_add(
+    store: AccountStore,
+    lines: list[str],
+    *,
+    qty: float = 1.0,
+    side: Side = "long",
+    iv: float | None = None,
+    entry: float | None = None,
+    home: Path | None = None,
+    console: Console | None = None,
+    on_progress=None,
+) -> BatchResult:
+    result = add_batch(
+        store,
+        lines,
+        qty=qty,
+        side=side,
+        iv=iv,
+        entry=entry,
+        home=home,
+        console=console,
+        on_progress=on_progress,
+    )
+    acc = store.require_current()
+    sync_book(acc, home)
+    added = [
+        parse_occ(row.occ).underlying
+        for row in result.rows
+        if row.status in {"ok", "merge"} and row.occ
+    ]
+    if added:
+        sync = sync_completed_session(
+            acc,
+            home=home,
+            only=set(added),
+            on_progress=on_progress,
+        )
+        if console is not None:
+            from optionda.desk_live import sync_notes
+
+            for line in sync_notes(sync):
+                console.print(f"[dim]{line}[/dim]")
+    return result

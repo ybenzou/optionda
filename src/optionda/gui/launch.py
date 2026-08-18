@@ -14,6 +14,19 @@ from optionda.journal import logs_dir
 from optionda.paths import ensure_home
 
 View = Literal["term", "stats", "desk"]
+APP_USER_MODEL_ID = "yuanben.optionda.desk"
+
+
+def claim_windows_identity() -> None:
+    """Tell Windows who we are before Qt creates any HWND."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
+    except Exception:  # noqa: BLE001
+        return
 
 
 def gui_log_path(home: Path | None = None) -> Path:
@@ -100,24 +113,16 @@ def run_foreground(
     initial_view: View = "term",
 ) -> int:
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
+    claim_windows_identity()
     try:
         from PySide6.QtWidgets import QApplication, QMessageBox
 
         from optionda.gui.main_window import MainWindow
-        from optionda.gui.theme import apply_theme
+        from optionda.gui.theme import apply_native_chrome, apply_theme
     except Exception as exc:  # noqa: BLE001
         _write_gui_error(home, exc)
         raise
 
-    if sys.platform == "win32":
-        try:
-            import ctypes
-
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-                "yuanben.optionda.desk"
-            )
-        except Exception:  # noqa: BLE001
-            pass
     app = QApplication.instance() or QApplication(sys.argv)
     apply_theme(app)
     try:
@@ -127,7 +132,9 @@ def run_foreground(
             period=period,
             initial_view=initial_view,
         )
+        apply_native_chrome(window)
         window.show()
+        apply_native_chrome(window)
         return int(app.exec())
     except Exception as exc:  # noqa: BLE001
         path = _write_gui_error(home, exc)

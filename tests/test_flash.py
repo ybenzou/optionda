@@ -110,6 +110,83 @@ def test_spot_chg_pct_vs_close():
     assert "+3.6%" in cell.plain
 
 
+def test_today_model_pnl_sums_paren_moves() -> None:
+    from optionda.display.table import render_snapshot, today_model_pnl
+
+    long = Position(
+        occ_symbol="AAPL261120C00350000",
+        underlying="AAPL",
+        expiry=date(2026, 11, 20),
+        strike=350.0,
+        option_type="call",
+        qty=2,
+        side="long",
+        iv_frozen=0.25,
+        iv_as_of=datetime(2026, 8, 12, 20, tzinfo=timezone.utc),
+        entry_premium=3.5,
+    )
+    short = Position(
+        occ_symbol="IBM261218C00300000",
+        underlying="IBM",
+        expiry=date(2026, 12, 18),
+        strike=300.0,
+        option_type="call",
+        qty=1,
+        side="short",
+        iv_frozen=0.40,
+        iv_as_of=datetime(2026, 8, 12, 20, tzinfo=timezone.utc),
+        entry_premium=5.8,
+    )
+    long_row = RowMark(
+        position=long,
+        spot=210.0,
+        theo=12.0,
+        delta=0.3,
+        dte=90.0,
+        notional=2400.0,
+        cost=3.5,
+        upnl=1700.0,
+        close_premium=10.8,
+        theo_chg=1.2,
+    )
+    short_row = RowMark(
+        position=short,
+        spot=180.0,
+        theo=4.5,
+        delta=-0.2,
+        dte=120.0,
+        notional=-450.0,
+        cost=5.8,
+        upnl=130.0,
+        close_premium=4.7,
+        theo_chg=-0.2,
+    )
+    assert today_model_pnl(long_row) == 240.0
+    assert today_model_pnl(short_row) == 20.0
+    group = render_snapshot(
+        account="main",
+        feed="alpaca",
+        refresh_sec=15,
+        rows=[long_row, short_row],
+        realized=100.0,
+        framed=False,
+    )
+    table = next(
+        item for item in group.renderables if getattr(item, "columns", None)
+    )
+    model_footer = table.columns[6].footer
+    model_text = model_footer.plain if hasattr(model_footer, "plain") else str(model_footer)
+    assert "tPnL" not in model_text
+    assert "1,950.00" in model_text
+    plains = [
+        item.plain
+        for item in group.renderables
+        if hasattr(item, "plain")
+    ]
+    assert any("tPnL" in text and "+260.00" in text for text in plains)
+    assert any("rPnL" in text and "+100.00" in text for text in plains)
+
+
 def test_model_cell_shows_dollar_chg_vs_close():
     up = _premium_chg(12.00, 10.80)
     assert up is not None
@@ -207,10 +284,11 @@ def test_session_notes_stay_inside_snapshot() -> None:
             )
         ],
         continuous=True,
-        notes=["completed session 8/14"],
+        notes=["completed session 8/14", "close pending AAPL: late print"],
     )
     texts = [item.plain for item in group.renderables[0].renderable.renderables if hasattr(item, "plain")]
-    assert any("completed session 8/14" in text for text in texts)
+    assert not any("completed session" in text for text in texts)
+    assert any("close pending AAPL: late print" in text for text in texts)
 
 
 def test_iv_and_close_share_the_progress_line() -> None:
