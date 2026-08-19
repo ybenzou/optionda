@@ -146,14 +146,9 @@ class _AddWorker(QThread):
         return self._stop
 
     def run(self) -> None:
-        from io import StringIO
-
-        from rich.console import Console
-
         from optionda.add_resolve import resolve_add_lines
-        from optionda.batch import render_batch_summary, run_add
-        from optionda.display.table import format_chrome_plain, spinner_frame
-        from optionda.journal import book_path
+        from optionda.batch import run_add
+        from optionda.display.table import format_add_progress, spinner_frame
         from optionda.store import AccountStore, StoreError
 
         args = parse_line(self._line)
@@ -171,13 +166,13 @@ class _AddWorker(QThread):
                 "poll_done": done,
                 "poll_total": steps,
                 "poll_fraction": min(done, steps) / max(steps, 1),
+                "page": True,
             }
-            payload["text"] = format_chrome_plain(
+            payload["text"] = format_add_progress(
                 spin=payload["spin"],
-                poll_label=label,
-                poll_busy=True,
-                poll_done=done,
-                poll_total=steps,
+                label=label,
+                done=done,
+                total=steps,
             )
             self.chrome.emit(payload)
 
@@ -185,19 +180,7 @@ class _AddWorker(QThread):
             lines = resolve_add_lines(args[1:])
             store = AccountStore(self._home)
             result = run_add(store, lines, home=store.home, on_progress=on_progress)
-            acc = store.require_current()
-            buf = StringIO()
-            captured = Console(
-                file=buf,
-                force_terminal=False,
-                color_system=None,
-                width=100,
-                highlight=False,
-                legacy_windows=False,
-            )
-            captured.print(render_batch_summary(result, book=book_path(acc.name, store.home)))
-            code = 1 if result.failed else 0
-            self.finished_result.emit(CommandResult(code, buf.getvalue().rstrip()))
+            self.finished_result.emit(result)
         except KeyboardInterrupt:
             self.finished_result.emit(CommandResult(0, "add stopped"))
         except (StoreError, ValueError) as exc:
@@ -612,8 +595,23 @@ class MainWindow(QMainWindow):
             return
         self.show_view("term")
         self.terminal.prepare_live()
+        from optionda.display.table import format_add_progress, spinner_frame
+
         self.terminal.set_live_chrome(
-            {"poll_busy": True, "poll_label": "updating…", "text": "updating…"},
+            {
+                "poll_busy": True,
+                "poll_label": "updating…",
+                "poll_done": 0,
+                "poll_total": 1,
+                "page": True,
+                "spin": spinner_frame(0),
+                "text": format_add_progress(
+                    spin=spinner_frame(0),
+                    label="updating…",
+                    done=0,
+                    total=1,
+                ),
+            },
             keep_table=False,
         )
         page = self._page()
@@ -759,11 +757,24 @@ class MainWindow(QMainWindow):
         self._input.setFocus()
 
     def _on_add_done(self, result: object, page: TermPage | None = None) -> None:
+        from optionda.batch import BatchResult, render_batch_summary
+        from optionda.journal import book_path
+
         page = page or self._page()
         self._spin_timer.stop()
-        page.terminal.clear_live()
-        if isinstance(result, CommandResult) and result.text:
-            page.terminal.append_block(result.text)
+        if isinstance(result, BatchResult):
+            cols = page.terminal.char_width()
+            book = book_path(self.account, self.home) if self.account else None
+            page.terminal.show_add_result(
+                renderable_html(
+                    render_batch_summary(result, book=book, framed=False),
+                    cols,
+                )
+            )
+        else:
+            page.terminal.clear_live()
+            if isinstance(result, CommandResult) and result.text:
+                page.terminal.append_block(result.text)
         page.add = None
         self._input.setEnabled(True)
         self._input.setFocus()

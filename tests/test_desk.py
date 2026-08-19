@@ -21,6 +21,18 @@ def test_signed_money_and_hold() -> None:
     assert hold_label(0.2).endswith("h")
 
 
+def test_add_progress_keeps_full_label() -> None:
+    from optionda.display.table import format_add_progress
+
+    label = "add 3/7  HOOD 261218 150 C x2 @ 2.30"
+    page = format_add_progress(spin="⠋", label=label, done=2, total=7)
+    assert "HOOD 261218 150 C x2 @ 2.30" in page
+    assert "2/7" in page
+    assert "#" in page and "-" in page
+    assert "…" not in page
+    assert page.count("\n") >= 2
+
+
 def test_occ_short() -> None:
     assert "HOOD" in occ_short("HOOD261218C00150000")
     assert occ_short("HOOD261218C00150000").endswith("C")
@@ -351,12 +363,14 @@ def test_add_batch_reports_progress(tmp_path, monkeypatch) -> None:
         return pos.model_copy(update={"iv_frozen": 0.4, "iv_source": "test"})
 
     monkeypatch.setattr("optionda.batch.freeze_iv_for_position", freeze)
+    long = "HOOD 261218 150 C x2 @ 2.30 extra-long-contract-note"
     add_batch(
         store,
-        ["AAPL 261120 350 C x1 @ 3.50", "IBM 261218 300 C x1 @ 4.70"],
+        ["AAPL 261120 350 C x1 @ 3.50", long],
         home=tmp_path,
         on_progress=lambda label, done, steps: seen.append((label, done, steps)),
     )
     assert seen
     assert seen[-1][2] == 2
     assert any("add" in label for label, _d, _s in seen)
+    assert any(long in label and "…" not in label for label, _d, _s in seen)

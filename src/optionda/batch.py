@@ -129,7 +129,12 @@ def sell_from_line(
     )
 
 
-def render_batch_summary(result: BatchResult, *, book: Path | None = None) -> Panel:
+def render_batch_summary(
+    result: BatchResult,
+    *,
+    book: Path | None = None,
+    framed: bool = True,
+):
     table = Table(
         box=box.SIMPLE_HEAD,
         show_header=True,
@@ -180,9 +185,11 @@ def render_batch_summary(result: BatchResult, *, book: Path | None = None) -> Pa
     footer_bits: list = [counts]
     if book is not None:
         footer_bits.append(Text(f"book {short_path(book)}", style="dim"))
-
+    body = Group(table, *footer_bits)
+    if not framed:
+        return Group(Text("add", style="bold cyan"), body)
     return Panel(
-        Group(table, *footer_bits),
+        body,
         title="add",
         title_align="left",
         border_style="cyan",
@@ -284,7 +291,7 @@ def add_batch(
 
     def one(index: int, line: str) -> str:
         short = line if len(line) <= 36 else line[:33] + "…"
-        label = f"add {index}/{total}  {short}"
+        label = f"add {index}/{total}  {line}"
         report(label, index - 1, total)
         _add_one_line(
             store,
@@ -297,7 +304,7 @@ def add_batch(
             home=home,
         )
         report(label, index, total)
-        return label
+        return f"add {index}/{total}  {short}"
 
     if console is not None:
         with Progress(

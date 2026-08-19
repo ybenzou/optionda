@@ -93,6 +93,7 @@ class TerminalView(QWidget):
         self.desk.hide()
         self._chrome: dict = {}
         self._cell: tuple[float, float] | None = None
+        self.history.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         self.history.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
@@ -104,6 +105,10 @@ class TerminalView(QWidget):
         layout.setSpacing(0)
         layout.addWidget(self.history, 0)
         layout.addWidget(self.desk, 1)
+        self._fit_history()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
         self._fit_history()
 
     def prepare_live(self) -> None:
@@ -144,9 +149,13 @@ class TerminalView(QWidget):
         return self.char_size()[0]
 
     def _fit_history(self) -> None:
+        width = self.history.viewport().width()
+        if width > 20:
+            self.history.document().setTextWidth(width)
         doc_h = int(self.history.document().size().height())
         _, line = self._cell_size()
-        self.history.setFixedHeight(max(doc_h + 4, int(line) + 4))
+        cap = int(line) * 8 + 8
+        self.history.setFixedHeight(max(min(doc_h + 8, cap), int(line) + 8))
 
     def append_block(self, text: str) -> None:
         if not text:
@@ -158,11 +167,17 @@ class TerminalView(QWidget):
         if self.history.toPlainText():
             cursor.insertHtml("<br>")
         escaped = html.escape(text).replace("\n", "<br>")
-        cursor.insertHtml(wrap_desk_html(escaped))
+        cursor.insertHtml(wrap_desk_html(escaped, wrap=True))
+        cursor.movePosition(QTextCursor.MoveOperation.Start)
         self.history.setTextCursor(cursor)
         self._fit_history()
 
-    def set_live_html(self, markup: str) -> None:
+    def set_live_html(self, markup: str, *, wrap: bool = False) -> None:
+        self.live.setLineWrapMode(
+            QTextEdit.LineWrapMode.WidgetWidth
+            if wrap
+            else QTextEdit.LineWrapMode.NoWrap
+        )
         self.live.setHtml(markup)
         if self.desk.isHidden():
             self.desk.show()
@@ -186,6 +201,16 @@ class TerminalView(QWidget):
                 poll_total=chrome.get("poll_total"),
                 eta_sec=chrome.get("eta"),
             )
+        page = bool(chrome.get("page")) or "\n" in text
+        if page:
+            escaped = html.escape(text).replace("\n", "<br>")
+            self.set_live_html(wrap_desk_html(escaped, wrap=True), wrap=True)
+            self._status.clear()
+            self._status.hide()
+            if self.history.isHidden():
+                self.history.show()
+            self._fit_history()
+            return
         self._status.setText(text)
         self._status.setVisible(bool(text))
         if self.history.isHidden():
@@ -201,17 +226,35 @@ class TerminalView(QWidget):
     def bump_live_spin(self) -> bool:
         if not self._chrome.get("poll_busy"):
             return False
-        from optionda.display.table import spinner_frame
+        from optionda.display.table import format_add_progress, spinner_frame
 
         tick = int(self._chrome.get("_tick") or 0) + 1
         self._chrome["_tick"] = tick
         self._chrome["spin"] = spinner_frame(tick)
-        self._chrome.pop("text", None)
-        self.set_live_chrome(self._chrome, keep_table=bool(self.live.toPlainText()))
+        page = bool(self._chrome.get("page")) or "\n" in str(self._chrome.get("text") or "")
+        if page:
+            self._chrome["page"] = True
+            self._chrome["text"] = format_add_progress(
+                spin=self._chrome["spin"],
+                label=self._chrome.get("poll_label"),
+                done=self._chrome.get("poll_done"),
+                total=self._chrome.get("poll_total"),
+            )
+        else:
+            self._chrome.pop("text", None)
+        keep = bool(self.live.toPlainText()) or page
+        self.set_live_chrome(self._chrome, keep_table=keep)
         return True
 
     def chrome_busy(self) -> bool:
         return bool(self._chrome.get("poll_busy"))
+
+    def show_add_result(self, markup: str) -> None:
+        """Keep the dashed pane and paint the add table into it."""
+        self._chrome = {}
+        self._status.clear()
+        self._status.hide()
+        self.set_live_html(markup, wrap=False)
 
     def clear_live(self) -> None:
         self._chrome = {}

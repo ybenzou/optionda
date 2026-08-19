@@ -43,8 +43,11 @@ DESK_PRE_STYLE = (
 )
 
 
-def wrap_desk_html(body: str) -> str:
-    return f'<pre style="{DESK_PRE_STYLE}">{body}</pre>'
+def wrap_desk_html(body: str, *, wrap: bool = False) -> str:
+    style = DESK_PRE_STYLE
+    if wrap:
+        style = style.replace("white-space:pre;", "white-space:pre-wrap;")
+    return f'<pre style="{style}">{body}</pre>'
 
 
 def renderable_html(renderable, width: int) -> str:

@@ -288,6 +288,25 @@ def format_poll_status(
     return _fit_width(body)
 
 
+def format_add_progress(
+    *,
+    spin: str | None = None,
+    label: str | None = None,
+    done: int | None = None,
+    total: int | None = None,
+    bar_width: int = 32,
+) -> str:
+    """Full-pane add/sync progress. Do not squeeze into the 36-char header slot."""
+    steps = max(int(total or 1), 1)
+    finished = max(0, min(int(done or 0), steps))
+    frac = finished / steps
+    filled = min(bar_width, max(0, int(round(bar_width * frac))))
+    bar = "#" * filled + "-" * (bar_width - filled)
+    mark = spin or "·"
+    title = (label or "updating…").strip()
+    return f"{mark}  {finished}/{steps}\n{bar}\n\n{title}"
+
+
 def format_chrome_plain(
     *,
     spin: str | None = None,

@@ -189,6 +189,112 @@ def test_performance_last_label_stays_inside_plot(tmp_path, qtbot) -> None:
     assert tip_box.left() >= plot_box.left() - 1
 
 
+def test_long_add_command_wraps_in_history(qtbot) -> None:
+    from PySide6.QtWidgets import QTextEdit
+
+    from optionda.gui.terminal_view import TerminalView
+
+    view = TerminalView()
+    qtbot.addWidget(view)
+    view.resize(720, 500)
+    view.show()
+    command = (
+        'add "SKHY 261218 250 C x1 @ 9.80; INTC 261016 140 C x5 @ 1.85; '
+        "HOOD 261218 150 C x2 @ 2.30; AVGO 261218 500 C x1 @ 11.80; "
+        'SPCX 261218 205 C x1 @ 6.45"'
+    )
+    view.begin_turn(command)
+    assert view.history.lineWrapMode() == QTextEdit.LineWrapMode.WidgetWidth
+    assert "SKHY 261218 250 C" in view.history.toPlainText()
+    assert "SPCX 261218 205 C" in view.history.toPlainText()
+    _, line = view._cell_size()
+    assert view.history.document().size().height() > line * 1.4
+
+
+def test_add_summary_fills_live_pane(tmp_path, qtbot) -> None:
+    from optionda.batch import BatchResult, BatchRow
+    from optionda.gui.main_window import MainWindow
+
+    _journal(tmp_path)
+    window = MainWindow("demo", tmp_path, period="all", initial_view="term")
+    qtbot.addWidget(window)
+    window.resize(900, 600)
+    window.show()
+    window.terminal.begin_turn(
+        'add "HOOD 261218 150 C x2 @ 2.30; AVGO 261218 500 C x1 @ 11.80"'
+    )
+    result = BatchResult(
+        ok=2,
+        rows=[
+            BatchRow(
+                status="ok",
+                label="HOOD 261218 150 C x2 @ 2.30",
+                occ="HOOD261218C00150000",
+                iv=0.41,
+                source="market",
+                detail="qty=2 cost=2.3",
+            ),
+            BatchRow(
+                status="ok",
+                label="AVGO 261218 500 C x1 @ 11.80",
+                occ="AVGO261218C00500000",
+                iv=0.33,
+                source="market",
+                detail="qty=1 cost=11.8",
+            ),
+        ],
+    )
+    window._on_add_done(result)
+    live = window.terminal.live.toPlainText()
+    assert window.terminal.desk.isVisible()
+    assert window.terminal.live.isVisible()
+    assert "HOOD261218C00150000" in live
+    assert "AVGO261218C00500000" in live
+    assert "ok" in live
+    history = window.terminal.history.toPlainText()
+    assert "HOOD 261218 150 C" in history
+    assert "HOOD261218C00150000" not in history
+
+
+def test_add_progress_fills_live_pane(tmp_path, qtbot) -> None:
+    from optionda.display.table import format_add_progress
+    from optionda.gui.terminal_view import TerminalView
+
+    view = TerminalView()
+    qtbot.addWidget(view)
+    view.resize(900, 600)
+    view.show()
+    view.begin_turn(
+        'add "SKHY 261218 250 C x1 @ 9.80; HOOD 261218 150 C x2 @ 2.30"'
+    )
+    page = format_add_progress(
+        spin="⠋",
+        label="1/2 chain  AVGO chain…",
+        done=0,
+        total=5,
+    )
+    view.set_live_chrome(
+        {
+            "text": page,
+            "page": True,
+            "poll_busy": True,
+            "poll_label": "1/2 chain  AVGO chain…",
+            "poll_done": 0,
+            "poll_total": 5,
+        },
+        keep_table=False,
+    )
+    live = view.live.toPlainText()
+    assert "AVGO" in live
+    assert "0/5" in live
+    assert view.live.isVisible()
+    assert not view._status.isVisible()
+    assert "SKHY 261218 250 C" in view.history.toPlainText()
+    assert view.bump_live_spin()
+    assert "AVGO" in view.live.toPlainText()
+    assert not view._status.isVisible()
+
+
 def test_run_foreground_claims_identity_before_qt() -> None:
     import inspect
 
