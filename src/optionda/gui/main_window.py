@@ -496,21 +496,21 @@ class MainWindow(QMainWindow):
         cmd = args[0].lower() if args else ""
         if self._desk is not None and self._desk.isRunning():
             if cmd == "stop":
-                self._desk.request_stop()
-                self.terminal.begin_turn(f"{self._prompt_plain()} stop")
-                self._set_tab_title(self.current_tab(), "stop")
-                self._input.clear()
+                self._request_stop(self._desk)
                 return
             self._input.clear()
+            self.terminal.append_block(
+                f"{cmd or 'command'} blocked — run is live, stop first"
+            )
             return
         if self._add is not None and self._add.isRunning():
             if cmd == "stop":
-                self._add.request_stop()
-                self.terminal.begin_turn(f"{self._prompt_plain()} stop")
-                self._set_tab_title(self.current_tab(), "stop")
-                self._input.clear()
+                self._request_stop(self._add)
                 return
             self._input.clear()
+            self.terminal.append_block(
+                f"{cmd or 'command'} blocked — add is live, stop first"
+            )
             return
         if self._worker is not None and self._worker.isRunning():
             return
@@ -653,6 +653,10 @@ class MainWindow(QMainWindow):
     def _sync_spin_timer(self) -> None:
         busy = False
         for page in self._pages:
+            if page.desk is not None and page.desk.stopping():
+                continue
+            if page.add is not None and page.add.stopping():
+                continue
             runner = None if page.desk is None else page.desk.runner
             if runner is not None and runner.last_view and runner.last_view.get("poll_busy"):
                 busy = True
@@ -671,6 +675,10 @@ class MainWindow(QMainWindow):
             return
         busy = False
         for page in self._pages:
+            if page.desk is not None and page.desk.stopping():
+                continue
+            if page.add is not None and page.add.stopping():
+                continue
             if page.desk is not None and page.desk.runner is not None:
                 result = page.desk.runner.bump_spin()
                 if isinstance(result, dict):
@@ -705,23 +713,24 @@ class MainWindow(QMainWindow):
         self._resizing = False
         self._apply_desk_size()
 
+    def _request_stop(self, worker) -> None:
+        worker.request_stop()
+        self.terminal.begin_turn(f"{self._prompt_plain()} stop")
+        self._set_tab_title(self.current_tab(), "stop")
+        self.terminal.clear_live()
+        self._spin_timer.stop()
+        self._input.clear()
+
     def _interrupt(self) -> None:
         if self._desk is not None and self._desk.isRunning():
-            self._desk.request_stop()
-            self.terminal.begin_turn(f"{self._prompt_plain()} stop")
-            self._set_tab_title(self.current_tab(), "stop")
-            self._input.clear()
+            self._request_stop(self._desk)
             return
         if self._add is not None and self._add.isRunning():
-            self._add.request_stop()
-            self.terminal.begin_turn(f"{self._prompt_plain()} stop")
-            self._set_tab_title(self.current_tab(), "stop")
-            self._input.clear()
+            self._request_stop(self._add)
             return
         live = self._live_desk_page()
         if live is not None and live.desk is not None:
-            live.desk.request_stop()
-            self._input.clear()
+            self._request_stop(live.desk)
 
     def _on_escape(self) -> None:
         live = (
@@ -744,7 +753,11 @@ class MainWindow(QMainWindow):
     def _on_desk_done(self, page: TermPage | None = None) -> None:
         page = page or self._page()
         self._spin_timer.stop()
+        stopped = page.desk is not None and page.desk.stopping()
         page.desk = None
+        if stopped:
+            page.terminal.clear_live()
+            page.terminal.append_block("stopped")
         self._input.setFocus()
 
     def _on_add_failed(self, message: str, page: TermPage | None = None) -> None:
@@ -762,6 +775,14 @@ class MainWindow(QMainWindow):
 
         page = page or self._page()
         self._spin_timer.stop()
+        stopped = page.add is not None and page.add.stopping()
+        if stopped:
+            page.terminal.clear_live()
+            page.terminal.append_block("stopped")
+            page.add = None
+            self._input.setEnabled(True)
+            self._input.setFocus()
+            return
         if isinstance(result, BatchResult):
             cols = page.terminal.char_width()
             book = book_path(self.account, self.home) if self.account else None

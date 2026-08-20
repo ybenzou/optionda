@@ -284,10 +284,19 @@ def test_session_notes_stay_inside_snapshot() -> None:
             )
         ],
         continuous=True,
-        notes=["completed session 8/14", "close pending AAPL: late print"],
+        notes=[
+            "completed session 8/14",
+            "surface AAPL IV 8/18",
+            "surface CSCO IV 8/18",
+            "close AAPL 210.00 (alpaca)",
+            "close pending AAPL: late print",
+        ],
     )
     texts = [item.plain for item in group.renderables[0].renderable.renderables if hasattr(item, "plain")]
     assert not any("completed session" in text for text in texts)
+    assert not any("surface AAPL IV" in text for text in texts)
+    assert not any("surface CSCO IV" in text for text in texts)
+    assert not any("close AAPL 210.00" in text for text in texts)
     assert any("close pending AAPL: late print" in text for text in texts)
 
 

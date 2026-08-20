@@ -431,6 +431,107 @@ def test_resize_debounces_desk_relayout(tmp_path, qtbot) -> None:
     window._desk = None
 
 
+def test_stop_does_not_keep_fetch_chrome(tmp_path, qtbot) -> None:
+    from types import SimpleNamespace
+
+    from optionda.gui.main_window import MainWindow
+
+    class FakeDesk:
+        def __init__(self) -> None:
+            self._stop = False
+            self.runner = SimpleNamespace(
+                last_view={
+                    "poll_busy": True,
+                    "poll_label": "1/2 fetch  spots",
+                    "poll_done": 0,
+                    "poll_total": 1,
+                },
+                bump_spin=lambda: {
+                    "poll_busy": True,
+                    "poll_label": "1/2 fetch  spots",
+                    "poll_done": 0,
+                    "poll_total": 1,
+                    "text": "1/2 fetch   0/1  spots",
+                },
+            )
+
+        def isRunning(self) -> bool:
+            return True
+
+        def request_stop(self) -> None:
+            self._stop = True
+
+        def stopping(self) -> bool:
+            return self._stop
+
+        def wait(self, _msec: int = 0) -> bool:
+            return True
+
+    _journal(tmp_path)
+    window = MainWindow("demo", tmp_path, period="all", initial_view="term")
+    qtbot.addWidget(window)
+    window.show()
+    window._page().desk = FakeDesk()
+    window.terminal.set_live_chrome(
+        {
+            "poll_busy": True,
+            "poll_label": "1/2 fetch  spots",
+            "poll_done": 0,
+            "poll_total": 1,
+        },
+        keep_table=False,
+    )
+    window._spin_timer.start()
+    window._input.setText("stop")
+    window._submit()
+    window._tick_spinner()
+    assert "stop" in window.terminal.history.toPlainText()
+    assert "fetch" not in window.terminal._status.text()
+    assert not window.terminal.desk.isVisible()
+    assert not window._spin_timer.isActive()
+    window._on_desk_done()
+    assert "stopped" in window.terminal.history.toPlainText().lower()
+    assert window._page().desk is None
+
+
+def test_add_during_run_explains_stop_first(tmp_path, qtbot) -> None:
+    from types import SimpleNamespace
+
+    from optionda.gui.main_window import MainWindow
+
+    class FakeDesk:
+        def isRunning(self) -> bool:
+            return True
+
+        def request_stop(self) -> None:
+            return None
+
+        def stopping(self) -> bool:
+            return False
+
+        def wait(self, _msec: int = 0) -> bool:
+            return True
+
+        runner = SimpleNamespace(last_view={"poll_busy": True})
+
+    _journal(tmp_path)
+    window = MainWindow("demo", tmp_path, period="all", initial_view="term")
+    qtbot.addWidget(window)
+    window.show()
+    window.terminal.append_block("PS main> [optionda] run")
+    window.terminal.prepare_live()
+    window._page().desk = FakeDesk()
+    window._input.setText(
+        'optionda add "CRWV 261218 130 C x1 @ 7.7"'
+    )
+    window._submit()
+    text = window.terminal.history.toPlainText()
+    assert "stop first" in text.lower()
+    assert window._page().desk is not None
+    assert window._page().add is None
+    assert window._input.text() == ""
+
+
 def test_ctrl_c_stops_only_when_desk_is_live(tmp_path, qtbot) -> None:
     from optionda.gui.main_window import MainWindow
 

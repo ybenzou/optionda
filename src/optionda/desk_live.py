@@ -35,18 +35,13 @@ Tick = Callable[[float, str, bool], None]
 
 
 def sync_notes(result) -> list[str]:
+    """Problems only. Successful close/IV dates already live in the header."""
     lines: list[str] = []
     if result.unavailable:
         lines.append(
             f"calendar/clock unavailable: {result.unavailable} — keeping stored close/IV"
         )
         return lines
-    for name, reference in result.references_saved.items():
-        lines.append(f"close {name} {reference.close_spot:.2f} ({reference.source})")
-    for name, surface in result.surfaces_saved.items():
-        day = surface.session_date
-        label = f"{day.month}/{day.day}" if day is not None else "legacy"
-        lines.append(f"surface {name} IV {label}")
     for name, reason in result.pending_closes.items():
         lines.append(f"close pending {name}: {reason}")
     for name, reason in result.pending_surfaces.items():

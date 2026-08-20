@@ -551,6 +551,17 @@ def sort_desk_rows(rows: list[RowMark]) -> list[RowMark]:
     return sorted(rows, key=key)
 
 
+def _desk_note_visible(note: str) -> bool:
+    text = (note or "").strip()
+    if not text or text.startswith("completed session"):
+        return False
+    if text.startswith("surface ") and " IV " in text:
+        return False
+    if text.startswith("close ") and "pending" not in text:
+        return False
+    return True
+
+
 def render_snapshot(
     *,
     account: str,
@@ -787,7 +798,7 @@ def render_snapshot(
     shown_notes = [
         note
         for note in notes or []
-        if not note.startswith("completed session")
+        if _desk_note_visible(note)
     ]
     for note in shown_notes:
         header.append(Text(note, style=_MUTED))

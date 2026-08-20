@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "optionda"
-version = "1.0.18"
+version = "1.0.19"
 description = "Terminal options desk: freeze IV, reprice on live spot (Yahoo or Alpaca)."
 readme = "README.md"
 license = { text = "MIT" }

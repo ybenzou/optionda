@@ -374,3 +374,29 @@ def test_add_batch_reports_progress(tmp_path, monkeypatch) -> None:
     assert seen[-1][2] == 2
     assert any("add" in label for label, _d, _s in seen)
     assert any(long in label and "…" not in label for label, _d, _s in seen)
+
+
+def test_sync_notes_skip_routine_surface_lines() -> None:
+    from datetime import date
+    from types import SimpleNamespace
+
+    from optionda.desk_live import sync_notes
+
+    result = SimpleNamespace(
+        unavailable=None,
+        references_saved={
+            "AAPL": SimpleNamespace(close_spot=210.11, source="alpaca"),
+        },
+        surfaces_saved={
+            "AAPL": SimpleNamespace(session_date=date(2026, 8, 18)),
+            "CSCO": SimpleNamespace(session_date=date(2026, 8, 18)),
+        },
+        pending_closes={},
+        pending_surfaces={"TSLA": "close grace"},
+        errors={"IBM": "no chain"},
+    )
+    notes = sync_notes(result)
+    assert not any(line.startswith("surface ") for line in notes)
+    assert not any(line.startswith("close AAPL") for line in notes)
+    assert any("IV pending TSLA" in line for line in notes)
+    assert any("session IBM" in line for line in notes)
