@@ -79,10 +79,12 @@ def append_event(
     event: dict[str, Any],
     *,
     home: Path | None = None,
+    ts: datetime | None = None,
 ) -> Path:
     """Append one JSON object to the account event log (never overwrite)."""
     path = log_path(account, home)
-    payload = {"ts": _now(), "account": account, **event}
+    when = _iso_ts(ts) if ts is not None else _now()
+    payload = {"ts": when, "account": account, **event}
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
     return path
@@ -147,6 +149,7 @@ def append_add_event(
     previous_entry: float | None,
     dte_at_entry: int | None = None,
     batch_id: str | None = None,
+    ts: datetime | None = None,
     home: Path | None = None,
 ) -> Path:
     """Append add / merge mutation to the event log."""
@@ -168,7 +171,7 @@ def append_add_event(
     }
     if batch_id:
         payload["batch_id"] = batch_id
-    return append_event(account.name, payload, home=home)
+    return append_event(account.name, payload, home=home, ts=ts)
 
 
 def append_delete_event(
@@ -204,6 +207,7 @@ def append_sell_event(
     dte_at_exit: int | None = None,
     hold_days: float | None = None,
     batch_id: str | None = None,
+    ts: datetime | None = None,
     home: Path | None = None,
 ) -> Path:
     """Append a realized close / partial-close trade."""
@@ -225,7 +229,7 @@ def append_sell_event(
     }
     if batch_id:
         payload["batch_id"] = batch_id
-    return append_event(account.name, payload, home=home)
+    return append_event(account.name, payload, home=home, ts=ts)
 
 
 def append_undo_event(

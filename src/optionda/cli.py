@@ -54,6 +54,7 @@ from rich.progress import (
 )
 from rich.table import Table
 
+from optionda.asof import parse_asof_date, session_close_at
 from optionda.batch import add_batch, render_batch_summary
 from optionda.engine import (
     attach_live_option_mids,
@@ -545,6 +546,11 @@ def add_cmd(
         "--entry",
         help="entry/cost premium per share (required unless line has @ cost)",
     ),
+    asof: Optional[str] = typer.Option(
+        None,
+        "--asof",
+        help="Default session date for legs without a date (YYYY-MM-DD or 8/20)",
+    ),
 ) -> None:
     """Add one or many positions to the activated account.
 
@@ -552,12 +558,17 @@ def add_cmd(
     Per-line qty: `x10` (or `*10`); otherwise `--qty` (default 1).
     Semicolon batch: each segment can have its own xQTY and @ cost.
     Prefix a segment with ``sell`` to close at that premium in the same line.
-    Re-adding the same OCC+side merges qty and quantity-weighted avg cost.
+    A leading ``8/20`` / ``2026-08-20`` (optional ``asof`` / trailing ``:``)
+    stamps that leg and following legs at that session's 16:00 ET.
+    ``--asof`` is the default for undated legs. Re-adding the same OCC+side
+    merges qty and quantity-weighted avg cost.
 
     Examples:
       optionda add "INTC 261016 140 C x10 @ 3.482"
       optionda add "INTC 261016 140 C x10 @ 3.482; SKHY 261016 200 C x1 @ 9.5"
       optionda add "AAPL 261120 350 C x1 @ 3.4; sell SKHY 261016 200 C x6 @ 7.3"
+      optionda add "8/20 SPCX 261218 205 C x1 @ 4.65; 8/21 sell HOOD 261218 150 C x2 @ 5.7"
+      optionda add "INTC 261016 140 C x10 @ 3.482" --asof 8/20
       optionda add AAPL261120C00350000 --entry 5.20 --qty 2
       optionda add positions.txt
     """
@@ -609,6 +620,13 @@ def add_cmd(
             _err(str(exc))
             raise typer.Exit(1) from exc
 
+    asof_date = None
+    if asof:
+        asof_date = parse_asof_date(asof)
+        if asof_date is None:
+            _err(f"invalid --asof date: {asof}")
+            raise typer.Exit(1)
+
     result = add_batch(
         store,
         lines,
@@ -618,6 +636,7 @@ def add_cmd(
         entry=entry,
         home=home,
         console=console,
+        asof=asof_date,
     )
     acc = store.require_current()
     sync_book(acc, home)
@@ -743,13 +762,24 @@ def sell_cmd(
         ...,
         help="OCC|id [xN] @ price  e.g. SPCX260918P00100000 x1 @ 8.50",
     ),
+    asof: Optional[str] = typer.Option(
+        None,
+        "--asof",
+        help="Session date for this sell (YYYY-MM-DD or 8/20)",
+    ),
 ) -> None:
     """Close (or partially close) a position at an exit premium; records realized PnL."""
     store = _store()
     try:
+        as_of = None
+        if asof:
+            asof_date = parse_asof_date(asof)
+            if asof_date is None:
+                raise StoreError(f"invalid --asof date: {asof}")
+            as_of = session_close_at(asof_date)
         key, qty, exit_premium = _parse_sell_args(list(tokens))
         outcome = store.sell_position(
-            None, key, qty=qty, exit_premium=exit_premium
+            None, key, qty=qty, exit_premium=exit_premium, as_of=as_of
         )
     except StoreError as exc:
         _err(str(exc))

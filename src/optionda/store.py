@@ -207,6 +207,7 @@ class AccountStore:
         position: Position,
         *,
         batch_id: str | None = None,
+        as_of: datetime | None = None,
     ) -> AddOutcome:
         """Add a position, or merge qty into the same OCC+side if it already exists.
 
@@ -219,7 +220,7 @@ class AccountStore:
             )
         batch_id = batch_id or uuid4().hex[:12]
         account = self.require_current(account_name)
-        now = datetime.now(timezone.utc)
+        now = as_of or datetime.now(timezone.utc)
         if position.opened_at is None:
             position = position.model_copy(update={"opened_at": now})
         dte_at_entry = calendar_dte(position.expiry, now)
@@ -270,6 +271,7 @@ class AccountStore:
                     previous_entry=previous_entry,
                     dte_at_entry=dte_at_entry,
                     batch_id=batch_id,
+                    ts=as_of,
                     home=self.home,
                 )
                 return outcome
@@ -286,6 +288,7 @@ class AccountStore:
             previous_entry=None,
             dte_at_entry=dte_at_entry,
             batch_id=batch_id,
+            ts=as_of,
             home=self.home,
         )
         return AddOutcome(
@@ -326,6 +329,7 @@ class AccountStore:
         qty: float,
         exit_premium: float,
         batch_id: str | None = None,
+        as_of: datetime | None = None,
     ) -> SellOutcome:
         """Close qty at an exit premium; records realized cash PnL in the journal.
 
@@ -374,7 +378,7 @@ class AccountStore:
             qty_remaining = remaining
         self.save(account)
         sync_book(account, self.home)
-        now = datetime.now(timezone.utc)
+        now = as_of or datetime.now(timezone.utc)
         append_sell_event(
             account,
             position_id=position.id,
@@ -390,6 +394,7 @@ class AccountStore:
             dte_at_exit=calendar_dte(position.expiry, now),
             hold_days=hold_days_between(position.opened_at, now),
             batch_id=batch_id,
+            ts=as_of,
             home=self.home,
         )
         return SellOutcome(

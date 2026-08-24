@@ -54,6 +54,24 @@ def test_semi_separated_preserves_qty_and_cost() -> None:
     assert legs[2].qty == 2 and legs[2].entry == pytest.approx(6.7)
 
 
+def test_resolve_keeps_date_prefixes() -> None:
+    lines = resolve_add_lines(
+        [
+            "8/20 SPCX 261218 205 C x1 @ 4.65; "
+            "RDDT 261218 200 C x1 @ 7.7; "
+            "8/21 sell HOOD 261218 150 C x2 @ 5.7"
+        ]
+    )
+    assert lines[0].startswith("8/20 ")
+    assert lines[1] == "RDDT 261218 200 C x1 @ 7.7"
+    assert lines[2].startswith("8/21 sell ")
+
+
+def test_resolve_single_dated_line() -> None:
+    lines = resolve_add_lines(["8/20 SPCX 261218 205 C x1 @ 4.65"])
+    assert lines == ["8/20 SPCX 261218 205 C x1 @ 4.65"]
+
+
 def test_semi_separated_keeps_sell_segments() -> None:
     lines = resolve_add_lines(
         [

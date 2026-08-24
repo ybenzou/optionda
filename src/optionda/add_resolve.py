@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from optionda.asof import split_asof_prefix
 from optionda.batch import read_batch_lines
 from optionda.occ import OccError, as_sell_line, parse_leg_line
 
@@ -37,8 +38,11 @@ def read_interactive_lines(
 
 def _validated_line(token: str) -> str:
     """Validate parseability but keep the original text (preserves @ cost)."""
-    sell_rest = as_sell_line(token)
-    parse_leg_line(sell_rest if sell_rest is not None else token)
+    _, rest = split_asof_prefix(token)
+    if not rest:
+        return token.strip()
+    sell_rest = as_sell_line(rest)
+    parse_leg_line(sell_rest if sell_rest is not None else rest)
     return token.strip()
 
 

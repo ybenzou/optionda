@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from rich import box
@@ -11,6 +11,7 @@ from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeEl
 from rich.table import Table
 from rich.text import Text
 
+from optionda.asof import apply_asof
 from optionda.engine import freeze_iv_for_position, sync_completed_session
 from optionda.journal import sync_book
 from optionda.models import Position, Side
@@ -109,6 +110,7 @@ def sell_from_line(
     *,
     qty: float = 1.0,
     batch_id: str | None = None,
+    as_of: datetime | None = None,
 ) -> BatchRow:
     rest = as_sell_line(line)
     if rest is None:
@@ -123,6 +125,7 @@ def sell_from_line(
         qty=line_qty,
         exit_premium=leg.entry,
         batch_id=batch_id,
+        as_of=as_of,
     )
     return BatchRow(
         status="sell",
@@ -212,10 +215,13 @@ def _add_one_line(
     entry: float | None,
     home: Path | None,
     batch_id: str | None = None,
+    as_of: datetime | None = None,
 ) -> None:
     try:
         if as_sell_line(line) is not None:
-            row = sell_from_line(store, line, qty=qty, batch_id=batch_id)
+            row = sell_from_line(
+                store, line, qty=qty, batch_id=batch_id, as_of=as_of
+            )
             out.sold += 1
             out.rows.append(row)
             return
@@ -236,7 +242,7 @@ def _add_one_line(
             entry_premium=cost,
         )
         draft = freeze_iv_for_position(draft, iv=iv, home=home)
-        outcome = store.add_position(None, draft, batch_id=batch_id)
+        outcome = store.add_position(None, draft, batch_id=batch_id, as_of=as_of)
         pos = outcome.position
         if outcome.merged:
             out.merged += 1
@@ -284,17 +290,19 @@ def add_batch(
     home: Path | None = None,
     console: Console | None = None,
     on_progress=None,
+    asof: date | None = None,
 ) -> BatchResult:
     out = BatchResult()
     store.require_current()
     batch_id = new_batch_id()
-    total = max(len(lines), 1)
+    dated = apply_asof(lines, default=asof)
+    total = max(len(dated), 1)
 
     def report(label: str, done: int, steps: int) -> None:
         if on_progress is not None:
             on_progress(label, done, steps)
 
-    def one(index: int, line: str) -> str:
+    def one(index: int, line: str, as_of: datetime | None) -> str:
         short = line if len(line) <= 36 else line[:33] + "…"
         label = f"add {index}/{total}  {line}"
         report(label, index - 1, total)
@@ -308,6 +316,7 @@ def add_batch(
             entry=entry,
             home=home,
             batch_id=batch_id,
+            as_of=as_of,
         )
         report(label, index, total)
         return f"add {index}/{total}  {short}"
@@ -325,13 +334,13 @@ def add_batch(
             transient=True,
         ) as progress:
             task = progress.add_task(f"add 0/{total}", total=total)
-            for index, line in enumerate(lines, start=1):
-                label = one(index, line)
+            for index, (line, as_of) in enumerate(dated, start=1):
+                label = one(index, line, as_of)
                 progress.update(task, description=label, completed=index, total=total)
         return out
 
-    for index, line in enumerate(lines, start=1):
-        one(index, line)
+    for index, (line, as_of) in enumerate(dated, start=1):
+        one(index, line, as_of)
     return out
 
 
@@ -346,6 +355,7 @@ def run_add(
     home: Path | None = None,
     console: Console | None = None,
     on_progress=None,
+    asof: date | None = None,
 ) -> BatchResult:
     result = add_batch(
         store,
@@ -357,6 +367,7 @@ def run_add(
         home=home,
         console=console,
         on_progress=on_progress,
+        asof=asof,
     )
     acc = store.require_current()
     sync_book(acc, home)
