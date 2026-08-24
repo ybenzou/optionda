@@ -1,4 +1,5 @@
 from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -11,6 +12,8 @@ from optionda.pricing.surface import (
     is_surface_fresh,
     last_completed_session_date,
 )
+
+_ET = ZoneInfo("America/New_York")
 
 
 def test_rate_curve_interpolates_by_term() -> None:
@@ -27,7 +30,39 @@ def test_dividend_yield_is_symbol_specific() -> None:
 def test_expiry_time_uses_new_york_daylight_saving() -> None:
     # 16:00 ET on this winter expiry is 21:00 UTC, not a fixed 20:00 UTC.
     now = datetime(2026, 1, 16, 20, 0, tzinfo=timezone.utc)
-    assert years_to_expiry(date(2026, 1, 16), now) == pytest.approx(1 / (365 * 24))
+    # Friday hour still counts; weekend stretch makes one weekday hour 7/5.
+    assert years_to_expiry(date(2026, 1, 16), now) == pytest.approx(
+        (7 / 5) / (365 * 24)
+    )
+
+
+def test_saturday_and_sunday_do_not_consume_time_to_expiry() -> None:
+    expiry = date(2026, 10, 16)
+    saturday = datetime(2026, 8, 22, 16, 0, tzinfo=_ET)
+    sunday = datetime(2026, 8, 23, 16, 0, tzinfo=_ET)
+    assert years_to_expiry(expiry, saturday) == pytest.approx(
+        years_to_expiry(expiry, sunday), abs=1e-12
+    )
+
+
+def test_friday_close_to_next_friday_matches_one_calendar_week() -> None:
+    expiry = date(2026, 10, 16)
+    friday = datetime(2026, 8, 21, 16, 0, tzinfo=_ET)
+    next_friday = datetime(2026, 8, 28, 16, 0, tzinfo=_ET)
+    elapsed = years_to_expiry(expiry, friday) - years_to_expiry(expiry, next_friday)
+    assert elapsed == pytest.approx(7 / 365)
+
+
+def test_weekend_does_not_extract_two_calendar_days() -> None:
+    expiry = date(2026, 10, 16)
+    friday_close = datetime(2026, 8, 21, 16, 0, tzinfo=_ET)
+    sunday_night = datetime(2026, 8, 23, 22, 47, tzinfo=_ET)
+    elapsed = years_to_expiry(expiry, friday_close) - years_to_expiry(
+        expiry, sunday_night
+    )
+    # Only Friday 16:00–24:00 remains, stretched so 5 weekdays = 7 calendar days.
+    assert elapsed == pytest.approx((8 / 24) * (7 / 5) / 365)
+    assert elapsed < 0.5 / 365
 
 
 def test_friday_surface_remains_usable_over_weekend() -> None:

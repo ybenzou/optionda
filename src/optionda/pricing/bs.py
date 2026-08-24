@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Literal
 from zoneinfo import ZoneInfo
 
@@ -30,7 +30,39 @@ def _norm_pdf(x: float) -> float:
     return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
 
 
+_ET = ZoneInfo("America/New_York")
+_SECONDS_PER_YEAR = 365.0 * 24.0 * 3600.0
+# Weekend hours are omitted; stretch weekdays so Fri–Fri still equals 7/365.
+_WEEKDAY_STRETCH = 7.0 / 5.0
+
+
+def _weekday_seconds(start: datetime, end: datetime) -> float:
+    """Monday–Friday seconds between ``start`` and ``end`` in New York time."""
+    if end <= start:
+        return 0.0
+    start_et = start.astimezone(_ET)
+    end_et = end.astimezone(_ET)
+    total = 0.0
+    day = start_et.date()
+    last = end_et.date()
+    while day <= last:
+        if day.weekday() < 5:
+            day_start = datetime(day.year, day.month, day.day, tzinfo=_ET)
+            day_end = day_start + timedelta(days=1)
+            lo = start_et if start_et > day_start else day_start
+            hi = end_et if end_et < day_end else day_end
+            if hi > lo:
+                total += (hi - lo).total_seconds()
+        day += timedelta(days=1)
+    return total
+
+
 def years_to_expiry(expiry: date, now: datetime | None = None) -> float:
+    """Trading-day year fraction: Saturday and Sunday do not consume theta.
+
+    Weekday hours are stretched by 7/5 so a Friday close to the next Friday
+    close is still one calendar week, matching existing 365-day surfaces.
+    """
     current = now or datetime.now(timezone.utc)
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
@@ -41,10 +73,10 @@ def years_to_expiry(expiry: date, now: datetime | None = None) -> float:
         expiry.day,
         16,
         0,
-        tzinfo=ZoneInfo("America/New_York"),
-    ).astimezone(timezone.utc)
-    seconds = (expiry_dt - current).total_seconds()
-    return max(seconds / (365.0 * 24.0 * 3600.0), 1e-8)
+        tzinfo=_ET,
+    )
+    seconds = _weekday_seconds(current, expiry_dt)
+    return max(seconds * _WEEKDAY_STRETCH / _SECONDS_PER_YEAR, 1e-8)
 
 
 def black_scholes(

@@ -121,14 +121,15 @@ def _model_iv_cell(
     if iv is None:
         return Text("—", style=_MUTED)
     cell = Text(_fmt_iv(iv), style="cyan")
+    if not stale and not fallback:
+        return cell
     label = _date_label(session) or _iv_asof_label(as_of)
     if label is None:
         return cell
-    style = "bold yellow" if stale or fallback else _MUTED
     suffix = f"  {label}"
     if fallback:
         suffix += " fb"
-    cell.append(suffix, style=style)
+    cell.append(suffix, style="bold yellow")
     return cell
 
 
@@ -316,17 +317,18 @@ def format_chrome_plain(
     poll_total: int | None = None,
     eta_sec: int | None = None,
 ) -> str:
-    """Plain status text for the window chrome line (no full-page HTML)."""
-    status = format_poll_status(
-        poll_label,
-        busy=poll_busy,
-        done=poll_done,
-        total=poll_total,
-        eta_sec=eta_sec,
-    )
-    if poll_busy and spin:
-        return f"{spin}  {status}".rstrip()
-    return status.rstrip()
+    """Compact fetch bar for the live pane. Hidden when idle."""
+    _ = (poll_label, eta_sec)
+    if not poll_busy:
+        return ""
+    steps = max(int(poll_total or 1), 1)
+    finished = max(0, min(int(poll_done or 0), steps))
+    frac = finished / steps
+    width = 16
+    filled = min(width, max(0, int(round(width * frac))))
+    bar = "#" * filled + "-" * (width - filled)
+    mark = spin or "·"
+    return f"{mark}  {bar}  {finished}/{steps}"
 
 
 def _inline_bar(
@@ -441,38 +443,27 @@ def _meta_line(
     header_bar: bool = True,
     spin: str | None = None,
     session: Text | None = None,
-) -> Text:
-    _ = bar_width
-    clock_style = (
-        "bold cyan" if phase == "hot" else "cyan" if phase == "warm" else _META
-    )
+) -> Text | None:
+    _ = (feed, refresh_sec, continuous, phase, eta_sec, poll_label, bar_width)
     line = Text()
-    line.append(feed, style="bold cyan")
-    line.append("  ·  ", style=_MUTED)
-    if continuous:
-        line.append(f"{refresh_sec}s", style=_MUTED)
-        if poll_busy:
-            line.append("  ", style=_MUTED)
-            line.append(spin or ascii_spinner(0), style="bold yellow")
-        elif header_bar and poll_fraction is not None:
-            line.append("  ", style=_MUTED)
-            line.append_text(_inline_bar(poll_fraction, width=12, busy=False))
-        status = format_poll_status(
-            poll_label,
-            busy=poll_busy,
-            done=poll_done,
-            total=poll_total,
-            eta_sec=eta_sec,
-        )
-        line.append("  ", style=_MUTED)
-        line.append(status, style="bold yellow" if poll_busy else _MUTED)
-    else:
-        line.append(f"refresh {refresh_sec}s", style=_MUTED)
     if session is not None and session.plain.strip():
-        line.append("  ·  ", style=_MUTED)
         line.append_text(session)
-    line.append("  ·  ", style=_MUTED)
-    line.append(format_clock(), style=clock_style)
+    if poll_busy and spin:
+        if line.plain:
+            line.append("  ·  ", style=_MUTED)
+        line.append(spin, style="bold cyan")
+        if header_bar:
+            frac = 0.0
+            if poll_done is not None and poll_total:
+                frac = min(poll_done, poll_total) / max(poll_total, 1)
+            elif poll_fraction is not None:
+                frac = poll_fraction
+            line.append("  ", style=_MUTED)
+            line.append_text(_inline_bar(frac, width=16, busy=True))
+            if poll_done is not None and poll_total is not None:
+                line.append(f"  {poll_done}/{max(poll_total, 1)}", style=_MUTED)
+    if not line.plain.strip():
+        return None
     return line
 
 
@@ -779,7 +770,8 @@ def render_snapshot(
         ("  optionda", "bold bright_white"),
     )
     status = _session_status_line(rows)
-    header = [_meta_line(
+    header: list = []
+    meta = _meta_line(
         feed=feed,
         refresh_sec=refresh_sec,
         continuous=continuous,
@@ -794,7 +786,9 @@ def render_snapshot(
         header_bar=header_bar,
         spin=spin,
         session=status,
-    )]
+    )
+    if meta is not None:
+        header.append(meta)
     shown_notes = [
         note
         for note in notes or []

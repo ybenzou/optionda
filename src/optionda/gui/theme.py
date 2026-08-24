@@ -260,8 +260,8 @@ QTextEdit#termLive {{
 }}
 QLabel#liveChrome {{
     background: transparent;
-    color: {PROMPT};
-    padding: 0 4px 6px 4px;
+    color: {CYAN};
+    padding: 2px 10px 0 10px;
     font-size: 12pt;
 }}
 """

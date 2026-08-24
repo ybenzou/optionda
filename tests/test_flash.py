@@ -77,6 +77,25 @@ def test_poll_status_width_is_stable():
     assert len(idle) == _STATUS_WIDTH
 
 
+def test_chrome_plain_hides_when_idle() -> None:
+    from optionda.display.table import format_chrome_plain
+
+    idle = format_chrome_plain(poll_busy=False, eta_sec=5, poll_label="5s")
+    assert idle == ""
+    busy = format_chrome_plain(
+        spin="⠹",
+        poll_busy=True,
+        poll_label="2/2 mark  ready",
+        poll_done=10,
+        poll_total=10,
+    )
+    assert "⠹" in busy
+    assert "10/10" in busy
+    assert "#" in busy
+    assert "fetch" not in busy
+    assert "mark" not in busy
+
+
 def test_spinner_frame_cycles() -> None:
     assert spinner_frame(0) == "⠋"
     assert spinner_frame(1) == "⠙"
@@ -210,7 +229,7 @@ def test_model_iv_shows_et_session_date():
 
     cell = _model_iv_cell(0.779, as_of, stale=False)
     assert "77.9%" in cell.plain
-    assert "8/12" in cell.plain
+    assert "8/12" not in cell.plain
 
     stale = _model_iv_cell(0.40, as_of, stale=True)
     assert "8/12" in stale.plain
@@ -335,7 +354,9 @@ def test_iv_and_close_share_the_progress_line() -> None:
         framed=False,
     )
     meta = group.renderables[1]
-    assert "alpaca" in meta.plain
+    assert "alpaca" not in meta.plain
+    assert "refresh" not in meta.plain
+    assert "UTC" not in meta.plain
     assert "IV 8/14" in meta.plain
     assert "close 8/14" in meta.plain
     assert meta.plain.count("\n") == 0
@@ -392,9 +413,8 @@ def test_busy_header_uses_spinner_not_bar() -> None:
         header_bar=False,
     )
     meta = group.renderables[0].renderable.renderables[0]
-    assert "alpaca" in meta.plain
+    assert "alpaca" not in meta.plain
     assert "/" in meta.plain
-    assert "1/2 fetch" in meta.plain
     assert "#" not in meta.plain
     assert "-" not in meta.plain
 

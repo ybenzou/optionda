@@ -30,10 +30,9 @@ def test_renderable_html_keeps_desk_chrome() -> None:
     )
     assert "main" in html
     assert "optionda" in html
-    assert "alpaca" in html
+    assert "alpaca" not in html
     assert "<pre" in html
     assert html.count("\n") >= 3
-    assert "#" in html
 
 
 def test_parse_line_strips_optionda_prefix() -> None:

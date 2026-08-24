@@ -453,7 +453,7 @@ def test_calibrate_surface_uses_spot_at_option_quote_time(tmp_path) -> None:
     surface = result.surfaces["SKHY"]
     assert surface.spot == pytest.approx(141.65)
     assert surface.as_of == quote_time
-    assert surface.smiles[0].nodes[0].iv == pytest.approx(0.7946, abs=0.001)
+    assert surface.smiles[0].nodes[0].iv == pytest.approx(0.7873, abs=0.001)
 
 
 def test_calibrate_surfaces_skips_failed_underlying(tmp_path) -> None:
