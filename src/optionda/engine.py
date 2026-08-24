@@ -26,7 +26,10 @@ from optionda.market.session import (
     save_pending_state,
     save_session_reference,
 )
+from optionda.analytics import read_events
+from optionda.journal import log_path
 from optionda.models import Account, Position, RowMark
+from optionda.undo import last_operation_times
 from optionda.pricing.bs import price_option, years_to_expiry
 from optionda.pricing.surface import (
     FRESH_CALIBRATION_QUOTE_AGE,
@@ -687,6 +690,14 @@ def mark_account(
         underlying: load_close_premiums(underlying, home)
         for underlying in set(underlyings)
     }
+    last_ops = last_operation_times(read_events(log_path(account.name, home)))
+
+    def last_op_at(position: Position) -> datetime | None:
+        return (
+            last_ops.get(position.id)
+            or last_ops.get(position.occ_symbol)
+            or position.opened_at
+        )
 
     for index, pos in enumerate(account.positions, start=1):
         report_mark(pos.occ_symbol, index - 1)
@@ -708,6 +719,7 @@ def mark_account(
                     notional=None,
                     close_spot=close_spot,
                     reference_session_date=reference_session,
+                    last_op_at=last_op_at(pos),
                     error="no spot",
                 )
             )
@@ -896,6 +908,7 @@ def mark_account(
                     close_spot=close_spot,
                     close_premium=close_premium,
                     theo_chg=theo_chg,
+                    last_op_at=last_op_at(pos),
                 )
             )
         except Exception as exc:  # noqa: BLE001
@@ -909,6 +922,7 @@ def mark_account(
                     notional=None,
                     close_spot=close_spot,
                     reference_session_date=reference_session,
+                    last_op_at=last_op_at(pos),
                     error=str(exc),
                 )
             )

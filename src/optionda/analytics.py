@@ -682,6 +682,22 @@ def build_report(
         daily.realized += sell.realized
         daily.n_sells += 1
         daily.sells.append(sell)
+    undo_realized = 0.0
+    for event in raw:
+        if event.get("event") != "undo":
+            continue
+        day = et_date(event.get("ts"))
+        if not in_period(day, start, end):
+            continue
+        amount = _as_float(event.get("realized")) or 0.0
+        undo_realized += amount
+        if day is None:
+            continue
+        daily = by_day.setdefault(
+            day,
+            DailyPnl(day=day, realized=0.0, n_sells=0),
+        )
+        daily.realized += amount
     calendar_days = [by_day[day] for day in sorted(by_day)]
     running = 0.0
     cumulative: list[tuple[date, float]] = []
@@ -748,7 +764,7 @@ def build_report(
         period=period,
         as_of=end,
         period_start=start,
-        realized=sum(item.realized for item in sells),
+        realized=sum(item.realized for item in sells) + undo_realized,
         n_sells=len(sells),
         n_closed=len(lots),
         n_deletes=deletes_in_period,

@@ -88,6 +88,7 @@ from optionda.shellenv import (
     render_shellenv,
 )
 from optionda.store import AccountStore, StoreError, realized_pnl_summary
+from optionda.undo import undo_last
 from optionda.sync import (
     SyncError,
     default_oda_path,
@@ -766,6 +767,24 @@ def sell_cmd(
             f"[dim]remaining qty={outcome.position.qty:g} "
             f"cost={outcome.position.entry_premium:g}[/dim]"
         )
+
+
+@app.command("undo")
+def undo_cmd() -> None:
+    """Reverse the last add/sell command, including realized cash PnL."""
+    store = _store()
+    try:
+        result = undo_last(store)
+    except StoreError as exc:
+        _err(str(exc))
+        raise typer.Exit(1) from exc
+    console.print(
+        f"undo {result.n_events} event"
+        f"{'' if result.n_events == 1 else 's'}  "
+        f"realized ${result.realized:,.2f}"
+    )
+    for label in result.labels:
+        console.print(f"  {label}")
 
 
 @app.command("realized")

@@ -143,4 +143,6 @@ class RowMark(BaseModel):
     close_premium: float | None = None
     # Per-share Model$ minus that close premium.
     theo_chg: float | None = None
+    # Last add / merge / sell on this position (journal, US/Eastern display).
+    last_op_at: datetime | None = None
     error: str | None = None

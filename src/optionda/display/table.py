@@ -94,6 +94,15 @@ def _fmt_iv(value: float) -> str:
     return f"{value * 100:.1f}%"
 
 
+def _last_op_label(value: datetime | None) -> str:
+    if value is None:
+        return "—"
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    local = value.astimezone(_ET)
+    return f"{local.month}/{local.day}"
+
+
 def _date_label(value: date | None) -> str | None:
     if value is None:
         return None
@@ -681,10 +690,12 @@ def render_snapshot(
     )
     table.add_column("Delta", justify="right", style=_MUTED, footer="", min_width=6)
     table.add_column("DTE", justify="right", style=_MUTED, footer="", min_width=5)
+    table.add_column("Last", justify="right", style=_MUTED, footer="", min_width=5)
 
     if not rows:
         table.add_row(
             Text("(no positions)", style=_MUTED),
+            "",
             "",
             "",
             "",
@@ -723,6 +734,7 @@ def render_snapshot(
                 "—",
                 "—",
                 "—",
+                Text(_last_op_label(row.last_op_at), style=_MUTED),
             )
             continue
 
@@ -762,6 +774,7 @@ def render_snapshot(
                 f"{row.dte:.1f}" if row.dte is not None else "—",
                 style=_MUTED,
             ),
+            Text(_last_op_label(row.last_op_at), style=_MUTED),
         )
 
     border = _border_style(continuous=continuous, phase=phase, poll_busy=poll_busy)

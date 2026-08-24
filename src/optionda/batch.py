@@ -16,6 +16,7 @@ from optionda.journal import sync_book
 from optionda.models import Position, Side
 from optionda.occ import OccError, as_sell_line, parse_leg_line, parse_occ, require_entry, resolve_qty
 from optionda.store import AccountStore, StoreError
+from optionda.undo import new_batch_id
 
 
 @dataclass
@@ -107,6 +108,7 @@ def sell_from_line(
     line: str,
     *,
     qty: float = 1.0,
+    batch_id: str | None = None,
 ) -> BatchRow:
     rest = as_sell_line(line)
     if rest is None:
@@ -120,6 +122,7 @@ def sell_from_line(
         leg.parts.occ_symbol,
         qty=line_qty,
         exit_premium=leg.entry,
+        batch_id=batch_id,
     )
     return BatchRow(
         status="sell",
@@ -208,10 +211,11 @@ def _add_one_line(
     iv: float | None,
     entry: float | None,
     home: Path | None,
+    batch_id: str | None = None,
 ) -> None:
     try:
         if as_sell_line(line) is not None:
-            row = sell_from_line(store, line, qty=qty)
+            row = sell_from_line(store, line, qty=qty, batch_id=batch_id)
             out.sold += 1
             out.rows.append(row)
             return
@@ -232,7 +236,7 @@ def _add_one_line(
             entry_premium=cost,
         )
         draft = freeze_iv_for_position(draft, iv=iv, home=home)
-        outcome = store.add_position(None, draft)
+        outcome = store.add_position(None, draft, batch_id=batch_id)
         pos = outcome.position
         if outcome.merged:
             out.merged += 1
@@ -283,6 +287,7 @@ def add_batch(
 ) -> BatchResult:
     out = BatchResult()
     store.require_current()
+    batch_id = new_batch_id()
     total = max(len(lines), 1)
 
     def report(label: str, done: int, steps: int) -> None:
@@ -302,6 +307,7 @@ def add_batch(
             iv=iv,
             entry=entry,
             home=home,
+            batch_id=batch_id,
         )
         report(label, index, total)
         return f"add {index}/{total}  {short}"

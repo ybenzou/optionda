@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from optionda.config import load_config, save_config
@@ -200,7 +201,13 @@ class AccountStore:
             )
         return self.load(active)
 
-    def add_position(self, account_name: str | None, position: Position) -> AddOutcome:
+    def add_position(
+        self,
+        account_name: str | None,
+        position: Position,
+        *,
+        batch_id: str | None = None,
+    ) -> AddOutcome:
         """Add a position, or merge qty into the same OCC+side if it already exists.
 
         Cost (entry_premium) is required. On merge, qty sums and cost becomes the
@@ -210,6 +217,7 @@ class AccountStore:
             raise StoreError(
                 "cost required — use '@ 5.20' on the line or pass --entry 5.20"
             )
+        batch_id = batch_id or uuid4().hex[:12]
         account = self.require_current(account_name)
         now = datetime.now(timezone.utc)
         if position.opened_at is None:
@@ -261,6 +269,7 @@ class AccountStore:
                     previous_qty=previous,
                     previous_entry=previous_entry,
                     dte_at_entry=dte_at_entry,
+                    batch_id=batch_id,
                     home=self.home,
                 )
                 return outcome
@@ -276,6 +285,7 @@ class AccountStore:
             previous_qty=0.0,
             previous_entry=None,
             dte_at_entry=dte_at_entry,
+            batch_id=batch_id,
             home=self.home,
         )
         return AddOutcome(
@@ -315,6 +325,7 @@ class AccountStore:
         *,
         qty: float,
         exit_premium: float,
+        batch_id: str | None = None,
     ) -> SellOutcome:
         """Close qty at an exit premium; records realized cash PnL in the journal.
 
@@ -325,6 +336,7 @@ class AccountStore:
             raise StoreError("sell qty must be > 0")
         if exit_premium <= 0:
             raise StoreError("exit premium must be > 0 — use '@ 8.50'")
+        batch_id = batch_id or uuid4().hex[:12]
         account = self.require_current(account_name)
         key_u = key.strip().upper()
         index = next(
@@ -377,6 +389,7 @@ class AccountStore:
             multiplier=position.multiplier,
             dte_at_exit=calendar_dte(position.expiry, now),
             hold_days=hold_days_between(position.opened_at, now),
+            batch_id=batch_id,
             home=self.home,
         )
         return SellOutcome(
@@ -427,14 +440,26 @@ def realized_pnl_summary(
             event = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if event.get("event") != "sell":
+        kind = event.get("event")
+        if kind not in {"sell", "undo"}:
             continue
         try:
             realized = float(event.get("realized", 0.0))
         except (TypeError, ValueError):
             continue
-        occ = str(event.get("occ") or "?").upper()
         total += realized
-        n_sells += 1
-        by_occ[occ] = by_occ.get(occ, 0.0) + realized
+        if kind == "sell":
+            n_sells += 1
+            occ = str(event.get("occ") or "?").upper()
+            by_occ[occ] = by_occ.get(occ, 0.0) + realized
+            continue
+        extra = event.get("by_occ")
+        if isinstance(extra, dict):
+            for occ, amount in extra.items():
+                try:
+                    by_occ[str(occ).upper()] = by_occ.get(str(occ).upper(), 0.0) + float(
+                        amount
+                    )
+                except (TypeError, ValueError):
+                    continue
     return {"realized": total, "n_sells": n_sells, "by_occ": by_occ}

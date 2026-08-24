@@ -132,6 +132,24 @@ def _apply_event(
         if current.qty <= 0:
             lots.pop(position_id, None)
         return
+    if kind == "undo":
+        lots.clear()
+        book = event.get("book") if isinstance(event.get("book"), list) else []
+        for row in book:
+            if not isinstance(row, dict):
+                continue
+            lot = _lot_from_book_row(row)
+            if lot is not None:
+                lots[lot.position_id] = lot
+        for item in event.get("reverses") or []:
+            if not isinstance(item, dict):
+                continue
+            amount = _as_float(item.get("realized"))
+            position_id = str(item.get("id") or item.get("occ") or "")
+            if amount is None or not position_id:
+                continue
+            realized_by_id[position_id] = realized_by_id.get(position_id, 0.0) - amount
+        return
     if kind == "delete":
         removed = event.get("removed") if isinstance(event.get("removed"), list) else []
         for row in removed:
@@ -164,6 +182,33 @@ def _apply_event(
             qty = _as_float(row.get("qty"))
             if qty is not None:
                 current.qty = qty
+
+
+def _lot_from_book_row(row: dict[str, Any]) -> HeldLot | None:
+    occ = str(row.get("occ") or "").upper()
+    position_id = str(row.get("id") or occ)
+    if not position_id or not occ:
+        return None
+    try:
+        parts = parse_occ(occ)
+    except OccError:
+        return None
+    iv = _as_float(row.get("iv"))
+    if iv is None or iv <= 0:
+        return None
+    qty = _as_float(row.get("qty"), 0.0) or 0.0
+    return HeldLot(
+        position_id=position_id,
+        occ=occ,
+        underlying=str(row.get("underlying") or parts.underlying),
+        expiry=parts.expiry,
+        strike=parts.strike,
+        option_type=parts.option_type,
+        qty=qty,
+        side=str(row.get("side") or "long"),
+        cost=_as_float(row.get("cost")),
+        iv=iv,
+    )
 
 
 def _lot_from_event(event: dict[str, Any]) -> HeldLot | None:

@@ -146,29 +146,29 @@ def append_add_event(
     previous_qty: float,
     previous_entry: float | None,
     dte_at_entry: int | None = None,
+    batch_id: str | None = None,
     home: Path | None = None,
 ) -> Path:
     """Append add / merge mutation to the event log."""
-    return append_event(
-        account.name,
-        {
-            "event": "merge" if merged else "add",
-            "id": position_after.id,
-            "occ": position_after.occ_symbol,
-            "side": position_after.side,
-            "qty_added": qty_added,
-            "cost_added": cost_added,
-            "qty": position_after.qty,
-            "cost": position_after.entry_premium,
-            "qty_before": previous_qty if merged else 0.0,
-            "cost_before": previous_entry if merged else None,
-            "iv": position_after.iv_frozen,
-            "iv_source": position_after.iv_source,
-            "dte_at_entry": dte_at_entry,
-            "book": _book_snapshot(account),
-        },
-        home=home,
-    )
+    payload: dict[str, Any] = {
+        "event": "merge" if merged else "add",
+        "id": position_after.id,
+        "occ": position_after.occ_symbol,
+        "side": position_after.side,
+        "qty_added": qty_added,
+        "cost_added": cost_added,
+        "qty": position_after.qty,
+        "cost": position_after.entry_premium,
+        "qty_before": previous_qty if merged else 0.0,
+        "cost_before": previous_entry if merged else None,
+        "iv": position_after.iv_frozen,
+        "iv_source": position_after.iv_source,
+        "dte_at_entry": dte_at_entry,
+        "book": _book_snapshot(account),
+    }
+    if batch_id:
+        payload["batch_id"] = batch_id
+    return append_event(account.name, payload, home=home)
 
 
 def append_delete_event(
@@ -203,29 +203,54 @@ def append_sell_event(
     multiplier: int = 100,
     dte_at_exit: int | None = None,
     hold_days: float | None = None,
+    batch_id: str | None = None,
     home: Path | None = None,
 ) -> Path:
     """Append a realized close / partial-close trade."""
-    return append_event(
-        account.name,
-        {
-            "event": "sell",
-            "id": position_id,
-            "occ": occ_symbol,
-            "side": side,
-            "qty_sold": qty_sold,
-            "exit": exit_premium,
-            "avg_cost": avg_cost,
-            "multiplier": multiplier,
-            "realized": realized,
-            "qty_remaining": qty_remaining,
-            "closed": closed,
-            "dte_at_exit": dte_at_exit,
-            "hold_days": hold_days,
-            "book": _book_snapshot(account),
-        },
-        home=home,
-    )
+    payload: dict[str, Any] = {
+        "event": "sell",
+        "id": position_id,
+        "occ": occ_symbol,
+        "side": side,
+        "qty_sold": qty_sold,
+        "exit": exit_premium,
+        "avg_cost": avg_cost,
+        "multiplier": multiplier,
+        "realized": realized,
+        "qty_remaining": qty_remaining,
+        "closed": closed,
+        "dte_at_exit": dte_at_exit,
+        "hold_days": hold_days,
+        "book": _book_snapshot(account),
+    }
+    if batch_id:
+        payload["batch_id"] = batch_id
+    return append_event(account.name, payload, home=home)
+
+
+def append_undo_event(
+    account: Account,
+    *,
+    realized: float,
+    by_occ: dict[str, float],
+    reverses: list[dict[str, Any]],
+    n_events: int,
+    undone_batch_id: str | None,
+    batch_id: str | None = None,
+    home: Path | None = None,
+) -> Path:
+    payload: dict[str, Any] = {
+        "event": "undo",
+        "realized": realized,
+        "by_occ": by_occ,
+        "reverses": reverses,
+        "n_events": n_events,
+        "undone_batch_id": undone_batch_id,
+        "book": _book_snapshot(account),
+    }
+    if batch_id:
+        payload["batch_id"] = batch_id
+    return append_event(account.name, payload, home=home)
 
 
 def append_refresh_iv_event(
