@@ -97,4 +97,6 @@ def ensure_home(root: Path | str | None = None) -> Path:
     (home / "close_mids").mkdir(parents=True, exist_ok=True)
     (home / "closes").mkdir(parents=True, exist_ok=True)
     (home / "marks").mkdir(parents=True, exist_ok=True)
+    (home / "agent").mkdir(parents=True, exist_ok=True)
+    (home / "mail").mkdir(parents=True, exist_ok=True)
     return home

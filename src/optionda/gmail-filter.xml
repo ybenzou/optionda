@@ -1,0 +1,15 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<feed xmlns='http://www.w3.org/2005/Atom' xmlns:apps='http://schemas.google.com/apps/2006'>
+  <title>optionda mail filters</title>
+  <entry>
+    <category term='filter'></category>
+    <title>optionda desk</title>
+    <content>Skip Inbox, label optionda, Updates, never important</content>
+    <apps:property name='subject' value='optionda ·'/>
+    <apps:property name='label' value='optionda'/>
+    <apps:property name='shouldArchive' value='true'/>
+    <apps:property name='shouldNeverSpam' value='true'/>
+    <apps:property name='shouldNeverMarkAsImportant' value='true'/>
+    <apps:property name='smartLabelToApply' value='^smartlabel_notification'/>
+  </entry>
+</feed>

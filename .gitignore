@@ -12,3 +12,6 @@ venv/
 .tmp-home/
 *.oda
 .DS_Store
+credentials.toml
+mail/session.json
+mail/sends.jsonl

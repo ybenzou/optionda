@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
@@ -21,9 +22,12 @@ from optionda.config import (
 from optionda.credentials import (
     AlpacaCredentials,
     clear_alpaca,
+    clear_smtp,
     has_alpaca,
     load_alpaca,
+    load_smtp,
     save_alpaca,
+    save_smtp,
 )
 from optionda.display.surface_plot import (
     PLOTLY_DELTA_BUCKETS,
@@ -36,6 +40,32 @@ from optionda.display.surface_plot import (
     show_figure_in_browser,
 )
 from optionda.display.table import render_snapshot
+from optionda.agent_view import (
+    build_agent_view,
+    format_agent_text,
+    load_latest,
+    write_latest,
+)
+from optionda.mailer import (
+    GMAIL_FILTER_IMPORT,
+    MAIL_FILTER_HINT,
+    MailError,
+    clear_mail,
+    clear_sends,
+    delete_thread,
+    ensure_session,
+    format_list,
+    load_session,
+    next_slot_label,
+    pause_session,
+    resume_session,
+    run_every,
+    send_desk,
+    spawn_mail_every,
+    stop_mail_worker,
+    write_gmail_filter,
+)
+from optionda.updater import fetch_pypi_version, plan_update, run_upgrade
 import sys
 
 from optionda.add_resolve import (
@@ -1413,8 +1443,8 @@ def verify_cmd() -> None:
     )
 
 
-def snapshot_once(*, source: str) -> None:
-    """One MODEL mark. Used by export and the GUI ``run``."""
+def collect_mark(*, source: str, quiet: bool = False):
+    """One MODEL mark. Returns data for export / snapshot / mail."""
     store = _store()
     try:
         acc = store.require_current()
@@ -1422,29 +1452,49 @@ def snapshot_once(*, source: str) -> None:
         _err(str(exc))
         raise typer.Exit(1) from exc
     home = _home_opt()
-    sync = _sync_session(acc, home=home, console=console)
+    sync = _sync_session(
+        acc,
+        home=home,
+        console=console,
+        announce=not quiet,
+        on_progress=(lambda *_a, **_k: None) if quiet else None,
+    )
     feed = MarketRouter(home).feed_name
-    refresh = resolve_poll_interval(home)
-    with _mark_progress() as progress:
-        task = progress.add_task("1/2 fetch", total=1)
-        on_progress = _bind_progress(progress, task)
+    if quiet:
         rows = mark_account(
             acc,
             home=home,
-            on_progress=on_progress,
             completed_session=sync.completed_session,
-        )
-        n_pos = max(len(acc.positions), 1)
-        progress.update(
-            task,
-            description="2/2 mark  writing…",
-            completed=n_pos,
-            total=n_pos,
         )
         sync_book(acc, home)
         append_export_log(acc, rows, feed=feed, home=home, source=source)
-
+    else:
+        with _mark_progress() as progress:
+            task = progress.add_task("1/2 fetch", total=1)
+            on_progress = _bind_progress(progress, task)
+            rows = mark_account(
+                acc,
+                home=home,
+                on_progress=on_progress,
+                completed_session=sync.completed_session,
+            )
+            n_pos = max(len(acc.positions), 1)
+            progress.update(
+                task,
+                description="2/2 mark  writing…",
+                completed=n_pos,
+                total=n_pos,
+            )
+            sync_book(acc, home)
+            append_export_log(acc, rows, feed=feed, home=home, source=source)
     realized = float(realized_pnl_summary(acc.name, home)["realized"])
+    return acc, rows, feed, realized, home
+
+
+def snapshot_once(*, source: str) -> None:
+    """One MODEL mark. Used by export and the GUI ``run``."""
+    acc, rows, feed, realized, home = collect_mark(source=source)
+    refresh = resolve_poll_interval(home)
     console.print(
         render_snapshot(
             account=acc.name,
@@ -1457,10 +1507,252 @@ def snapshot_once(*, source: str) -> None:
     )
 
 
+def _emit_agent_view(view: dict, *, text: bool) -> None:
+    if text:
+        typer.echo(format_agent_text(view))
+        return
+    typer.echo(json.dumps(view, ensure_ascii=False))
+
+
+def _self_update(*, restart_hint: str) -> None:
+    try:
+        latest = fetch_pypi_version()
+    except Exception as exc:  # noqa: BLE001
+        _err(f"update check failed: {exc}")
+        raise typer.Exit(1) from exc
+    action, message = plan_update(__version__, latest)
+    if action == "ok":
+        _ok(message)
+        return
+    _ok(message)
+    try:
+        run_upgrade(latest)
+    except Exception as exc:  # noqa: BLE001
+        _err(f"upgrade failed: {exc}")
+        raise typer.Exit(1) from exc
+    _ok(f"installed {latest} — restart: {restart_hint}")
+    raise typer.Exit()
+
+
+def _mail_push(*, force: bool, to_addr: Optional[str], do_update: bool) -> None:
+    if do_update:
+        _self_update(restart_hint="optionda mail --every 30")
+    acc, rows, feed, realized, home = collect_mark(source="mail", quiet=True)
+    view = build_agent_view(
+        account=acc.name,
+        feed=feed,
+        rows=rows,
+        realized=realized,
+    )
+    write_latest(view, home)
+    try:
+        send_desk(view, home, to_addr=to_addr, force=force)
+    except MailError as exc:
+        _err(str(exc))
+        raise typer.Exit(1) from exc
+    _ok(f"sent {acc.name}")
+
+
 @app.command("export")
 def export_cmd() -> None:
     """Print a MODEL snapshot and append it to the account log under ~/.optionda."""
     snapshot_once(source="export")
+
+
+@app.command("snapshot")
+def snapshot_cmd(
+    text: bool = typer.Option(
+        False,
+        "--text",
+        help="Print the monospaced desk table instead of JSON.",
+    ),
+    cached: bool = typer.Option(
+        False,
+        "--cached",
+        help="Re-print the last latest.json without a new mark.",
+    ),
+) -> None:
+    """Compact agent view: mark the book, write latest.json, print JSON."""
+    home = _home_opt()
+    if cached:
+        view = load_latest(home)
+        if view is None:
+            _err("no latest.json — run optionda snapshot first")
+            raise typer.Exit(1)
+        _emit_agent_view(view, text=text)
+        return
+    acc, rows, feed, realized, home = collect_mark(source="snapshot", quiet=True)
+    view = build_agent_view(
+        account=acc.name,
+        feed=feed,
+        rows=rows,
+        realized=realized,
+    )
+    write_latest(view, home)
+    _emit_agent_view(view, text=text)
+
+
+@app.command("mail")
+def mail_cmd(
+    action: Optional[str] = typer.Argument(
+        None,
+        help="login | list | pause | resume | delete | stop | filter (omit to send once)",
+    ),
+    arg1: Optional[str] = typer.Argument(None, help="email, token, or app password"),
+    arg2: Optional[str] = typer.Argument(None, help="app password for login"),
+    every: Optional[int] = typer.Option(
+        None,
+        "--every",
+        help="Minutes between sends (omit for one shot).",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Send even if the current session is paused.",
+    ),
+    do_update: bool = typer.Option(
+        False,
+        "--update",
+        help="Check PyPI and upgrade before each cycle.",
+    ),
+    to_addr: Optional[str] = typer.Option(
+        None,
+        "--to",
+        help="Override recipient (default: the login address).",
+    ),
+    log: bool = typer.Option(False, "--log", help="delete: send log only"),
+    login_flag: bool = typer.Option(False, "--login", help="delete: SMTP login only"),
+    thread: bool = typer.Option(False, "--thread", help="delete: session token/thread only"),
+    foreground: bool = typer.Option(
+        False,
+        "--foreground",
+        help="Keep --every in this terminal (default: detach like the window).",
+    ),
+) -> None:
+    """Headless SMTP desk mail. Separate from the GUI window."""
+    home = _home_opt()
+    verb = (action or "").strip().lower()
+
+    if verb == "login":
+        user = (arg1 or "").strip()
+        password = (arg2 or "").strip()
+        if not user or not password:
+            _err("usage: optionda mail login <email> <app-password>")
+            raise typer.Exit(1)
+        save_smtp(user, password, home)
+        _ok(f"smtp saved ({user})")
+        _ok(MAIL_FILTER_HINT)
+        return
+
+    if verb == "list":
+        console.print(format_list(home))
+        return
+
+    if verb == "pause":
+        try:
+            session = pause_session(home, arg1)
+        except MailError as exc:
+            _err(str(exc))
+            raise typer.Exit(1) from exc
+        _ok(f"paused {session.token[:8]}")
+        return
+
+    if verb == "resume":
+        try:
+            session = resume_session(home, arg1)
+        except MailError as exc:
+            _err(str(exc))
+            raise typer.Exit(1) from exc
+        _ok(f"resumed {session.token[:8]}")
+        return
+
+    if verb == "stop":
+        pid = stop_mail_worker(home)
+        _ok(f"stopped {pid}" if pid is not None else "no mail worker")
+        return
+
+    if verb in {"filter", "filters"}:
+        path = write_gmail_filter(home)
+        _ok(f"wrote {path}")
+        _ok("Gmail → Settings → See all settings → Filters and Blocked Addresses → Import filters")
+        _ok("tick: Apply new filters to existing conversations")
+        _ok(GMAIL_FILTER_IMPORT)
+        return
+
+    if verb == "delete":
+        if not (log or login_flag or thread):
+            clear_mail(home)
+            _ok("deleted mail login, send log, and thread")
+            return
+        bits = []
+        if login_flag:
+            clear_smtp(home)
+            bits.append("login")
+        if log:
+            clear_sends(home)
+            bits.append("log")
+        if thread:
+            delete_thread(home)
+            bits.append("thread")
+        _ok("deleted " + ", ".join(bits))
+        return
+
+    if verb:
+        _err(
+            "usage: optionda mail [login|list|pause|resume|delete|stop|filter] "
+            "| mail [--every 30]"
+        )
+        raise typer.Exit(1)
+
+    store = _store()
+    try:
+        acc = store.require_current()
+    except StoreError as exc:
+        _err(str(exc))
+        raise typer.Exit(1) from exc
+    if load_smtp(home) is None:
+        _err("mail is not configured — optionda mail login")
+        raise typer.Exit(1)
+    session = load_session(home)
+    if session is not None and session.paused and not force and every is None:
+        _err("mail is paused — optionda mail resume")
+        raise typer.Exit(1)
+    ensure_session(acc.name, home)
+
+    if every is not None:
+        minutes = max(int(every), 1)
+        if not foreground:
+            extra: list[str] = []
+            if force:
+                extra.append("--force")
+            if do_update:
+                extra.append("--update")
+            if to_addr:
+                extra.extend(["--to", to_addr])
+            proc = spawn_mail_every(minutes, home, extra=extra)
+            _ok(
+                f"mail every {minutes} started  "
+                f"next {next_slot_label(minutes)}  pid {proc.pid}"
+            )
+            return
+
+        def send_once() -> None:
+            _mail_push(force=force, to_addr=to_addr, do_update=do_update)
+            _ok(f"next {next_slot_label(minutes, inclusive=False)}")
+
+        try:
+            run_every(minutes, send_once, home=home)
+        except KeyboardInterrupt:
+            _ok("stopped")
+        return
+
+    _mail_push(force=force, to_addr=to_addr, do_update=do_update)
+
+
+@app.command("update")
+def update_cmd() -> None:
+    """Compare this install to PyPI and upgrade if needed."""
+    _self_update(restart_hint="optionda")
 
 
 def _paint_live(live: Live, renderable) -> None:

@@ -122,8 +122,8 @@ Two separate write paths:
 | `<data>/logs/<account>.jsonl` | Full event stream for charts / history | **Append only** |
 | `<data>/surfaces/<underlying>.json` | Last valid Alpaca IV smile | **Overwrite** only on successful `refresh-iv` |
 
-JSONL `event` types: `add`, `merge`, `sell`, `delete`, `refresh_iv`, `export`, `run`.  
-`sell` records exit premium and realized cash PnL. `refresh_iv` records calibrated surface metadata. `export`/`run` rows include `valuation_mode`, `surface_iv`, and `surface_as_of`.
+JSONL `event` types: `add`, `merge`, `sell`, `delete`, `refresh_iv`, `export`, `run`, `snapshot`, `mail`.  
+`sell` records exit premium and realized cash PnL. `refresh_iv` records calibrated surface metadata. `export`/`run`/`snapshot`/`mail` rows include `valuation_mode`, `surface_iv`, and `surface_as_of`. Journal never stores Gmail, SMTP passwords, tokens, or Message-IDs.
 
 ```bash
 optionda add …          # rewrite book + append add/merge event
@@ -180,8 +180,47 @@ For a paid match to exchange IV, subscribe to Alpaca OPRA.
 | `optionda delete <id\|OCC>` | Remove position |
 | `optionda refresh-iv` | Calibrate local Alpaca IV smiles and refresh fallback IVs |
 | `optionda run` | Live table until Ctrl+C |
-| `optionda export` | One-shot snapshot |
+| `optionda export` | One-shot Rich snapshot |
+| `optionda snapshot` | Compact JSON for agents (`--text`, `--cached`) |
+| `optionda mail …` | Local SMTP desk mail (`login` / `--every 30`) |
+| `optionda update` | Compare this install to PyPI and upgrade |
 | `optionda key …` | Configure Alpaca credentials |
+
+## Headless mail (local SMTP)
+
+The GUI window is the human desk. Mail is a **separate process** on the same machine (same `OPTIONDA_HOME` / active account). No Grok bot required.
+
+```bash
+# once: Gmail + 2FA app password (same inbox you already use)
+optionda mail login you@gmail.com <app-password>
+
+# one shot, or a detached loop on the clock (:00 / :30)
+optionda mail
+optionda mail --every 30
+# prints: mail every 30 started  next 17:00  pid …
+# prompt returns; worker keeps sending. Stop with:
+optionda mail stop
+```
+
+One **session token** is minted when the window opens or mail starts. Subject stays `optionda · {account} · {token[:8]}`. Later sends are header replies (`In-Reply-To` / `References`) with a full run-style HTML desk — never a quoted plaintext thread.
+
+```bash
+optionda mail list              # login (no password), token, paused, recent sends
+optionda mail pause             # keep token/thread; --every sleeps without SMTP
+optionda mail resume
+optionda mail delete            # login + send log + thread (never the book)
+optionda mail delete --thread   # end this conversation only
+```
+
+**Stay out of Primary.** SMTP cannot stamp a Gmail label. Import the filter once:
+
+```bash
+optionda mail filter
+```
+
+Then Gmail → Settings → Filters and Blocked Addresses → Import filters → `gmail-filter.xml`, and tick **Apply new filters to existing conversations**. That applies label `optionda`, Skip Inbox, Updates, never important. Subject match: starts with `optionda ·`.
+
+Mail secrets stay on this machine: SMTP password, Gmail address, token, and `mail/sends.jsonl` are **never** in git, PyPI, `optionda pack` / `.oda`, or the journal. Unpack on another PC and run `mail login` again. Alpaca key pack behavior is unchanged.
 
 ## Repository
 

@@ -220,6 +220,10 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.account = account or active_account(home)
         self.home = home
+        if self.account:
+            from optionda.mailer import ensure_session
+
+            ensure_session(self.account, self.home)
         self.initial_view = initial_view
         self._history: list[str] = []
         self._hist_i = 0
