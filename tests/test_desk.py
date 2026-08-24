@@ -377,6 +377,129 @@ def test_empty_busy_chrome_is_page_with_hint(tmp_path, monkeypatch) -> None:
     assert "1/2 fetch" not in payload["text"]
 
 
+def test_busy_chrome_with_rows_is_never_a_page(tmp_path, monkeypatch) -> None:
+    from optionda.desk_live import DeskRunner
+    from optionda.store import AccountStore
+
+    monkeypatch.setenv("OPTIONDA_HOME", str(tmp_path))
+    monkeypatch.setenv("OPTIONDA_ACTIVE", "demo")
+    store = AccountStore(tmp_path)
+    store.create("demo")
+    store.activate("demo")
+    runner = DeskRunner(home=tmp_path, store=store, paint=lambda *_: None)
+    payload = runner._chrome_from(
+        {
+            "rows": [object()],
+            "poll_busy": True,
+            "poll_label": "updating…",
+            "poll_done": 0,
+            "poll_total": 1,
+            "spin": "⠋",
+            "eta": 12,
+        }
+    )
+    assert payload.get("page") is not True
+    assert "\n" not in payload["text"]
+    assert "⠋" in payload["text"]
+
+
+def test_idle_chrome_keeps_countdown_line(tmp_path, monkeypatch) -> None:
+    from optionda.desk_live import DeskRunner
+    from optionda.store import AccountStore
+
+    monkeypatch.setenv("OPTIONDA_HOME", str(tmp_path))
+    monkeypatch.setenv("OPTIONDA_ACTIVE", "demo")
+    store = AccountStore(tmp_path)
+    store.create("demo")
+    store.activate("demo")
+    runner = DeskRunner(home=tmp_path, store=store, paint=lambda *_: None)
+    payload = runner._chrome_from(
+        {
+            "rows": [object()],
+            "poll_busy": False,
+            "poll_label": "5s",
+            "eta": 5,
+        }
+    )
+    assert payload.get("page") is not True
+    assert payload["text"] == "5s"
+
+
+def test_fetch_live_start_does_not_repaint_table(tmp_path, monkeypatch) -> None:
+    from unittest.mock import patch
+
+    from optionda.desk_live import DeskRunner
+    from optionda.market.router import MarketRouter
+    from optionda.market.session import SessionSyncResult
+    from optionda.store import AccountStore
+
+    monkeypatch.setenv("OPTIONDA_HOME", str(tmp_path))
+    monkeypatch.setenv("OPTIONDA_ACTIVE", "demo")
+    store = AccountStore(tmp_path)
+    store.create("demo")
+    store.activate("demo")
+    paints: list[object] = []
+    chromes: list[object] = []
+    runner = DeskRunner(
+        home=tmp_path,
+        store=store,
+        paint=paints.append,
+        on_chrome=chromes.append,
+    )
+    from optionda.models import Position, RowMark
+
+    acc = store.require_current()
+    router = MarketRouter(tmp_path)
+    rows = [
+        RowMark(
+            position=Position(
+                occ_symbol="AAPL261120C00350000",
+                underlying="AAPL",
+                expiry=date(2026, 11, 20),
+                strike=350.0,
+                option_type="call",
+                qty=1,
+                side="long",
+                iv_frozen=0.25,
+                iv_as_of=datetime(2026, 8, 12, 20, tzinfo=timezone.utc),
+                entry_premium=3.5,
+            ),
+            spot=210.0,
+            theo=12.0,
+            delta=0.3,
+            dte=90.0,
+            notional=1200.0,
+            cost=3.5,
+            close_premium=10.0,
+            theo_chg=2.0,
+        )
+    ]
+    runner._update_view(
+        acc=acc,
+        router=router,
+        rows=rows,
+        poll_busy=False,
+        eta=15,
+        continuous=True,
+    )
+    paints.clear()
+    chromes.clear()
+    with (
+        patch("optionda.desk_live.mark_account", return_value=rows),
+        patch(
+            "optionda.desk_live.sync_completed_session",
+            return_value=SessionSyncResult(),
+        ),
+        patch("optionda.desk_live.session_due", return_value=False),
+        patch("optionda.desk_live.sync_book"),
+        patch("optionda.desk_live.append_export_log"),
+    ):
+        runner.fetch_live(acc, router, rows)
+    assert paints == []
+    assert chromes
+    assert all(item.get("page") is not True for item in chromes)
+
+
 def test_empty_busy_poll_does_not_paint_table(tmp_path, monkeypatch) -> None:
     from optionda.desk_live import DeskRunner
     from optionda.market.router import MarketRouter

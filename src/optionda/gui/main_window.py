@@ -684,6 +684,8 @@ class MainWindow(QMainWindow):
         if page.revealing:
             return
         page.terminal.set_live_html(markup)
+        if page.revealed:
+            page.terminal.pin_live_chrome()
         self._sync_spin_timer()
 
     def _on_desk_chrome(self, payload: object, page: TermPage | None = None) -> None:
@@ -692,9 +694,8 @@ class MainWindow(QMainWindow):
             return
         if page.desk is None or page.desk.stopping():
             return
-        if page.revealing or page.revealed:
-            if payload.get("page"):
-                return
+        if page.revealing and payload.get("page"):
+            return
         page.terminal.set_live_chrome(payload)
         self._sync_spin_timer()
 
@@ -757,6 +758,7 @@ class MainWindow(QMainWindow):
             html = page.desk.runner.html_at(page.desk.cols, page.desk.rows)
             if html:
                 page.terminal.set_live_html(html)
+            page.terminal.pin_live_chrome()
         if not any(item.revealing for item in self._pages):
             self._reveal_timer.stop()
         if page.desk_finished:

@@ -429,10 +429,12 @@ def format_chrome_plain(
     poll_total: int | None = None,
     eta_sec: int | None = None,
 ) -> str:
-    """Compact fetch bar for the live pane. Hidden when idle."""
-    _ = (poll_label, eta_sec)
+    """One-line live-pane chrome: countdown when idle, bar when busy."""
     if not poll_busy:
-        return ""
+        if eta_sec is not None:
+            return f"{int(eta_sec)}s"
+        label = (poll_label or "").strip()
+        return label
     steps = max(int(poll_total or 1), 1)
     finished = max(0, min(int(poll_done or 0), steps))
     frac = finished / steps
@@ -698,6 +700,9 @@ def _desk_note_visible(note: str) -> bool:
     return True
 
 
+SECTION_RESERVE = 2
+
+
 def _position_table(
     rows: list[RowMark],
     *,
@@ -709,6 +714,7 @@ def _position_table(
     model_footer: Text,
     upnl_footer: Text,
     placeholder: bool = True,
+    reserve: int = 0,
 ) -> Table:
     table = Table(
         show_header=True,
@@ -774,6 +780,10 @@ def _position_table(
     )
 
     if not rows:
+        if reserve > 0:
+            for _ in range(reserve):
+                table.add_row("", "", "", "", "", "", "", "", "", "")
+            return table
         if placeholder:
             table.add_row(
                 Text("(no positions)", style=_MUTED),
@@ -853,6 +863,8 @@ def _position_table(
             ),
             Text(_last_op_label(row.last_op_at), style=_MUTED),
         )
+    for _ in range(max(0, reserve - len(rows))):
+        table.add_row("", "", "", "", "", "", "", "", "", "")
     return table
 
 
@@ -882,6 +894,7 @@ def render_snapshot(
     notes: list[str] | None = None,
     framed: bool = True,
     reveal: DeskReveal | None = None,
+    reserve_sections: bool = False,
 ) -> Group:
     """Single framed desk: meta + positions + column-aligned totals."""
     up_all, down_all = partition_desk_rows(rows)
@@ -889,12 +902,14 @@ def render_snapshot(
         up_rows, down_rows = up_all, down_all
         show_kpis = True
         placeholder = True
+        reserve = SECTION_RESERVE if reserve_sections else 0
     else:
         shown = max(int(reveal.visible), 0)
         up_rows = up_all[:shown]
         down_rows = down_all[: max(shown - len(up_all), 0)]
         show_kpis = bool(reveal.footer)
         placeholder = False
+        reserve = 0
     prev_s = prev_spots or {}
     prev_t = prev_theos or {}
     prev_n = prev_notionals or {}
@@ -941,8 +956,9 @@ def render_snapshot(
     )
 
     sections: list = []
-    both = bool(up_rows and down_rows)
-    if not up_rows and not down_rows:
+    keep_both = reserve > 0 and bool(up_all or down_all)
+    both = bool(up_rows and down_rows) or keep_both
+    if not up_rows and not down_rows and not keep_both:
         sections.append(
             _position_table(
                 [],
@@ -957,7 +973,7 @@ def render_snapshot(
             )
         )
     else:
-        if up_rows:
+        if up_rows or keep_both:
             if both:
                 sections.append(Text(""))
             sections.append(
@@ -974,9 +990,10 @@ def render_snapshot(
                     model_footer=model_footer,
                     upnl_footer=upnl_footer,
                     placeholder=placeholder,
+                    reserve=reserve,
                 )
             )
-        if down_rows:
+        if down_rows or keep_both:
             if both:
                 sections.append(Text(""))
             sections.append(
@@ -993,6 +1010,7 @@ def render_snapshot(
                     model_footer=model_footer,
                     upnl_footer=upnl_footer,
                     placeholder=placeholder,
+                    reserve=reserve,
                 )
             )
 
@@ -1038,7 +1056,10 @@ def render_snapshot(
         header.append(kpis)
     if not framed:
         return Group(title, *header)
-    used = 5 + max(len(rows), 1) + len(shown_notes) + (1 if kpis is not None else 0)
+    visual_rows = max(len(rows), 1)
+    if reserve and (up_all or down_all):
+        visual_rows = max(len(up_rows), reserve) + max(len(down_rows), reserve)
+    used = 5 + visual_rows + len(shown_notes) + (1 if kpis is not None else 0)
     used += max(len(sections) - 1, 0)
     pad = max(0, min_lines - used)
     if pad:

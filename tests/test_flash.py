@@ -78,11 +78,12 @@ def test_poll_status_width_is_stable():
     assert len(idle) == _STATUS_WIDTH
 
 
-def test_chrome_plain_hides_when_idle() -> None:
+def test_chrome_plain_idle_keeps_countdown() -> None:
     from optionda.display.table import format_chrome_plain
 
     idle = format_chrome_plain(poll_busy=False, eta_sec=5, poll_label="5s")
-    assert idle == ""
+    assert idle == "5s"
+    assert "\n" not in idle
     busy = format_chrome_plain(
         spin="⠹",
         poll_busy=True,
@@ -93,6 +94,7 @@ def test_chrome_plain_hides_when_idle() -> None:
     assert "⠹" in busy
     assert "10/10" in busy
     assert "#" in busy
+    assert "\n" not in busy
     assert "fetch" not in busy
     assert "mark" not in busy
 

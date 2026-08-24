@@ -106,6 +106,9 @@ class TerminalView(QWidget):
         self._status = QLabel()
         self._status.setObjectName("liveChrome")
         self._status.setFont(mono_font(12))
+        self._status.setWordWrap(False)
+        line = self._status.fontMetrics().height() + 4
+        self._status.setFixedHeight(max(line, 16))
         self._status.hide()
         inner = QWidget()
         inner_l = QVBoxLayout(inner)
@@ -137,6 +140,7 @@ class TerminalView(QWidget):
         splash_l.addWidget(lower, 1)
         self._splash.setVisible(splash)
         self._chrome: dict = {}
+        self._chrome_slot = False
         self._cell: tuple[float, float] | None = None
         self.history.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         self.history.setSizePolicy(
@@ -232,13 +236,32 @@ class TerminalView(QWidget):
         self.history.setTextCursor(cursor)
         self._fit_history()
 
+    def pin_live_chrome(self) -> None:
+        """Keep a one-line status slot after the first table is on screen."""
+        self._chrome_slot = True
+        if not self._status.text().strip():
+            text = str(self._chrome.get("text") or "").strip()
+            if not text:
+                from optionda.display.table import format_chrome_plain
+
+                text = format_chrome_plain(
+                    spin=self._chrome.get("spin"),
+                    poll_label=self._chrome.get("poll_label"),
+                    poll_busy=bool(self._chrome.get("poll_busy")),
+                    poll_done=self._chrome.get("poll_done"),
+                    poll_total=self._chrome.get("poll_total"),
+                    eta_sec=self._chrome.get("eta"),
+                )
+            self._status.setText(text or " ")
+        self._status.show()
+
     def set_live_html(self, markup: str, *, wrap: bool = False) -> None:
         self.live.setLineWrapMode(
             QTextEdit.LineWrapMode.WidgetWidth
             if wrap
             else QTextEdit.LineWrapMode.NoWrap
         )
-        if not wrap:
+        if not wrap and not self._chrome_slot:
             self._chrome = {}
             self._status.clear()
             self._status.hide()
@@ -266,7 +289,7 @@ class TerminalView(QWidget):
                 eta_sec=chrome.get("eta"),
             )
         page = bool(chrome.get("page")) or "\n" in text
-        if page:
+        if page and not self._chrome_slot:
             escaped = html.escape(text).replace("\n", "<br>")
             self.set_live_html(wrap_desk_html(escaped, wrap=True), wrap=True)
             self._status.clear()
@@ -275,8 +298,19 @@ class TerminalView(QWidget):
                 self.history.show()
             self._fit_history()
             return
-        self._status.setText(text)
-        self._status.setVisible(bool(text))
+        if page and self._chrome_slot:
+            from optionda.display.table import format_chrome_plain
+
+            text = format_chrome_plain(
+                spin=chrome.get("spin"),
+                poll_label=chrome.get("poll_label"),
+                poll_busy=bool(chrome.get("poll_busy")),
+                poll_done=chrome.get("poll_done"),
+                poll_total=chrome.get("poll_total"),
+                eta_sec=chrome.get("eta"),
+            )
+        self._status.setText(text or " ")
+        self._status.setVisible(bool(text) or self._chrome_slot)
         if self.history.isHidden():
             self.history.show()
         if self.desk.isHidden():
@@ -329,6 +363,7 @@ class TerminalView(QWidget):
 
     def clear_live(self) -> None:
         self._chrome = {}
+        self._chrome_slot = False
         self._status.clear()
         self._status.hide()
         self.live.clear()

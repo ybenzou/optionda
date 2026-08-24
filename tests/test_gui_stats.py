@@ -942,3 +942,41 @@ def test_first_desk_frame_reveals_rows_in_order(tmp_path, qtbot) -> None:
     assert page.revealed
     assert reveal_steps(2)[-1] == DeskReveal(2, True)
 
+
+def test_set_live_html_keeps_pinned_chrome_slot(qtbot) -> None:
+    from optionda.gui.terminal_view import TerminalView
+
+    view = TerminalView()
+    qtbot.addWidget(view)
+    view.resize(800, 500)
+    view.show()
+    view.prepare_live()
+    view.set_live_chrome(
+        {
+            "poll_busy": False,
+            "eta": 12,
+            "text": "12s",
+        }
+    )
+    view.pin_live_chrome()
+    assert view._status.isVisible()
+    assert view._status.text() == "12s"
+    view.set_live_html("<pre>table</pre>")
+    assert view._status.isVisible()
+    assert view._status.text() == "12s"
+    view.set_live_chrome(
+        {
+            "poll_busy": True,
+            "poll_done": 1,
+            "poll_total": 4,
+            "spin": "⠋",
+            "text": "⠋  #---------------  1/4",
+        }
+    )
+    assert view._status.isVisible()
+    assert "1/4" in view._status.text()
+    assert view.live.toPlainText()
+    view.set_live_html("<pre>next</pre>")
+    assert view._status.isVisible()
+    assert "1/4" in view._status.text()
+

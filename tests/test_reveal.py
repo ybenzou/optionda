@@ -153,3 +153,67 @@ def test_reveal_paints_header_then_rows_then_footer() -> None:
     assert any("tPnL" in text for text in done_plains)
     tables = [item for item in done.renderables if getattr(item, "columns", None)]
     assert tables[-1].show_footer
+
+
+def test_reserved_sections_keep_both_headers_and_two_slots() -> None:
+    rows = [_row("AVGO261218C00500000", 4000.0, up=True)]
+    group = render_snapshot(
+        account="main",
+        feed="alpaca",
+        refresh_sec=15,
+        rows=rows,
+        realized=10.0,
+        framed=False,
+        reserve_sections=True,
+    )
+    plains = _plains(group)
+    assert any("today +" in text for text in plains)
+    assert any("today −" in text or "today -" in text for text in plains)
+    plus = next(text for text in plains if "today +" in text)
+    minus = next(text for text in plains if "today −" in text or "today -" in text)
+    assert "+200.00" in plus
+    assert minus.strip() in {"today −", "today -"}
+    tables = [item for item in group.renderables if getattr(item, "columns", None)]
+    assert len(tables) == 2
+    up_occs = [getattr(cell, "plain", cell) for cell in tables[0].columns[0].cells]
+    down_occs = [getattr(cell, "plain", cell) for cell in tables[1].columns[0].cells]
+    assert up_occs[0].startswith("AVGO")
+    assert up_occs[1] == ""
+    assert down_occs == ["", ""]
+    assert not any("(no positions)" in name for name in up_occs + down_occs)
+
+
+def test_reserved_sections_grow_past_two_rows() -> None:
+    rows = [
+        _row("AVGO261218C00500000", 4000.0, up=True),
+        _row("CSCO261218C00130000", 1000.0, up=True),
+        _row("MSFT261218C00400000", 900.0, up=True),
+    ]
+    group = render_snapshot(
+        account="main",
+        feed="alpaca",
+        refresh_sec=15,
+        rows=rows,
+        framed=False,
+        reserve_sections=True,
+    )
+    tables = [item for item in group.renderables if getattr(item, "columns", None)]
+    up_occs = [getattr(cell, "plain", cell) for cell in tables[0].columns[0].cells]
+    down_occs = [getattr(cell, "plain", cell) for cell in tables[1].columns[0].cells]
+    assert [name[:4] for name in up_occs] == ["AVGO", "CSCO", "MSFT"]
+    assert down_occs == ["", ""]
+
+
+def test_reveal_does_not_reserve_empty_section() -> None:
+    rows = [_row("AVGO261218C00500000", 4000.0, up=True)]
+    mid = render_snapshot(
+        account="main",
+        feed="alpaca",
+        refresh_sec=15,
+        rows=rows,
+        framed=False,
+        reveal=DeskReveal(1, False),
+        reserve_sections=True,
+    )
+    assert any("today +" in text for text in _plains(mid))
+    assert not any("today −" in text or "today -" in text for text in _plains(mid))

@@ -228,6 +228,7 @@ class DeskRunner:
             notes=list(self.notes),
             framed=self.framed,
             reveal=reveal,
+            reserve_sections=chrome_out and reveal is None,
         )
 
     def _next_spin(self) -> str:
@@ -456,7 +457,6 @@ class DeskRunner:
             poll_fraction=0.0,
             poll_label="updating…",
             poll_busy=True,
-            full=True,
         )
         self._sync(nxt, on_live_progress, announce=False)
         marked = mark_account(
