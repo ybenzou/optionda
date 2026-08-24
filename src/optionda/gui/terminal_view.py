@@ -9,7 +9,8 @@ from PySide6.QtGui import QColor, QFont, QPainter, QPen, QTextCursor, QTextDocum
 from PySide6.QtWidgets import QLabel, QSizePolicy, QTextEdit, QVBoxLayout, QWidget
 
 from optionda.gui.richview import wrap_desk_html
-from optionda.gui.theme import PROMPT, mono_font
+from optionda.gui.splash import MARK, WORD
+from optionda.gui.theme import CYAN, MUTED, PROMPT, mono_font
 
 
 class _Pane(QTextEdit):
@@ -74,8 +75,20 @@ def measure_html_cell(font: QFont) -> tuple[float, float]:
     return max(advance, 4.0), max(line, 10.0)
 
 
+def _splash_label(text: str, name: str, color: str) -> QLabel:
+    label = QLabel(text)
+    label.setObjectName(name)
+    label.setFont(mono_font(11))
+    label.setAlignment(Qt.AlignmentFlag.AlignLeft)
+    label.setWordWrap(False)
+    label.setTextFormat(Qt.TextFormat.PlainText)
+    label.setStyleSheet(f"color: {color}; background: transparent;")
+    label.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
+    return label
+
+
 class TerminalView(QWidget):
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, *, splash: bool = False) -> None:
         super().__init__(parent)
         self.history = _Pane(self, "term")
         self.live = _Pane(self, "termLive")
@@ -91,6 +104,15 @@ class TerminalView(QWidget):
         inner_l.addWidget(self.live, 1)
         self.desk = _DashFrame(inner, self)
         self.desk.hide()
+        self._splash = QWidget(self)
+        self._splash.setObjectName("splash")
+        splash_l = QVBoxLayout(self._splash)
+        splash_l.setContentsMargins(16, 16, 16, 16)
+        splash_l.setSpacing(18)
+        splash_l.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        splash_l.addWidget(_splash_label(MARK, "splashMark", MUTED))
+        splash_l.addWidget(_splash_label(WORD, "splashWord", CYAN))
+        self._splash.setVisible(splash)
         self._chrome: dict = {}
         self._cell: tuple[float, float] | None = None
         self.history.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
@@ -104,14 +126,28 @@ class TerminalView(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(self.history, 0)
+        layout.addWidget(self._splash, 1)
         layout.addWidget(self.desk, 1)
+        if splash:
+            self.history.hide()
         self._fit_history()
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         self._fit_history()
 
+    def splash_visible(self) -> bool:
+        return not self._splash.isHidden()
+
+    def hide_splash(self) -> None:
+        if self._splash.isHidden():
+            return
+        self._splash.hide()
+        if self.history.isHidden():
+            self.history.show()
+
     def prepare_live(self) -> None:
+        self.hide_splash()
         if self.history.isHidden():
             self.history.show()
         self._fit_history()
@@ -160,6 +196,7 @@ class TerminalView(QWidget):
     def append_block(self, text: str) -> None:
         if not text:
             return
+        self.hide_splash()
         if self.history.isHidden():
             self.history.show()
         cursor = self.history.textCursor()
@@ -268,6 +305,7 @@ class TerminalView(QWidget):
         self._fit_history()
 
     def clear_term(self) -> None:
+        self.hide_splash()
         self.history.clear()
         self.clear_live()
         self._fit_history()

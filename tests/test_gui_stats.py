@@ -585,6 +585,49 @@ def test_main_window_shortcuts(tmp_path, qtbot) -> None:
     window.stats.apply_layout(1280, 800)
 
 
+def test_first_page_shows_slash_splash(tmp_path, qtbot) -> None:
+    from PySide6.QtWidgets import QLabel
+
+    from optionda.gui.main_window import MainWindow
+    from optionda.gui.splash import splash_plain
+
+    mark = splash_plain()
+    assert "//" in mark
+    assert "////" in mark
+
+    _journal(tmp_path)
+    window = MainWindow("demo", tmp_path, period="all", initial_view="term")
+    qtbot.addWidget(window)
+    window.show()
+    first = window.terminal
+    assert first.splash_visible()
+    mark = first._splash.findChild(QLabel, "splashMark")
+    word = first._splash.findChild(QLabel, "splashWord")
+    assert mark is not None and "////" in mark.text()
+    assert word is not None and "////" in word.text()
+
+    window.add_tab()
+    assert not window.terminal.splash_visible()
+    window.set_current_tab(0)
+    assert window.terminal.splash_visible()
+
+    window._input.setText("help")
+    window._submit()
+    assert not window.terminal.splash_visible()
+    assert "help" in window.terminal.history.toPlainText()
+
+
+def test_begin_turn_clears_slash_splash(qtbot) -> None:
+    from optionda.gui.terminal_view import TerminalView
+
+    view = TerminalView(splash=True)
+    qtbot.addWidget(view)
+    assert view.splash_visible()
+    view.begin_turn("PS main> [optionda] export")
+    assert not view.splash_visible()
+    assert "export" in view.history.toPlainText()
+
+
 def test_begin_turn_replaces_transcript(qtbot) -> None:
     from optionda.gui.terminal_view import TerminalView
 

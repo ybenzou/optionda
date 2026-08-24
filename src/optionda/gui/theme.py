@@ -264,6 +264,19 @@ QLabel#liveChrome {{
     padding: 2px 10px 0 10px;
     font-size: 12pt;
 }}
+QWidget#splash {{
+    background: {BG};
+}}
+QLabel#splashMark {{
+    background: transparent;
+    color: {MUTED};
+    font-size: 11pt;
+}}
+QLabel#splashWord {{
+    background: transparent;
+    color: {CYAN};
+    font-size: 11pt;
+}}
 """
 
 

@@ -46,8 +46,8 @@ View = Literal["term", "stats", "desk"]
 
 
 class TermPage:
-    def __init__(self, title: str = "term") -> None:
-        self.terminal = TerminalView()
+    def __init__(self, title: str = "term", *, splash: bool = False) -> None:
+        self.terminal = TerminalView(splash=splash)
         self.title = title
         self.desk: _DeskWorker | None = None
         self.add: _AddWorker | None = None
@@ -369,7 +369,7 @@ class MainWindow(QMainWindow):
 
     def add_tab(self) -> int:
         title = self._fresh_title()
-        page = TermPage(title)
+        page = TermPage(title, splash=not self._pages)
         self._pages.append(page)
         self._terms.addWidget(page.terminal)
         self._tabbar.blockSignals(True)

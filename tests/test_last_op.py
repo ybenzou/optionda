@@ -88,5 +88,6 @@ def test_desk_row_shows_last_op_et_date() -> None:
         item for item in group.renderables if getattr(item, "columns", None)
     )
     assert table.columns[-1].header == "Last"
+    assert "Delta" not in [col.header for col in table.columns]
     plains = [cell.plain for cell in table.columns[-1].cells]
     assert any("8/21" in text for text in plains)

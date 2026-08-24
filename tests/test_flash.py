@@ -16,6 +16,7 @@ from optionda.display.table import (
     _spot_cell,
     _spot_chg_pct,
     format_poll_status,
+    partition_desk_rows,
     render_snapshot,
     sort_desk_rows,
 )
@@ -459,3 +460,55 @@ def test_desk_rows_sort_by_abs_notional() -> None:
         "HOOD",
         "BADX",
     ]
+
+
+def test_desk_hides_delta_and_keeps_last() -> None:
+    group = render_snapshot(
+        account="main",
+        feed="alpaca",
+        refresh_sec=15,
+        rows=[_row("AVGO261218C00500000", 3350.0)],
+        framed=False,
+    )
+    table = next(
+        item for item in group.renderables if getattr(item, "columns", None)
+    )
+    headers = [col.header for col in table.columns]
+    assert "Delta" not in headers
+    assert headers[-1] == "Last"
+    assert headers[-2] == "DTE"
+
+
+def test_desk_splits_today_up_then_down() -> None:
+    up_big = _row("AVGO261218C00500000", 4000.0)
+    up_small = _row("CSCO261218C00130000", 1000.0)
+    down_big = _row("HOOD261218C00150000", 3000.0)
+    down_small = _row("INTC261016C00140000", 800.0)
+    up_big = up_big.model_copy(update={"close_premium": 38.0, "theo": 40.0, "theo_chg": 2.0})
+    up_small = up_small.model_copy(update={"close_premium": 9.0, "theo": 10.0, "theo_chg": 1.0})
+    down_big = down_big.model_copy(update={"close_premium": 32.0, "theo": 30.0, "theo_chg": -2.0})
+    down_small = down_small.model_copy(
+        update={"close_premium": 9.0, "theo": 8.0, "theo_chg": -1.0}
+    )
+    up, down = partition_desk_rows([down_small, up_small, down_big, up_big])
+    assert [row.position.occ_symbol[:4] for row in up] == ["AVGO", "CSCO"]
+    assert [row.position.occ_symbol[:4] for row in down] == ["HOOD", "INTC"]
+
+    group = render_snapshot(
+        account="main",
+        feed="alpaca",
+        refresh_sec=15,
+        rows=[down_small, up_small, down_big, up_big],
+        framed=False,
+    )
+    labels = [item.plain for item in group.renderables if hasattr(item, "plain")]
+    assert any("today +" in text for text in labels)
+    assert any("today −" in text or "today -" in text for text in labels)
+    tables = [item for item in group.renderables if getattr(item, "columns", None)]
+    assert len(tables) == 2
+    up_occs = [cell.plain for cell in tables[0].columns[0].cells]
+    down_occs = [cell.plain for cell in tables[1].columns[0].cells]
+    assert up_occs[0].startswith("AVGO")
+    assert up_occs[1].startswith("CSCO")
+    assert down_occs[0].startswith("HOOD")
+    assert down_occs[1].startswith("INTC")

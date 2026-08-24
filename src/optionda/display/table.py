@@ -551,6 +551,19 @@ def sort_desk_rows(rows: list[RowMark]) -> list[RowMark]:
     return sorted(rows, key=key)
 
 
+def partition_desk_rows(rows: list[RowMark]) -> tuple[list[RowMark], list[RowMark]]:
+    """Today-up first, today-down second; each group keeps position sort."""
+    up: list[RowMark] = []
+    down: list[RowMark] = []
+    for row in sort_desk_rows(rows):
+        day = today_model_pnl(row)
+        if day is not None and day > 1e-9:
+            up.append(row)
+        else:
+            down.append(row)
+    return up, down
+
+
 def _desk_note_visible(note: str) -> bool:
     text = (note or "").strip()
     if not text or text.startswith("completed session"):
@@ -560,6 +573,162 @@ def _desk_note_visible(note: str) -> bool:
     if text.startswith("close ") and "pending" not in text:
         return False
     return True
+
+
+def _position_table(
+    rows: list[RowMark],
+    *,
+    prev_spots: dict[str, float],
+    prev_theos: dict[str, float],
+    prev_upnls: dict[str, float],
+    phase: FlashPhase,
+    show_footer: bool,
+    model_footer: Text,
+    upnl_footer: Text,
+) -> Table:
+    table = Table(
+        show_header=True,
+        header_style=_HEADER,
+        box=box.SIMPLE_HEAD,
+        border_style=_MUTED,
+        pad_edge=False,
+        expand=True,
+        show_lines=False,
+        show_footer=show_footer,
+        footer_style="bold",
+        padding=(0, 1),
+        row_styles=("none", "on grey11"),
+    )
+    table.add_column(
+        "OCC",
+        style=_OCC,
+        footer=Text("Σ", style="bold cyan") if show_footer else "",
+        no_wrap=True,
+        overflow="fold",
+    )
+    table.add_column("Side", justify="center", footer="", width=5)
+    table.add_column("Qty", justify="right", style=_NUM, footer="", min_width=3)
+    table.add_column("Spot", justify="right", footer="", min_width=14, no_wrap=True)
+    table.add_column(
+        "Model IV",
+        justify="right",
+        style="cyan",
+        footer="",
+        min_width=12,
+        no_wrap=True,
+    )
+    table.add_column(
+        "Cost",
+        justify="right",
+        style=_NUM,
+        footer="",
+        min_width=7,
+        no_wrap=True,
+    )
+    table.add_column(
+        "Model$",
+        justify="right",
+        footer=model_footer if show_footer else "",
+        min_width=16,
+        no_wrap=True,
+    )
+    table.add_column(
+        "uPnL$",
+        justify="right",
+        footer=upnl_footer if show_footer else "",
+        min_width=10,
+        no_wrap=True,
+    )
+    table.add_column("DTE", justify="right", style=_MUTED, footer="", min_width=5)
+    table.add_column(
+        "Last",
+        justify="right",
+        style=_MUTED,
+        footer="",
+        min_width=6,
+        no_wrap=True,
+    )
+
+    if not rows:
+        table.add_row(
+            Text("(no positions)", style=_MUTED),
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+        )
+        return table
+
+    for row in rows:
+        pos = row.position
+        model_iv = (
+            row.model_iv
+            if row.model_iv is not None
+            else row.surface_iv if row.surface_iv is not None else pos.iv_frozen
+        )
+        iv_as_of = row.surface_as_of if row.surface_as_of is not None else pos.iv_as_of
+        iv_stale = row.iv_stale or row.iv_fallback or row.valuation_mode != "surface"
+        if row.error:
+            table.add_row(
+                Text(pos.occ_symbol, style=_OCC),
+                _side_cell(pos.side),
+                f"{pos.qty:g}",
+                "—",
+                _model_iv_cell(
+                    model_iv,
+                    iv_as_of,
+                    stale=iv_stale,
+                    session=row.surface_session_date,
+                    fallback=row.iv_fallback,
+                ),
+                _fmt_money(pos.entry_premium),
+                Text(row.error, style="red"),
+                "—",
+                "—",
+                Text(_last_op_label(row.last_op_at), style=_MUTED),
+            )
+            continue
+
+        table.add_row(
+            Text(pos.occ_symbol, style=_OCC),
+            _side_cell(pos.side),
+            Text(f"{pos.qty:g}", style=_NUM),
+            _spot_cell(
+                row.spot,
+                row.close_spot,
+                prev_spots.get(pos.id),
+                phase=phase,
+            ),
+            _model_iv_cell(
+                model_iv,
+                iv_as_of,
+                stale=iv_stale,
+                session=row.surface_session_date,
+                fallback=row.iv_fallback,
+            ),
+            Text(
+                _fmt_money(row.cost if row.cost is not None else pos.entry_premium),
+                style=_NUM,
+            ),
+            _model_cell(
+                row.theo,
+                row.close_premium,
+                prev_theos.get(pos.id),
+                phase=phase,
+            ),
+            _pnl_flash(row.upnl, prev_upnls.get(pos.id), phase=phase),
+            Text(
+                f"{row.dte:.1f}" if row.dte is not None else "—",
+                style=_MUTED,
+            ),
+            Text(_last_op_label(row.last_op_at), style=_MUTED),
+        )
+    return table
 
 
 def render_snapshot(
@@ -589,7 +758,7 @@ def render_snapshot(
     framed: bool = True,
 ) -> Group:
     """Single framed desk: meta + positions + column-aligned totals."""
-    rows = sort_desk_rows(rows)
+    up_rows, down_rows = partition_desk_rows(rows)
     prev_s = prev_spots or {}
     prev_t = prev_theos or {}
     prev_n = prev_notionals or {}
@@ -602,7 +771,7 @@ def render_snapshot(
     has_upnl = False
     today_total = 0.0
     has_today = False
-    for row in rows:
+    for row in (*up_rows, *down_rows):
         if row.notional is not None:
             total += row.notional
         prev_notional = prev_n.get(row.position.id)
@@ -635,147 +804,52 @@ def render_snapshot(
         today=today_total if has_today else None,
     )
 
-    table = Table(
-        show_header=True,
-        header_style=_HEADER,
-        box=box.SIMPLE_HEAD,
-        border_style=_MUTED,
-        pad_edge=False,
-        expand=True,
-        show_lines=False,
-        show_footer=True,
-        footer_style="bold",
-        padding=(0, 1),
-        row_styles=("none", "on grey11"),
-    )
-    table.add_column(
-        "OCC",
-        style=_OCC,
-        footer=Text("Σ", style="bold cyan"),
-        no_wrap=True,
-        overflow="fold",
-    )
-    table.add_column("Side", justify="center", footer="", width=5)
-    table.add_column("Qty", justify="right", style=_NUM, footer="", min_width=3)
-    table.add_column("Spot", justify="right", footer="", min_width=14, no_wrap=True)
-    table.add_column(
-        "Model IV",
-        justify="right",
-        style="cyan",
-        footer="",
-        min_width=12,
-        no_wrap=True,
-    )
-    table.add_column(
-        "Cost",
-        justify="right",
-        style=_NUM,
-        footer="",
-        min_width=7,
-        no_wrap=True,
-    )
-    table.add_column(
-        "Model$",
-        justify="right",
-        footer=model_footer,
-        min_width=16,
-        no_wrap=True,
-    )
-    table.add_column(
-        "uPnL$",
-        justify="right",
-        footer=upnl_footer,
-        min_width=10,
-        no_wrap=True,
-    )
-    table.add_column("Delta", justify="right", style=_MUTED, footer="", min_width=6)
-    table.add_column("DTE", justify="right", style=_MUTED, footer="", min_width=5)
-    table.add_column("Last", justify="right", style=_MUTED, footer="", min_width=5)
-
-    if not rows:
-        table.add_row(
-            Text("(no positions)", style=_MUTED),
-            "",
-            "",
-            "",
-            "",
-            "",
-            "",
-            "",
-            "",
-            "",
-            "",
-        )
-
-    for row in rows:
-        pos = row.position
-        model_iv = (
-            row.model_iv
-            if row.model_iv is not None
-            else row.surface_iv if row.surface_iv is not None else pos.iv_frozen
-        )
-        iv_as_of = row.surface_as_of if row.surface_as_of is not None else pos.iv_as_of
-        iv_stale = row.iv_stale or row.iv_fallback or row.valuation_mode != "surface"
-        if row.error:
-            table.add_row(
-                Text(pos.occ_symbol, style=_OCC),
-                _side_cell(pos.side),
-                f"{pos.qty:g}",
-                "—",
-                _model_iv_cell(
-                    model_iv,
-                    iv_as_of,
-                    stale=iv_stale,
-                    session=row.surface_session_date,
-                    fallback=row.iv_fallback,
-                ),
-                _fmt_money(pos.entry_premium),
-                Text(row.error, style="red"),
-                "—",
-                "—",
-                "—",
-                Text(_last_op_label(row.last_op_at), style=_MUTED),
+    sections: list = []
+    both = bool(up_rows and down_rows)
+    if not up_rows and not down_rows:
+        sections.append(
+            _position_table(
+                [],
+                prev_spots=prev_s,
+                prev_theos=prev_t,
+                prev_upnls=prev_u,
+                phase=phase,
+                show_footer=True,
+                model_footer=model_footer,
+                upnl_footer=upnl_footer,
             )
-            continue
-
-        table.add_row(
-            Text(pos.occ_symbol, style=_OCC),
-            _side_cell(pos.side),
-            Text(f"{pos.qty:g}", style=_NUM),
-            _spot_cell(
-                row.spot,
-                row.close_spot,
-                prev_s.get(pos.id),
-                phase=phase,
-            ),
-            _model_iv_cell(
-                model_iv,
-                iv_as_of,
-                stale=iv_stale,
-                session=row.surface_session_date,
-                fallback=row.iv_fallback,
-            ),
-            Text(
-                _fmt_money(row.cost if row.cost is not None else pos.entry_premium),
-                style=_NUM,
-            ),
-            _model_cell(
-                row.theo,
-                row.close_premium,
-                prev_t.get(pos.id),
-                phase=phase,
-            ),
-            _pnl_flash(row.upnl, prev_u.get(pos.id), phase=phase),
-            Text(
-                f"{row.delta:.3f}" if row.delta is not None else "—",
-                style=_MUTED,
-            ),
-            Text(
-                f"{row.dte:.1f}" if row.dte is not None else "—",
-                style=_MUTED,
-            ),
-            Text(_last_op_label(row.last_op_at), style=_MUTED),
         )
+    else:
+        if up_rows:
+            if both:
+                sections.append(Text("today +", style="bold green"))
+            sections.append(
+                _position_table(
+                    up_rows,
+                    prev_spots=prev_s,
+                    prev_theos=prev_t,
+                    prev_upnls=prev_u,
+                    phase=phase,
+                    show_footer=not both,
+                    model_footer=model_footer,
+                    upnl_footer=upnl_footer,
+                )
+            )
+        if down_rows:
+            if both:
+                sections.append(Text("today −", style="bold red"))
+            sections.append(
+                _position_table(
+                    down_rows,
+                    prev_spots=prev_s,
+                    prev_theos=prev_t,
+                    prev_upnls=prev_u,
+                    phase=phase,
+                    show_footer=True,
+                    model_footer=model_footer,
+                    upnl_footer=upnl_footer,
+                )
+            )
 
     border = _border_style(continuous=continuous, phase=phase, poll_busy=poll_busy)
     title = Text.assemble(
@@ -809,12 +883,13 @@ def render_snapshot(
     ]
     for note in shown_notes:
         header.append(Text(note, style=_MUTED))
-    header.append(table)
+    header.extend(sections)
     if kpis is not None:
         header.append(kpis)
     if not framed:
         return Group(title, *header)
     used = 5 + max(len(rows), 1) + len(shown_notes) + (1 if kpis is not None else 0)
+    used += max(len(sections) - 1, 0)
     pad = max(0, min_lines - used)
     if pad:
         header.append(Text("\n".join([" "] * pad)))
