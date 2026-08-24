@@ -320,7 +320,7 @@ def test_session_notes_stay_inside_snapshot() -> None:
     assert any("close pending AAPL: late print" in text for text in texts)
 
 
-def test_iv_and_close_share_the_progress_line() -> None:
+def test_session_date_sits_on_the_title_line() -> None:
     pos = Position(
         occ_symbol="AAPL261120C00350000",
         underlying="AAPL",
@@ -354,13 +354,17 @@ def test_iv_and_close_share_the_progress_line() -> None:
         continuous=True,
         framed=False,
     )
-    meta = group.renderables[1]
-    assert "alpaca" not in meta.plain
-    assert "refresh" not in meta.plain
-    assert "UTC" not in meta.plain
-    assert "IV 8/14" in meta.plain
-    assert "close 8/14" in meta.plain
-    assert meta.plain.count("\n") == 0
+    title = group.renderables[0]
+    assert "[main]" in title.plain
+    assert "optionda" in title.plain
+    assert "8/14" in title.plain
+    assert "IV 8/14" not in title.plain
+    assert "close 8/14" not in title.plain
+    body = " ".join(
+        item.plain for item in group.renderables[1:] if hasattr(item, "plain")
+    )
+    assert "IV 8/14" not in body
+    assert "close 8/14" not in body
 
 
 def test_unframed_snapshot_keeps_title_on_first_line() -> None:
@@ -502,8 +506,18 @@ def test_desk_splits_today_up_then_down() -> None:
         framed=False,
     )
     labels = [item.plain for item in group.renderables if hasattr(item, "plain")]
-    assert any("today +" in text for text in labels)
-    assert any("today −" in text or "today -" in text for text in labels)
+    plus_line = next(text for text in labels if "today +" in text)
+    minus_line = next(
+        text for text in labels if "today −" in text or "today -" in text
+    )
+    assert "+300.00" in plus_line
+    assert "-300.00" in minus_line
+    plus_at = next(i for i, text in enumerate(labels) if "today +" in text)
+    minus_at = next(
+        i for i, text in enumerate(labels) if "today −" in text or "today -" in text
+    )
+    assert plus_at > 0 and labels[plus_at - 1] == ""
+    assert minus_at > 0 and labels[minus_at - 1] == ""
     tables = [item for item in group.renderables if getattr(item, "columns", None)]
     assert len(tables) == 2
     up_occs = [cell.plain for cell in tables[0].columns[0].cells]

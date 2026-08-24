@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "optionda"
 # SemVer 1.MINOR.PATCH. PATCH is 0–10 only; after 1.1.10 the next release is 1.2.0.
-version = "1.1.1"
+version = "1.1.2"
 description = "Terminal options desk: freeze IV, reprice on live spot (Yahoo or Alpaca)."
 readme = "README.md"
 license = { text = "MIT" }

@@ -157,24 +157,24 @@ def _session_status_line(rows: list[RowMark]) -> Text | None:
     }
     pending = any(row.iv_stale for row in rows)
     fallback = any(row.iv_fallback for row in rows)
-    parts: list[str] = []
-    if pending or fallback:
+    warn = pending or fallback
+    if warn:
         used = next(iter(sorted(iv_dates)), None)
         if used is not None:
-            parts.append(f"IV pending, using {_date_label(used)}")
+            text = f"IV pending {_date_label(used)}"
         elif fallback:
-            parts.append("IV fallback")
+            text = "IV fallback"
         else:
-            parts.append("IV pending")
-    elif iv_dates:
-        label = "/".join(_date_label(item) or "" for item in sorted(iv_dates))
-        parts.append(f"IV {label}")
-    if close_dates:
-        label = "/".join(_date_label(item) or "" for item in sorted(close_dates))
-        parts.append(f"close {label}")
-    if not parts:
+            text = "IV pending"
+        return Text(text, style="bold yellow")
+    iv_label = "/".join(_date_label(item) or "" for item in sorted(iv_dates))
+    close_label = "/".join(_date_label(item) or "" for item in sorted(close_dates))
+    if iv_label and close_label and iv_label != close_label:
+        return Text(f"IV {iv_label} · close {close_label}", style=_MUTED)
+    label = iv_label or close_label
+    if not label:
         return None
-    return Text("  ·  ".join(parts), style="bold yellow" if pending or fallback else _MUTED)
+    return Text(label, style=_MUTED)
 
 
 FlashPhase = str  # "hot" | "warm" | "idle"
@@ -551,6 +551,26 @@ def sort_desk_rows(rows: list[RowMark]) -> list[RowMark]:
     return sorted(rows, key=key)
 
 
+def group_today_total(rows: list[RowMark]) -> float | None:
+    total = 0.0
+    found = False
+    for row in rows:
+        day = today_model_pnl(row)
+        if day is None:
+            continue
+        total += day
+        found = True
+    return total if found else None
+
+
+def _section_label(title: str, style: str, total: float | None) -> Text:
+    line = Text(title, style=style)
+    if total is not None:
+        line.append("    ")
+        line.append_text(_pnl_text(total))
+    return line
+
+
 def partition_desk_rows(rows: list[RowMark]) -> tuple[list[RowMark], list[RowMark]]:
     """Today-up first, today-down second; each group keeps position sort."""
     up: list[RowMark] = []
@@ -822,7 +842,10 @@ def render_snapshot(
     else:
         if up_rows:
             if both:
-                sections.append(Text("today +", style="bold green"))
+                sections.append(Text(""))
+            sections.append(
+                _section_label("today +", "bold green", group_today_total(up_rows))
+            )
             sections.append(
                 _position_table(
                     up_rows,
@@ -837,7 +860,10 @@ def render_snapshot(
             )
         if down_rows:
             if both:
-                sections.append(Text("today −", style="bold red"))
+                sections.append(Text(""))
+            sections.append(
+                _section_label("today −", "bold red", group_today_total(down_rows))
+            )
             sections.append(
                 _position_table(
                     down_rows,
@@ -852,11 +878,14 @@ def render_snapshot(
             )
 
     border = _border_style(continuous=continuous, phase=phase, poll_busy=poll_busy)
+    status = _session_status_line(rows)
     title = Text.assemble(
         (f"[{account}]", "bold cyan"),
         ("  optionda", "bold bright_white"),
     )
-    status = _session_status_line(rows)
+    if status is not None and status.plain.strip():
+        title.append("  ·  ", style=_MUTED)
+        title.append_text(status)
     header: list = []
     meta = _meta_line(
         feed=feed,
@@ -872,7 +901,7 @@ def render_snapshot(
         bar_width=bar_width,
         header_bar=header_bar,
         spin=spin,
-        session=status,
+        session=None,
     )
     if meta is not None:
         header.append(meta)
