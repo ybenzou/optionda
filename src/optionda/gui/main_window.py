@@ -51,6 +51,11 @@ class TermPage:
         self.title = title
         self.desk: _DeskWorker | None = None
         self.add: _AddWorker | None = None
+        self.revealed = False
+        self.revealing = False
+        self.reveal_steps: list = []
+        self.reveal_index = 0
+        self.desk_finished = False
 
 
 class _ShellWorker(QThread):
@@ -229,16 +234,18 @@ class MainWindow(QMainWindow):
         self._spin_timer = QTimer(self)
         self._spin_timer.setInterval(80)
         self._spin_timer.timeout.connect(self._tick_spinner)
+        self._reveal_timer = QTimer(self)
+        self._reveal_timer.timeout.connect(self._on_reveal_tick)
         self.setWindowTitle("optionda")
         self.setWindowIcon(app_icon())
         self.resize(1280, 800)
         self.setMinimumSize(860, 560)
 
-        self.stats = StatsView(self.account or "optionda", home, period=period)
+        self._stats: StatsView | None = None
+        self._stats_period: Period = period
         self._terms = QStackedWidget()
         self._stack = QStackedWidget()
         self._stack.addWidget(self._terms)
-        self._stack.addWidget(self.stats)
         self.setCentralWidget(self._stack)
 
         bar = QWidget()
@@ -309,7 +316,6 @@ class MainWindow(QMainWindow):
         self._bind_keys()
         self._sync_prompt()
         self.show_view("stats" if initial_view in {"stats", "desk"} else "term")
-        self.stats.calendar.day_changed.connect(lambda _day: self._sync_stats_chrome())
 
     @property
     def terminal(self) -> TerminalView:
@@ -454,28 +460,49 @@ class MainWindow(QMainWindow):
     def _set_stats_chrome(self, visible: bool) -> None:
         self._reload_btn.setVisible(visible)
 
+    def _ensure_stats(self) -> StatsView:
+        if self._stats is None:
+            self._stats = StatsView(
+                self.account or "optionda",
+                self.home,
+                period=self._stats_period,
+            )
+            self._stack.addWidget(self._stats)
+            self._stats.calendar.day_changed.connect(
+                lambda _day: self._sync_stats_chrome()
+            )
+        return self._stats
+
+    @property
+    def stats(self) -> StatsView:
+        return self._ensure_stats()
+
     def show_view(self, view: View) -> None:
         if view in {"stats", "desk"}:
-            if self.account and self.stats.account != self.account:
-                self.stats.account = self.account
-                self.stats.reload()
-            self._stack.setCurrentWidget(self.stats)
+            stats = self._ensure_stats()
+            if self.account and stats.account != self.account:
+                stats.account = self.account
+                stats.reload()
+            self._stack.setCurrentWidget(stats)
             self._set_stats_chrome(True)
             self._sync_stats_chrome()
-            QTimer.singleShot(0, self.stats.refresh_visible)
+            QTimer.singleShot(0, stats.refresh_visible)
         else:
             self._stack.setCurrentWidget(self._terms)
             self._set_stats_chrome(False)
         self._input.setFocus()
 
     def set_period(self, period: Period) -> None:
-        self.stats.set_period(period)
+        self._stats_period = period
+        if self._stats is not None:
+            self._stats.set_period(period)
         self._sync_stats_chrome()
 
     def reload(self) -> None:
+        stats = self._ensure_stats()
         if self.account:
-            self.stats.account = self.account
-        self.stats.reload()
+            stats.account = self.account
+        stats.reload()
         self._sync_stats_chrome()
 
     def _recall(self, step: int) -> None:
@@ -578,9 +605,30 @@ class MainWindow(QMainWindow):
             return
         self.show_view("term")
         self.terminal.prepare_live()
+        from optionda.display.table import format_load_progress, spinner_frame
+
+        page = self._page()
+        self._reset_reveal(page)
+        self.terminal.set_live_chrome(
+            {
+                "poll_busy": True,
+                "poll_label": "updating…",
+                "poll_done": 0,
+                "poll_total": 1,
+                "page": True,
+                "explain": True,
+                "spin": spinner_frame(0),
+                "text": format_load_progress(
+                    spin=spinner_frame(0),
+                    label="updating…",
+                    done=0,
+                    total=1,
+                ),
+            },
+            keep_table=False,
+        )
         QApplication.processEvents()
         cols, rows = self.terminal.char_size()
-        page = self._page()
         page.desk = _DeskWorker(self.home, mode, cols, rows)
         self._filling = False
         page.desk.frame.connect(lambda markup, p=page: self._on_desk_frame(markup, p))
@@ -588,6 +636,7 @@ class MainWindow(QMainWindow):
         page.desk.failed.connect(lambda message, p=page: self._on_desk_failed(message, p))
         page.desk.finished_ok.connect(lambda p=page: self._on_desk_done(p))
         page.desk.start()
+        self._sync_spin_timer()
 
     def _start_add(self, line: str) -> None:
         if not self.account:
@@ -629,6 +678,11 @@ class MainWindow(QMainWindow):
             return
         if page.desk is None or page.desk.stopping():
             return
+        if not page.revealed and not page.revealing:
+            if self._start_reveal(page):
+                return
+        if page.revealing:
+            return
         page.terminal.set_live_html(markup)
         self._sync_spin_timer()
 
@@ -638,7 +692,76 @@ class MainWindow(QMainWindow):
             return
         if page.desk is None or page.desk.stopping():
             return
+        if page.revealing or page.revealed:
+            if payload.get("page"):
+                return
         page.terminal.set_live_chrome(payload)
+        self._sync_spin_timer()
+
+    def _reset_reveal(self, page: TermPage) -> None:
+        page.revealed = False
+        page.revealing = False
+        page.reveal_steps = []
+        page.reveal_index = 0
+        page.desk_finished = False
+        if not any(item.revealing for item in self._pages):
+            self._reveal_timer.stop()
+
+    def _start_reveal(self, page: TermPage) -> bool:
+        from optionda.display.table import reveal_interval_ms, reveal_steps
+
+        runner = None if page.desk is None else page.desk.runner
+        if runner is None or not getattr(runner, "last_view", None):
+            return False
+        rows = runner.last_view.get("rows") or []
+        if not rows:
+            return False
+        page.reveal_steps = reveal_steps(len(rows))
+        page.reveal_index = 0
+        page.revealing = True
+        page.revealed = False
+        self._reveal_timer.setInterval(reveal_interval_ms(len(page.reveal_steps)))
+        if not self._reveal_timer.isActive():
+            self._reveal_timer.start()
+        self._tick_reveal(page)
+        return True
+
+    def _on_reveal_tick(self) -> None:
+        active = False
+        for page in self._pages:
+            if page.revealing:
+                self._tick_reveal(page)
+                active = active or page.revealing
+        if not active:
+            self._reveal_timer.stop()
+
+    def _tick_reveal(self, page: TermPage) -> None:
+        if page.desk is None or page.desk.stopping() or page.desk.runner is None:
+            self._finish_reveal(page, settle=False)
+            return
+        if page.reveal_index >= len(page.reveal_steps):
+            self._finish_reveal(page, settle=True)
+            return
+        reveal = page.reveal_steps[page.reveal_index]
+        page.reveal_index += 1
+        html = page.desk.runner.html_at(page.desk.cols, page.desk.rows, reveal=reveal)
+        if html:
+            page.terminal.set_live_html(html)
+        if page.reveal_index >= len(page.reveal_steps):
+            self._finish_reveal(page, settle=True)
+
+    def _finish_reveal(self, page: TermPage, *, settle: bool) -> None:
+        page.revealing = False
+        page.revealed = settle
+        if settle and page.desk is not None and page.desk.runner is not None:
+            html = page.desk.runner.html_at(page.desk.cols, page.desk.rows)
+            if html:
+                page.terminal.set_live_html(html)
+        if not any(item.revealing for item in self._pages):
+            self._reveal_timer.stop()
+        if page.desk_finished:
+            page.desk = None
+            page.desk_finished = False
         self._sync_spin_timer()
 
     def _on_add_chrome(self, payload: object, page: TermPage | None = None) -> None:
@@ -659,6 +782,15 @@ class MainWindow(QMainWindow):
                 continue
             runner = None if page.desk is None else page.desk.runner
             if runner is not None and runner.last_view and runner.last_view.get("poll_busy"):
+                busy = True
+                break
+            if (
+                page.desk is not None
+                and not page.revealing
+                and not page.revealed
+                and getattr(page.desk, "isRunning", lambda: False)()
+                and page.terminal.chrome_busy()
+            ):
                 busy = True
                 break
             if page.add is not None and page.add.isRunning() and page.terminal.chrome_busy():
@@ -682,11 +814,22 @@ class MainWindow(QMainWindow):
             if page.desk is not None and page.desk.runner is not None:
                 result = page.desk.runner.bump_spin()
                 if isinstance(result, dict):
-                    page.terminal.set_live_chrome(result)
+                    if not page.revealing:
+                        page.terminal.set_live_chrome(result)
                     busy = True
                     continue
                 if isinstance(result, str):
-                    page.terminal.set_live_html(result)
+                    if not page.revealing:
+                        page.terminal.set_live_html(result)
+                    busy = True
+                    continue
+            if (
+                page.desk is not None
+                and not page.revealing
+                and not page.revealed
+                and page.terminal.chrome_busy()
+            ):
+                if page.terminal.bump_live_spin():
                     busy = True
                     continue
             if page.add is not None and page.add.isRunning():
@@ -705,7 +848,11 @@ class MainWindow(QMainWindow):
         runner = page.desk.runner
         if runner is None:
             return
-        html = runner.html_at(cols, rows)
+        reveal = None
+        if page.revealing and page.reveal_steps:
+            index = min(max(page.reveal_index - 1, 0), len(page.reveal_steps) - 1)
+            reveal = page.reveal_steps[index]
+        html = runner.html_at(cols, rows, reveal=reveal)
         if html:
             page.terminal.set_live_html(html)
 
@@ -715,10 +862,13 @@ class MainWindow(QMainWindow):
 
     def _request_stop(self, worker) -> None:
         worker.request_stop()
+        page = self._page_for_worker(worker) or self._page()
+        self._reset_reveal(page)
         self.terminal.begin_turn(f"{self._prompt_plain()} stop")
         self._set_tab_title(self.current_tab(), "stop")
         self.terminal.clear_live()
         self._spin_timer.stop()
+        self._reveal_timer.stop()
         self._input.clear()
 
     def _interrupt(self) -> None:
@@ -745,6 +895,7 @@ class MainWindow(QMainWindow):
     def _on_desk_failed(self, message: str, page: TermPage | None = None) -> None:
         page = page or self._page()
         self._spin_timer.stop()
+        self._reset_reveal(page)
         if message:
             page.terminal.append_block(message)
         page.desk = None
@@ -754,10 +905,18 @@ class MainWindow(QMainWindow):
         page = page or self._page()
         self._spin_timer.stop()
         stopped = page.desk is not None and page.desk.stopping()
-        page.desk = None
         if stopped:
+            self._reset_reveal(page)
+            page.desk = None
             page.terminal.clear_live()
             page.terminal.append_block("stopped")
+            self._input.setFocus()
+            return
+        if page.revealing:
+            page.desk_finished = True
+            self._input.setFocus()
+            return
+        page.desk = None
         self._input.setFocus()
 
     def _on_add_failed(self, message: str, page: TermPage | None = None) -> None:
@@ -812,7 +971,9 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self._spin_timer.stop()
+        self._reveal_timer.stop()
         for page in self._pages:
+            self._reset_reveal(page)
             self._stop_page(page)
         super().closeEvent(event)
 
@@ -827,5 +988,5 @@ class MainWindow(QMainWindow):
             page.desk.rows = rows
             self._resizing = True
             self._desk_resize.start()
-        if self._stack.currentWidget() is self.stats:
-            self.stats.apply_layout(self.width(), self.height())
+        if self._stats is not None and self._stack.currentWidget() is self._stats:
+            self._stats.apply_layout(self.width(), self.height())

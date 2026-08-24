@@ -9,7 +9,7 @@ from PySide6.QtGui import QColor, QFont, QPainter, QPen, QTextCursor, QTextDocum
 from PySide6.QtWidgets import QLabel, QSizePolicy, QTextEdit, QVBoxLayout, QWidget
 
 from optionda.gui.richview import wrap_desk_html
-from optionda.gui.splash import MARK, WORD
+from optionda.gui.splash import WORD, mark_html
 from optionda.gui.theme import CYAN, MUTED, PROMPT, mono_font
 
 
@@ -75,15 +75,26 @@ def measure_html_cell(font: QFont) -> tuple[float, float]:
     return max(advance, 4.0), max(line, 10.0)
 
 
-def _splash_label(text: str, name: str, color: str) -> QLabel:
-    label = QLabel(text)
+def _splash_label(
+    text: str,
+    name: str,
+    color: str,
+    *,
+    rich: bool = False,
+) -> QLabel:
+    label = QLabel()
     label.setObjectName(name)
     label.setFont(mono_font(11))
     label.setAlignment(Qt.AlignmentFlag.AlignLeft)
     label.setWordWrap(False)
-    label.setTextFormat(Qt.TextFormat.PlainText)
-    label.setStyleSheet(f"color: {color}; background: transparent;")
     label.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
+    if rich:
+        label.setTextFormat(Qt.TextFormat.RichText)
+        label.setStyleSheet("background: transparent;")
+    else:
+        label.setTextFormat(Qt.TextFormat.PlainText)
+        label.setStyleSheet(f"color: {color}; background: transparent;")
+    label.setText(text)
     return label
 
 
@@ -109,9 +120,21 @@ class TerminalView(QWidget):
         splash_l = QVBoxLayout(self._splash)
         splash_l.setContentsMargins(16, 16, 16, 16)
         splash_l.setSpacing(18)
-        splash_l.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        splash_l.addWidget(_splash_label(MARK, "splashMark", MUTED))
-        splash_l.addWidget(_splash_label(WORD, "splashWord", CYAN))
+        mark = _splash_label(mark_html(), "splashMark", MUTED, rich=True)
+        word = _splash_label(WORD, "splashWord", CYAN)
+        upper = QWidget()
+        upper.setObjectName("splashLockup")
+        upper_l = QVBoxLayout(upper)
+        upper_l.setContentsMargins(0, 0, 0, 0)
+        upper_l.addStretch(1)
+        upper_l.addWidget(mark, 0, Qt.AlignmentFlag.AlignHCenter)
+        lower = QWidget()
+        lower_l = QVBoxLayout(lower)
+        lower_l.setContentsMargins(0, 0, 0, 0)
+        lower_l.addWidget(word, 0, Qt.AlignmentFlag.AlignHCenter)
+        lower_l.addStretch(1)
+        splash_l.addWidget(upper, 1)
+        splash_l.addWidget(lower, 1)
         self._splash.setVisible(splash)
         self._chrome: dict = {}
         self._cell: tuple[float, float] | None = None
@@ -215,6 +238,10 @@ class TerminalView(QWidget):
             if wrap
             else QTextEdit.LineWrapMode.NoWrap
         )
+        if not wrap:
+            self._chrome = {}
+            self._status.clear()
+            self._status.hide()
         self.live.setHtml(markup)
         if self.desk.isHidden():
             self.desk.show()
@@ -270,8 +297,15 @@ class TerminalView(QWidget):
         self._chrome["spin"] = spinner_frame(tick)
         page = bool(self._chrome.get("page")) or "\n" in str(self._chrome.get("text") or "")
         if page:
+            from optionda.display.table import format_load_progress
+
             self._chrome["page"] = True
-            self._chrome["text"] = format_add_progress(
+            formatter = (
+                format_load_progress
+                if self._chrome.get("explain")
+                else format_add_progress
+            )
+            self._chrome["text"] = formatter(
                 spin=self._chrome["spin"],
                 label=self._chrome.get("poll_label"),
                 done=self._chrome.get("poll_done"),

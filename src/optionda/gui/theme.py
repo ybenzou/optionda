@@ -269,7 +269,6 @@ QWidget#splash {{
 }}
 QLabel#splashMark {{
     background: transparent;
-    color: {MUTED};
     font-size: 11pt;
 }}
 QLabel#splashWord {{

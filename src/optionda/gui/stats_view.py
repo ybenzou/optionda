@@ -38,7 +38,6 @@ class StatsView(QWidget):
         self.account = account
         self.home = home
         self.period: Period = period
-        self.report: StatsReport = self._load()
 
         self.kpi = KpiBar()
         self.chart = PerformanceChart()

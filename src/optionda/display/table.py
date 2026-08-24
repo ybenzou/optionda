@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -317,6 +319,107 @@ def format_add_progress(
     return f"{mark}  {finished}/{steps}\n{bar}\n\n{title}"
 
 
+@dataclass(frozen=True)
+class DeskReveal:
+    """How much of the first desk paint is visible."""
+
+    visible: int
+    footer: bool = False
+
+
+_TICKER = re.compile(r"\b([A-Z]{1,6})(?:\d{6}[CP]\d{8})?\b")
+_CHAIN_TICKER = re.compile(r"\b([A-Z]{1,6})\s+chain")
+
+
+def _progress_tickers(label: str) -> str:
+    chain = _CHAIN_TICKER.findall(label)
+    if chain:
+        return " ".join(dict.fromkeys(chain))
+    skip = {
+        "FETCH",
+        "CHAIN",
+        "MARK",
+        "LIVE",
+        "DONE",
+        "CLOCK",
+        "DAILY",
+        "CLOSE",
+        "SESSION",
+        "READY",
+        "SPOTS",
+        "WRITING",
+        "UPDATING",
+        "CALENDAR",
+        "OK",
+        "SKIP",
+        "IV",
+    }
+    found: list[str] = []
+    for token in _TICKER.findall(label.upper()):
+        if token in skip or token.isdigit():
+            continue
+        if token not in found:
+            found.append(token)
+    return " ".join(found)
+
+
+def explain_progress(label: str | None) -> str:
+    """One English line for the current fetch/mark step."""
+    text = (label or "").strip()
+    low = text.lower()
+    if "writing" in low:
+        hint = "Saving the book snapshot."
+    elif re.search(r"\bmark\b", low):
+        hint = "Pricing each open position."
+    elif "chain" in low:
+        hint = "Calibrating IV surfaces from option chains."
+    elif "spot" in low:
+        hint = "Fetching live underlying spots."
+    elif "clock" in low or "calendar" in low:
+        hint = "Reading the market clock and session calendar."
+    elif "session" in low or "daily close" in low:
+        hint = "Syncing the last completed US session and official closes."
+    else:
+        hint = "Getting the latest marks."
+    extra = _progress_tickers(text)
+    if extra and extra not in hint:
+        if "spot" in low or "chain" in low or "daily close" in low:
+            return f"{hint}  {extra}"
+    return hint
+
+
+def format_load_progress(
+    *,
+    spin: str | None = None,
+    label: str | None = None,
+    done: int | None = None,
+    total: int | None = None,
+    bar_width: int = 32,
+) -> str:
+    """First-load desk progress: bar plus an English hint."""
+    return format_add_progress(
+        spin=spin,
+        label=explain_progress(label),
+        done=done,
+        total=total,
+        bar_width=bar_width,
+    )
+
+
+def reveal_steps(n_rows: int) -> list[DeskReveal]:
+    count = max(int(n_rows), 0)
+    steps = [DeskReveal(visible=0, footer=False)]
+    for shown in range(1, count + 1):
+        steps.append(DeskReveal(visible=shown, footer=False))
+    steps.append(DeskReveal(visible=count, footer=True))
+    return steps
+
+
+def reveal_interval_ms(n_frames: int) -> int:
+    frames = max(int(n_frames), 1)
+    return max(12, min(40, 1000 // frames))
+
+
 def format_chrome_plain(
     *,
     spin: str | None = None,
@@ -605,6 +708,7 @@ def _position_table(
     show_footer: bool,
     model_footer: Text,
     upnl_footer: Text,
+    placeholder: bool = True,
 ) -> Table:
     table = Table(
         show_header=True,
@@ -670,18 +774,19 @@ def _position_table(
     )
 
     if not rows:
-        table.add_row(
-            Text("(no positions)", style=_MUTED),
-            "",
-            "",
-            "",
-            "",
-            "",
-            "",
-            "",
-            "",
-            "",
-        )
+        if placeholder:
+            table.add_row(
+                Text("(no positions)", style=_MUTED),
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+            )
         return table
 
     for row in rows:
@@ -776,9 +881,20 @@ def render_snapshot(
     header_bar: bool = True,
     notes: list[str] | None = None,
     framed: bool = True,
+    reveal: DeskReveal | None = None,
 ) -> Group:
     """Single framed desk: meta + positions + column-aligned totals."""
-    up_rows, down_rows = partition_desk_rows(rows)
+    up_all, down_all = partition_desk_rows(rows)
+    if reveal is None:
+        up_rows, down_rows = up_all, down_all
+        show_kpis = True
+        placeholder = True
+    else:
+        shown = max(int(reveal.visible), 0)
+        up_rows = up_all[:shown]
+        down_rows = down_all[: max(shown - len(up_all), 0)]
+        show_kpis = bool(reveal.footer)
+        placeholder = False
     prev_s = prev_spots or {}
     prev_t = prev_theos or {}
     prev_n = prev_notionals or {}
@@ -834,9 +950,10 @@ def render_snapshot(
                 prev_theos=prev_t,
                 prev_upnls=prev_u,
                 phase=phase,
-                show_footer=True,
+                show_footer=show_kpis,
                 model_footer=model_footer,
                 upnl_footer=upnl_footer,
+                placeholder=placeholder,
             )
         )
     else:
@@ -853,9 +970,10 @@ def render_snapshot(
                     prev_theos=prev_t,
                     prev_upnls=prev_u,
                     phase=phase,
-                    show_footer=not both,
+                    show_footer=show_kpis and not both,
                     model_footer=model_footer,
                     upnl_footer=upnl_footer,
+                    placeholder=placeholder,
                 )
             )
         if down_rows:
@@ -871,9 +989,10 @@ def render_snapshot(
                     prev_theos=prev_t,
                     prev_upnls=prev_u,
                     phase=phase,
-                    show_footer=True,
+                    show_footer=show_kpis,
                     model_footer=model_footer,
                     upnl_footer=upnl_footer,
+                    placeholder=placeholder,
                 )
             )
 
@@ -910,10 +1029,12 @@ def render_snapshot(
         for note in notes or []
         if _desk_note_visible(note)
     ]
+    if not show_kpis:
+        shown_notes = []
     for note in shown_notes:
         header.append(Text(note, style=_MUTED))
     header.extend(sections)
-    if kpis is not None:
+    if kpis is not None and show_kpis:
         header.append(kpis)
     if not framed:
         return Group(title, *header)

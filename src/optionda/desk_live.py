@@ -149,25 +149,38 @@ class DeskRunner:
         return float(self._realized or 0.0)
 
     def _chrome_from(self, view: dict[str, Any]) -> dict[str, Any]:
-        from optionda.display.table import format_chrome_plain
+        from optionda.display.table import format_chrome_plain, format_load_progress
 
-        return {
+        rows = view.get("rows") or []
+        busy = bool(view.get("poll_busy", False))
+        payload = {
             "spin": view.get("spin"),
             "poll_label": view.get("poll_label"),
-            "poll_busy": view.get("poll_busy", False),
+            "poll_busy": busy,
             "poll_done": view.get("poll_done"),
             "poll_total": view.get("poll_total"),
             "poll_fraction": view.get("poll_fraction", 0.0),
             "eta": view.get("eta"),
-            "text": format_chrome_plain(
-                spin=view.get("spin"),
-                poll_label=view.get("poll_label"),
-                poll_busy=view.get("poll_busy", False),
-                poll_done=view.get("poll_done"),
-                poll_total=view.get("poll_total"),
-                eta_sec=view.get("eta"),
-            ),
         }
+        if busy and not rows:
+            payload["page"] = True
+            payload["explain"] = True
+            payload["text"] = format_load_progress(
+                spin=view.get("spin"),
+                label=view.get("poll_label"),
+                done=view.get("poll_done"),
+                total=view.get("poll_total"),
+            )
+            return payload
+        payload["text"] = format_chrome_plain(
+            spin=view.get("spin"),
+            poll_label=view.get("poll_label"),
+            poll_busy=busy,
+            poll_done=view.get("poll_done"),
+            poll_total=view.get("poll_total"),
+            eta_sec=view.get("eta"),
+        )
+        return payload
 
     def _update_view(self, **fields: Any) -> dict[str, Any]:
         with self._view_lock:
@@ -186,7 +199,7 @@ class DeskRunner:
                 view = dict(self.last_view) if self.last_view else {}
         self.on_chrome(self._chrome_from(view))
 
-    def _snapshot(self, view: dict[str, Any]):
+    def _snapshot(self, view: dict[str, Any], reveal=None):
         acc = view["acc"]
         router = view["router"]
         realized = self._realized_value(acc.name)
@@ -214,6 +227,7 @@ class DeskRunner:
             header_bar=False,
             notes=list(self.notes),
             framed=self.framed,
+            reveal=reveal,
         )
 
     def _next_spin(self) -> str:
@@ -236,7 +250,7 @@ class DeskRunner:
 
         return renderable_html(self._snapshot(view), self.cols)
 
-    def html_at(self, cols: int, rows: int) -> str | None:
+    def html_at(self, cols: int, rows: int, reveal=None) -> str | None:
         from optionda.gui.richview import renderable_html
 
         self.cols = cols
@@ -245,7 +259,7 @@ class DeskRunner:
             if self.last_view is None:
                 return None
             view = dict(self.last_view)
-        return renderable_html(self._snapshot(view), cols)
+        return renderable_html(self._snapshot(view, reveal=reveal), cols)
 
     def _panel(
         self,
@@ -294,6 +308,15 @@ class DeskRunner:
         **fields: Any,
     ) -> None:
         self._check()
+        if self.on_chrome is not None and not rows:
+            view = self._update_view(
+                acc=acc,
+                router=router,
+                rows=rows,
+                **fields,
+            )
+            self._push_chrome(view)
+            return
         if self.on_chrome is None or full or self.last_view is None:
             self.paint(self._panel(acc, router, rows, **fields))
             self._push_chrome()

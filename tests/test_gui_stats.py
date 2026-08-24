@@ -295,6 +295,78 @@ def test_add_progress_fills_live_pane(tmp_path, qtbot) -> None:
     assert not view._status.isVisible()
 
 
+def test_desk_table_paint_stops_page_progress_spin(qtbot) -> None:
+    from optionda.display.table import format_load_progress
+    from optionda.gui.richview import wrap_desk_html
+    from optionda.gui.terminal_view import TerminalView
+
+    view = TerminalView()
+    qtbot.addWidget(view)
+    view.resize(900, 600)
+    view.show()
+    view.set_live_chrome(
+        {
+            "poll_busy": True,
+            "poll_label": "updating…",
+            "poll_done": 1,
+            "poll_total": 1,
+            "page": True,
+            "explain": True,
+            "text": format_load_progress(
+                spin="⠋",
+                label="updating…",
+                done=1,
+                total=1,
+            ),
+        },
+        keep_table=False,
+    )
+    assert "Getting the latest marks." in view.live.toPlainText()
+    view.set_live_html(wrap_desk_html("AVGO261218C00500000"), wrap=False)
+    assert view.chrome_busy() is False
+    assert view.bump_live_spin() is False
+    live = view.live.toPlainText()
+    assert "AVGO261218C00500000" in live
+    assert "Getting the latest marks." not in live
+
+
+def test_term_start_does_not_build_stats(tmp_path, qtbot, monkeypatch) -> None:
+    from optionda.gui.main_window import MainWindow
+
+    calls = {"n": 0}
+
+    def boom(*_args, **_kwargs):
+        calls["n"] += 1
+        raise AssertionError("build_report should not run on term start")
+
+    monkeypatch.setattr("optionda.gui.stats_view.build_report", boom)
+    _journal(tmp_path)
+    window = MainWindow("demo", tmp_path, period="all", initial_view="term")
+    qtbot.addWidget(window)
+    window.show()
+    assert calls["n"] == 0
+    assert window._stats is None
+
+
+def test_stats_view_reads_journal_once(tmp_path, qtbot, monkeypatch) -> None:
+    from optionda.analytics import build_report
+    from optionda.gui.stats_view import StatsView
+
+    calls = {"n": 0}
+    real = build_report
+
+    def wrapped(*args, **kwargs):
+        calls["n"] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr("optionda.gui.stats_view.build_report", wrapped)
+    _journal(tmp_path)
+    view = StatsView("demo", tmp_path, period="all")
+    qtbot.addWidget(view)
+    assert calls["n"] == 1
+    assert view.report.n_closed >= 1
+
+
 def test_run_foreground_claims_identity_before_qt() -> None:
     import inspect
 
@@ -585,6 +657,46 @@ def test_main_window_shortcuts(tmp_path, qtbot) -> None:
     window.stats.apply_layout(1280, 800)
 
 
+def test_splash_mark_html_paints_up_green_down_red() -> None:
+    from optionda.gui.splash import MARK, mark_html
+    from optionda.gui.theme import GREEN, RED
+
+    html = mark_html(MARK)
+    assert GREEN in html
+    assert RED in html
+    assert f'<span style="color:{GREEN}">/</span>' in html or f'color:{GREEN}' in html
+    assert "\\" in html
+    assert html.count(GREEN) >= 1
+    assert "/\\" not in html.replace("\\", "")
+    # A rising run is green, a falling run is red.
+    assert f'style="color:{GREEN}">' in html
+    assert f'style="color:{RED}">' in html
+    assert mark_html("/\\") == (
+        f'<pre style="margin:0">'
+        f'<span style="color:{GREEN}">/</span>'
+        f'<span style="color:{RED}">\\</span>'
+        f"</pre>"
+    )
+
+
+def test_splash_mark_is_rising_path() -> None:
+    from optionda.gui.splash import MARK, WORD
+
+    mark_lines = MARK.splitlines()
+    word_lines = WORD.splitlines()
+    ink = [line.rstrip() for line in mark_lines if line.strip()]
+    assert 10 <= len(ink) <= 14
+    assert "\\" in MARK
+    assert ink[0].endswith("/")
+    assert ink[-1].lstrip().startswith("/")
+    assert len(ink[0]) > len(ink[-1])
+    assert "////////" not in ink[-1]
+    assert "////" in WORD
+    mark_w = max(len(line.rstrip()) for line in mark_lines)
+    word_w = max(len(line.rstrip()) for line in word_lines)
+    assert mark_w == word_w
+
+
 def test_first_page_shows_slash_splash(tmp_path, qtbot) -> None:
     from PySide6.QtWidgets import QLabel
 
@@ -598,13 +710,23 @@ def test_first_page_shows_slash_splash(tmp_path, qtbot) -> None:
     _journal(tmp_path)
     window = MainWindow("demo", tmp_path, period="all", initial_view="term")
     qtbot.addWidget(window)
+    window.resize(1280, 800)
     window.show()
+    qtbot.waitExposed(window)
     first = window.terminal
     assert first.splash_visible()
     mark = first._splash.findChild(QLabel, "splashMark")
     word = first._splash.findChild(QLabel, "splashWord")
     assert mark is not None and "////" in mark.text()
     assert word is not None and "////" in word.text()
+    assert mark.sizeHint().width() == word.sizeHint().width()
+    splash = first._splash
+    splash_mid = splash.rect().center().y()
+    mark_bottom = mark.mapTo(splash, mark.rect().bottomLeft()).y()
+    word_top = word.mapTo(splash, word.rect().topLeft()).y()
+    gap_mid = (mark_bottom + word_top) / 2
+    assert mark_bottom < splash_mid < word_top
+    assert abs(gap_mid - splash_mid) <= 24
 
     window.add_tab()
     assert not window.terminal.splash_visible()
@@ -695,3 +817,128 @@ def test_plus_keeps_other_pages(tmp_path, qtbot) -> None:
     assert window.tab_count() == 1
     window.close_tab(0)
     assert window.tab_count() == 1
+
+
+def test_start_desk_shows_english_progress_immediately(tmp_path, qtbot, monkeypatch) -> None:
+    from optionda.gui.main_window import MainWindow
+
+    monkeypatch.setattr(
+        "optionda.gui.main_window._DeskWorker.start",
+        lambda self: None,
+    )
+    _journal(tmp_path)
+    window = MainWindow("demo", tmp_path, period="all", initial_view="term")
+    qtbot.addWidget(window)
+    window.resize(900, 600)
+    window.show()
+    window.terminal.begin_turn("PS demo> [optionda] export")
+    window._start_desk("export")
+    live = window.terminal.live.toPlainText()
+    assert "Getting the latest marks." in live
+    assert "0/1" in live
+    assert "(no positions)" not in live
+    assert window.terminal.desk.isVisible()
+
+
+def test_first_desk_frame_reveals_rows_in_order(tmp_path, qtbot) -> None:
+    from datetime import date, datetime, timezone
+    from types import SimpleNamespace
+
+    from optionda.display.table import DeskReveal, reveal_steps
+    from optionda.gui.main_window import MainWindow
+    from optionda.gui.richview import renderable_html
+    from optionda.models import Position, RowMark
+
+    def make_row(occ: str, *, up: bool) -> RowMark:
+        return RowMark(
+            position=Position(
+                occ_symbol=occ,
+                underlying=occ[:4],
+                expiry=date(2026, 12, 18),
+                strike=100.0,
+                option_type="call",
+                qty=1,
+                side="long",
+                iv_frozen=0.25,
+                iv_as_of=datetime(2026, 8, 12, 20, tzinfo=timezone.utc),
+                entry_premium=3.5,
+            ),
+            spot=100.0,
+            theo=12.0 if up else 8.0,
+            delta=0.2,
+            dte=90.0,
+            notional=4000.0 if up else 800.0,
+            cost=3.5,
+            close_premium=10.0,
+            theo_chg=2.0 if up else -2.0,
+        )
+
+    rows = [
+        make_row("AVGO261218C00500000", up=True),
+        make_row("INTC261016C00140000", up=False),
+    ]
+
+    class FakeRunner:
+        last_view = {
+            "acc": SimpleNamespace(name="demo"),
+            "router": SimpleNamespace(feed_name="alpaca"),
+            "rows": rows,
+            "continuous": False,
+            "poll_busy": False,
+        }
+
+        def html_at(self, cols, row_count, reveal=None):
+            from optionda.display.table import render_snapshot
+
+            snap = render_snapshot(
+                account="demo",
+                feed="alpaca",
+                refresh_sec=15,
+                rows=rows,
+                framed=False,
+                reveal=reveal,
+            )
+            return renderable_html(snap, cols)
+
+    class FakeDesk:
+        cols = 100
+        rows = 40
+        runner = FakeRunner()
+
+        def isRunning(self) -> bool:
+            return True
+
+        def stopping(self) -> bool:
+            return False
+
+        def request_stop(self) -> None:
+            return None
+
+        def wait(self, _msec: int = 0) -> bool:
+            return True
+
+    _journal(tmp_path)
+    window = MainWindow("demo", tmp_path, period="all", initial_view="term")
+    qtbot.addWidget(window)
+    window.resize(900, 600)
+    window.show()
+    page = window._page()
+    page.desk = FakeDesk()
+    window.terminal.prepare_live()
+    window._on_desk_frame("<pre>full</pre>", page)
+    live = window.terminal.live.toPlainText()
+    assert "AVGO" not in live
+    assert "INTC" not in live
+    assert "(no positions)" not in live
+    window._tick_reveal(page)
+    live = window.terminal.live.toPlainText()
+    assert "AVGO" in live
+    assert "INTC" not in live
+    while page.revealing:
+        window._tick_reveal(page)
+    live = window.terminal.live.toPlainText()
+    assert "AVGO" in live
+    assert "INTC" in live
+    assert page.revealed
+    assert reveal_steps(2)[-1] == DeskReveal(2, True)
+

@@ -350,6 +350,67 @@ def test_idle_until_uses_chrome_not_full_paint(tmp_path, monkeypatch) -> None:
     assert chromes
 
 
+def test_empty_busy_chrome_is_page_with_hint(tmp_path, monkeypatch) -> None:
+    from optionda.desk_live import DeskRunner
+    from optionda.store import AccountStore
+
+    monkeypatch.setenv("OPTIONDA_HOME", str(tmp_path))
+    monkeypatch.setenv("OPTIONDA_ACTIVE", "demo")
+    store = AccountStore(tmp_path)
+    store.create("demo")
+    store.activate("demo")
+    runner = DeskRunner(home=tmp_path, store=store, paint=lambda *_: None)
+    payload = runner._chrome_from(
+        {
+            "rows": [],
+            "poll_busy": True,
+            "poll_label": "1/2 fetch  spots · AAPL",
+            "poll_done": 0,
+            "poll_total": 1,
+            "spin": "⠋",
+        }
+    )
+    assert payload["page"] is True
+    assert payload.get("explain") is True
+    assert "Fetching live underlying spots." in payload["text"]
+    assert "AAPL" in payload["text"]
+    assert "1/2 fetch" not in payload["text"]
+
+
+def test_empty_busy_poll_does_not_paint_table(tmp_path, monkeypatch) -> None:
+    from optionda.desk_live import DeskRunner
+    from optionda.market.router import MarketRouter
+    from optionda.store import AccountStore
+
+    monkeypatch.setenv("OPTIONDA_HOME", str(tmp_path))
+    monkeypatch.setenv("OPTIONDA_ACTIVE", "demo")
+    store = AccountStore(tmp_path)
+    store.create("demo")
+    store.activate("demo")
+    paints: list[object] = []
+    chromes: list[object] = []
+    runner = DeskRunner(
+        home=tmp_path,
+        store=store,
+        paint=paints.append,
+        on_chrome=chromes.append,
+    )
+    acc = store.require_current()
+    router = MarketRouter(tmp_path)
+    runner._poll(
+        acc,
+        router,
+        [],
+        poll_busy=True,
+        poll_label="updating…",
+        full=True,
+    )
+    assert paints == []
+    assert chromes
+    assert chromes[0]["page"] is True
+    assert "Getting the latest marks." in chromes[0]["text"]
+
+
 def test_add_batch_reports_progress(tmp_path, monkeypatch) -> None:
     from optionda.batch import add_batch
     from optionda.store import AccountStore
