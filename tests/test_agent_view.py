@@ -1,5 +1,7 @@
 from datetime import date, datetime, timezone
 
+import pytest
+
 from optionda.agent_view import (
     build_agent_view,
     format_agent_text,
@@ -34,6 +36,7 @@ def _row(occ: str, notional: float, *, up: bool) -> RowMark:
         notional=notional,
         cost=3.5,
         upnl=200.0 if up else -200.0,
+        close_spot=99.305,
         close_premium=close,
         theo_chg=theo - close,
         last_op_at=datetime(2026, 8, 12, 20, tzinfo=timezone.utc),
@@ -63,6 +66,8 @@ def test_build_agent_view_splits_sections_and_totals() -> None:
     assert view["up"][0]["section"] == "+"
     assert view["down"][0]["section"] == "−"
     assert view["up"][0]["today"] == 200.0
+    assert view["up"][0]["spot_chg_pct"] == pytest.approx(0.7, abs=0.05)
+    assert view["up"][0]["theo_chg"] == pytest.approx(2.0)
     assert "email" not in view
     assert "password" not in view
     assert "smtp" not in str(view).lower()
@@ -100,6 +105,8 @@ def test_agent_text_is_a_desk_table() -> None:
     assert "INTC" in text
     assert "Model$" in text
     assert "rPnL" in text
+    assert "+0.7%" in text
+    assert "+2.00" in text
 
 
 def test_desk_html_looks_like_run() -> None:
@@ -115,6 +122,8 @@ def test_desk_html_looks_like_run() -> None:
     assert "today +" in html
     assert "AVGO" in html
     assert "Model$" in html
+    assert "+0.7%" in html
+    assert "+2.00" in html
     assert "<img" not in html.lower()
     assert "On Mon" not in html
     assert "wrote:" not in html

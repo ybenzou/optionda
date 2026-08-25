@@ -18,6 +18,20 @@ def latest_path(home: Path | None = None) -> Path:
     return ensure_home(home) / "agent" / "latest.json"
 
 
+def _spot_chg_pct(spot: float | None, close_spot: float | None) -> float | None:
+    if spot is None or close_spot is None or close_spot <= 0:
+        return None
+    return (spot / close_spot - 1.0) * 100.0
+
+
+def _theo_chg(row: RowMark) -> float | None:
+    if row.theo_chg is not None:
+        return row.theo_chg
+    if row.theo is None or row.close_premium is None:
+        return None
+    return row.theo - row.close_premium
+
+
 def _row_payload(row: RowMark, section: str) -> dict[str, Any]:
     pos = row.position
     model_iv = (
@@ -30,9 +44,13 @@ def _row_payload(row: RowMark, section: str) -> dict[str, Any]:
         "side": pos.side,
         "qty": pos.qty,
         "spot": row.spot,
+        "close_spot": row.close_spot,
+        "spot_chg_pct": _spot_chg_pct(row.spot, row.close_spot),
         "model_iv": model_iv,
         "cost": row.cost if row.cost is not None else pos.entry_premium,
         "model": row.theo,
+        "close_premium": row.close_premium,
+        "theo_chg": _theo_chg(row),
         "upnl": row.upnl,
         "today": today_model_pnl(row),
         "dte": row.dte,
@@ -119,6 +137,28 @@ def _iv(value: float | None) -> str:
     return f"{value * 100:.1f}%"
 
 
+def _spot_suffix(pct: float | None) -> str:
+    if pct is None:
+        return ""
+    if abs(pct) < 0.05:
+        return " (0.0%)"
+    return f" ({pct:+.1f}%)"
+
+
+def _model_suffix(chg: float | None) -> str:
+    if chg is None:
+        return ""
+    if abs(chg) < 0.005:
+        return " (0.00)"
+    return f" ({chg:+.2f})"
+
+
+def _move_color(value: float | None, *, zero: float, up: str, down: str, flat: str) -> str:
+    if value is None or abs(value) < zero:
+        return flat
+    return up if value > 0 else down
+
+
 def format_agent_text(view: dict[str, Any]) -> str:
     lines = [f"[{view.get('account')}] optionda"]
     for title, key in (
@@ -140,8 +180,8 @@ def format_agent_text(view: dict[str, Any]) -> str:
         lines.append("")
         lines.append(label)
         lines.append(
-            f"{'OCC':<20} {'Side':<5} {'Qty':>4} {'Spot':>10} {'Model IV':>9} "
-            f"{'Cost':>8} {'Model$':>10} {'uPnL$':>10} {'DTE':>6} {'Last':>6}"
+            f"{'OCC':<20} {'Side':<5} {'Qty':>4} {'Spot':>16} {'Model IV':>9} "
+            f"{'Cost':>8} {'Model$':>16} {'uPnL$':>10} {'DTE':>6} {'Last':>6}"
         )
         if not rows:
             lines.append("(empty)")
@@ -149,14 +189,16 @@ def format_agent_text(view: dict[str, Any]) -> str:
         for row in rows:
             dte = row.get("dte")
             dte_s = f"{dte:.1f}" if dte is not None else "—"
+            spot = f"{_money(row.get('spot'))}{_spot_suffix(row.get('spot_chg_pct'))}"
+            model = f"{_money(row.get('model'))}{_model_suffix(row.get('theo_chg'))}"
             lines.append(
                 f"{str(row.get('occ') or ''):<20} "
                 f"{str(row.get('side') or ''):<5} "
                 f"{row.get('qty') or 0:>4g} "
-                f"{_money(row.get('spot')):>10} "
+                f"{spot:>16} "
                 f"{_iv(row.get('model_iv')):>9} "
                 f"{_money(row.get('cost')):>8} "
-                f"{_money(row.get('model')):>10} "
+                f"{model:>16} "
                 f"{_pnl(row.get('upnl')):>10} "
                 f"{dte_s:>6} "
                 f"{str(row.get('last') or '—'):>6}"
@@ -178,7 +220,8 @@ def render_desk_html(view: dict[str, Any]) -> str:
     def cell(text: str, *, align: str = "right", color: str = fg) -> str:
         return (
             f'<td style="padding:3px 8px;text-align:{align};color:{color};'
-            f'font-family:Consolas,Menlo,monospace;font-size:12px;">{text}</td>'
+            f'font-family:Consolas,Menlo,monospace;font-size:12px;'
+            f'white-space:nowrap;">{text}</td>'
         )
 
     def section_html(title: str, rows: list[dict[str, Any]], color: str) -> str:
@@ -220,15 +263,25 @@ def render_desk_html(view: dict[str, Any]) -> str:
         for row in rows:
             upnl = row.get("upnl")
             pnl_color = green if (upnl or 0) > 0 else (red if (upnl or 0) < 0 else fg)
+            spot_pct = row.get("spot_chg_pct")
+            spot_color = _move_color(spot_pct, zero=0.05, up=green, down=red, flat=muted)
+            theo_chg = row.get("theo_chg")
+            model_color = _move_color(theo_chg, zero=0.005, up=green, down=red, flat=muted)
             bits.append(
                 "<tr>"
                 + cell(str(row.get("occ") or ""), align="left")
                 + cell(str(row.get("side") or ""), align="center")
                 + cell(f"{row.get('qty') or 0:g}")
-                + cell(_money(row.get("spot")))
+                + cell(
+                    f"{_money(row.get('spot'))}"
+                    f'<span style="color:{spot_color}">{_spot_suffix(spot_pct)}</span>'
+                )
                 + cell(_iv(row.get("model_iv")), color=cyan)
                 + cell(_money(row.get("cost")))
-                + cell(_money(row.get("model")))
+                + cell(
+                    f"{_money(row.get('model'))}"
+                    f'<span style="color:{model_color}">{_model_suffix(theo_chg)}</span>'
+                )
                 + cell(_pnl(upnl), color=pnl_color)
                 + cell(f"{row.get('dte'):.1f}" if row.get("dte") is not None else "—")
                 + cell(str(row.get("last") or "—"))
