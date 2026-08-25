@@ -95,7 +95,7 @@ class AlpacaClient:
             return "verified (market data reachable)"
 
     def get_spots(self, symbols: list[str]) -> dict[str, SpotQuote]:
-        """Resolve spots across RTH / AH / overnight feeds; newest print wins."""
+        """Resolve spots across RTH / AH / overnight feeds; newest trade wins."""
         uniq = sorted(set(s.upper() for s in symbols))
         if not uniq:
             return {}
@@ -106,16 +106,12 @@ class AlpacaClient:
             for feed in _STOCK_FEEDS:
                 params = {"symbols": ",".join(uniq), "feed": feed}
                 try:
-                    trades = self._get(
+                    payload = self._get(
                         client, f"{DATA_URL}/v2/stocks/trades/latest", params
-                    )
-                    quotes = self._get(
-                        client, f"{DATA_URL}/v2/stocks/quotes/latest", params
                     )
                 except AlpacaError:
                     continue
-                trade_map = (trades or {}).get("trades") or {}
-                quote_map = (quotes or {}).get("quotes") or {}
+                trade_map = (payload or {}).get("trades") or {}
                 for symbol in uniq:
                     trade = trade_map.get(symbol)
                     if trade and trade.get("p") is not None and float(trade["p"]) > 0:
@@ -127,30 +123,12 @@ class AlpacaClient:
                                 f"alpaca/{feed}/trade",
                             )
                         )
-                    quote = quote_map.get(symbol)
-                    if quote:
-                        mid = _quote_mid_price(quote)
-                        if mid is not None:
-                            by_symbol[symbol].append(
-                                (
-                                    _parse_ts(quote.get("t"))
-                                    or datetime.now(timezone.utc),
-                                    mid,
-                                    f"alpaca/{feed}/quote",
-                                )
-                            )
 
         out: dict[str, SpotQuote] = {}
         for symbol, candidates in by_symbol.items():
             if not candidates:
                 continue
-            # Prefer quote mid over trade when timestamps are equal-ish (<2s)
-            candidates.sort(key=lambda c: c[0], reverse=True)
-            best_t, best_px, best_src = candidates[0]
-            for as_of, price, src in candidates[1:]:
-                if abs((best_t - as_of).total_seconds()) <= 2.0 and "/quote" in src:
-                    best_t, best_px, best_src = as_of, price, src
-                    break
+            best_t, best_px, best_src = max(candidates, key=lambda c: c[0])
             out[symbol] = SpotQuote(
                 symbol=symbol,
                 price=best_px,
@@ -612,21 +590,6 @@ def _extract_option_snapshot(data: dict, symbol: str) -> dict:
     if not isinstance(node, dict):
         raise AlpacaError(f"unexpected alpaca snapshot shape for {symbol}")
     return node
-
-
-def _quote_mid_price(quote: dict) -> float | None:
-    bid = quote.get("bp")
-    ask = quote.get("ap")
-    try:
-        if bid is not None and ask is not None and float(bid) > 0 and float(ask) > 0:
-            return (float(bid) + float(ask)) / 2.0
-        if ask is not None and float(ask) > 0:
-            return float(ask)
-        if bid is not None and float(bid) > 0:
-            return float(bid)
-    except (TypeError, ValueError):
-        return None
-    return None
 
 
 def _extract_iv(node: dict) -> float | None:

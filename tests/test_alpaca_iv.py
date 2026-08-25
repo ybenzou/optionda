@@ -114,9 +114,61 @@ def test_get_spots_prefers_newest_overnight_feed() -> None:
             cls.return_value.__enter__.return_value = MagicMock()
             spots = client.get_spots(["SPCX"])
     q = spots["SPCX"]
-    assert q.price == pytest.approx(116.03, abs=0.01)  # overnight quote mid
-    assert "overnight" in q.source
-    assert q.as_of == datetime(2026, 8, 5, 6, 10, 47, tzinfo=timezone.utc)
+    assert q.price == pytest.approx(116.17, abs=0.01)
+    assert q.source == "alpaca/overnight/trade"
+    assert q.as_of == datetime(2026, 8, 5, 5, 55, 39, tzinfo=timezone.utc)
+
+
+def test_get_spots_skips_wide_overnight_quote() -> None:
+    from datetime import datetime, timezone
+
+    client = _client("auto")
+
+    def fake_get(_client, url, params=None):
+        feed = (params or {}).get("feed")
+        if feed == "boats":
+            raise AlpacaError("alpaca HTTP 403: no boats")
+        if "trades" in url:
+            if feed == "overnight":
+                return {
+                    "trades": {
+                        "RDDT": {
+                            "p": 152.50,
+                            "t": "2026-08-25T07:23:07Z",
+                        }
+                    }
+                }
+            return {
+                "trades": {
+                    "RDDT": {"p": 152.66, "t": "2026-08-24T19:59:57Z"}
+                }
+            }
+        if "quotes" in url:
+            if feed == "overnight":
+                return {
+                    "quotes": {
+                        "RDDT": {
+                            "bp": 152.62,
+                            "ap": 170.88,
+                            "t": "2026-08-25T08:00:00Z",
+                        }
+                    }
+                }
+            return {
+                "quotes": {
+                    "RDDT": {"bp": 142.50, "ap": 158.57, "t": "2026-08-24T20:00:00Z"}
+                }
+            }
+        return {}
+
+    with patch.object(client, "_get", side_effect=fake_get):
+        with patch("optionda.market.alpaca.httpx.Client") as cls:
+            cls.return_value.__enter__.return_value = MagicMock()
+            spots = client.get_spots(["RDDT"])
+    q = spots["RDDT"]
+    assert q.price == pytest.approx(152.50, abs=0.01)
+    assert q.source == "alpaca/overnight/trade"
+    assert q.as_of == datetime(2026, 8, 25, 7, 23, 7, tzinfo=timezone.utc)
 
 
 def test_get_spot_at_uses_historical_trade_before_option_quote() -> None:
