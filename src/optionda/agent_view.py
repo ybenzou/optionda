@@ -66,6 +66,7 @@ def build_agent_view(
     rows: list[RowMark],
     realized: float | None = None,
     ts: str | None = None,
+    news: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     up_rows, down_rows = partition_desk_rows(rows)
     up = [_row_payload(row, "+") for row in up_rows]
@@ -97,6 +98,7 @@ def build_agent_view(
         "tpnl": tpnl if has_today else None,
         "up": up,
         "down": down,
+        "news": list(news or []),
     }
 
 
@@ -206,7 +208,89 @@ def format_agent_text(view: dict[str, Any]) -> str:
     lines.append("")
     lines.append(f"Σ {_money(view.get('sum_model'))}")
     lines.append(f"rPnL {_pnl(view.get('rpnl'))}    tPnL {_pnl(view.get('tpnl'))}")
+    news = view.get("news") or []
+    if news:
+        lines.append("")
+        lines.append("News")
+        for item in news:
+            stamp = _news_stamp(item.get("ts"))
+            symbol = str(item.get("symbol") or "?").strip() or "?"
+            rank = str(item.get("rank") or "").strip()
+            headline = str(item.get("headline") or "").strip()
+            bits = [part for part in (stamp, symbol, rank, headline) if part]
+            lines.append("  ".join(bits))
     return "\n".join(lines)
+
+
+def _news_stamp(value: Any) -> str:
+    if isinstance(value, datetime):
+        instant = value
+    elif isinstance(value, str) and value.strip():
+        try:
+            instant = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return ""
+    else:
+        return ""
+    if instant.tzinfo is None:
+        instant = instant.replace(tzinfo=timezone.utc)
+    return instant.astimezone().strftime("%H:%M")
+
+
+def _news_html(
+    news: list[dict[str, Any]],
+    *,
+    muted: str,
+    cyan: str,
+    fg: str,
+) -> str:
+    if not news:
+        return ""
+
+    def cell(
+        text: str,
+        *,
+        color: str,
+        nowrap: bool = False,
+        weight: str = "normal",
+    ) -> str:
+        extra = "white-space:nowrap;" if nowrap else ""
+        return (
+            f'<td style="padding:5px 12px 5px 0;text-align:left;vertical-align:top;'
+            f"color:{color};font-family:Consolas,Menlo,monospace;font-size:12px;"
+            f'font-weight:{weight};{extra}">{text}</td>'
+        )
+
+    bits = [
+        f'<p style="margin:18px 0 8px;color:{cyan};font-family:Consolas,Menlo,monospace;'
+        f'font-size:13px;font-weight:bold;">News</p>',
+        '<table style="border-collapse:collapse;width:100%;">',
+    ]
+    for item in news:
+        stamp = _news_stamp(item.get("ts")) or "—"
+        symbol = str(item.get("symbol") or "?").strip() or "?"
+        headline = str(item.get("headline") or "").strip()
+        url = str(item.get("url") or "").strip()
+        rank = str(item.get("rank") or "").strip()
+        title = headline
+        if rank:
+            title = (
+                f'<span style="color:{cyan};padding-right:8px;">{rank}</span>{headline}'
+            )
+        if url:
+            title = (
+                f'<a href="{url}" style="color:{fg};text-decoration:underline;">'
+                f"{title}</a>"
+            )
+        bits.append(
+            "<tr>"
+            + cell(stamp, color=muted, nowrap=True)
+            + cell(symbol, color=cyan, nowrap=True, weight="bold")
+            + cell(title, color=fg)
+            + "</tr>"
+        )
+    bits.append("</table>")
+    return "".join(bits)
 
 
 def render_desk_html(view: dict[str, Any]) -> str:
@@ -301,6 +385,7 @@ def render_desk_html(view: dict[str, Any]) -> str:
         f'<p style="margin:16px 0 0;color:{cyan};">Σ {_money(view.get("sum_model"))}</p>'
         f'<p style="margin:4px 0 0;">rPnL {_pnl(view.get("rpnl"))}'
         f'&nbsp;&nbsp;&nbsp;tPnL {_pnl(view.get("tpnl"))}</p>'
+        f"{_news_html(view.get('news') or [], muted=muted, cyan=cyan, fg=fg)}"
         "</div>"
     )
     return (

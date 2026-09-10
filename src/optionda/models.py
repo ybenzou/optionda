@@ -91,6 +91,10 @@ class AppConfig(BaseModel):
     rate_curve: list[tuple[int, float]] = Field(default_factory=list)
     # Per-ticker continuous dividend yields. Values absent here fall back to q.
     dividend_yields: dict[str, float] = Field(default_factory=dict)
+    news_enabled: bool = False
+    news_poll_sec: int = 75
+    ollama_url: str = "http://127.0.0.1:11434"
+    ollama_model: str = ""
 
 
 class SpotQuote(BaseModel):

@@ -1,6 +1,6 @@
 """optionda — terminal options desk (MODEL marks, frozen IV)."""
 
-__version__ = "1.2.2"
+__version__ = "1.3.1"
 
 
 def _claim_windows_identity() -> None:

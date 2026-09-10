@@ -20,6 +20,7 @@ from optionda.gui.widgets import (
     BehaviorWidget,
     CalendarWidget,
     KpiBar,
+    NewsFeed,
     PerformanceChart,
     PositionList,
 )
@@ -43,6 +44,7 @@ class StatsView(QWidget):
         self.chart = PerformanceChart()
         self.calendar = CalendarWidget()
         self.positions = PositionList()
+        self.news = NewsFeed()
         self.behavior = BehaviorWidget()
         self.positions.picked.connect(self._on_pick)
 
@@ -56,16 +58,19 @@ class StatsView(QWidget):
         side = QSplitter(Qt.Orientation.Vertical)
         side.addWidget(self.calendar)
         side.addWidget(self.positions)
-        side.setStretchFactor(0, 1)
+        side.addWidget(self.news)
+        side.setStretchFactor(0, 2)
         side.setStretchFactor(1, 1)
+        side.setStretchFactor(2, 1)
         main = QSplitter(Qt.Orientation.Horizontal)
         main.addWidget(side)
         main.addWidget(self.tabs)
         main.setStretchFactor(0, 2)
         main.setStretchFactor(1, 3)
         side.setMinimumWidth(360)
-        self.calendar.setMinimumSize(360, 280)
-        self.positions.setMinimumSize(220, 240)
+        self.calendar.setMinimumSize(360, 320)
+        self.positions.setMinimumSize(220, 180)
+        self.news.setMinimumSize(220, 140)
         self.tabs.setMinimumSize(360, 220)
         for splitter in (side, main):
             splitter.setHandleWidth(1)
@@ -141,7 +146,7 @@ class StatsView(QWidget):
     def _restore_splitters(self) -> None:
         pairs = (
             (self._main, (2, 3)),
-            (self._side, (1, 1)),
+            (self._side, (2, 1, 1)),
         )
         for splitter, weights in pairs:
             horizontal = splitter.orientation() == Qt.Orientation.Horizontal
@@ -149,6 +154,10 @@ class StatsView(QWidget):
             if total <= 0:
                 total = self.width() if horizontal else self.height()
             total = max(total, 80)
-            a = max(int(total * weights[0] / sum(weights)), 40)
-            b = max(total - a, 40)
-            splitter.setSizes([a, b])
+            parts = [
+                max(int(total * weight / sum(weights)), 40) for weight in weights
+            ]
+            drift = total - sum(parts)
+            if parts:
+                parts[-1] = max(parts[-1] + drift, 40)
+            splitter.setSizes(parts)

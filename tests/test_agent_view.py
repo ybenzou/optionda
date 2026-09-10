@@ -127,3 +127,38 @@ def test_desk_html_looks_like_run() -> None:
     assert "<img" not in html.lower()
     assert "On Mon" not in html
     assert "wrote:" not in html
+
+
+def test_agent_view_includes_holdings_news() -> None:
+    view = build_agent_view(
+        account="main",
+        feed="alpaca",
+        rows=[_row("NVDA261218C00250000", 1200.0, up=True)],
+        realized=0.0,
+        news=[
+            {
+                "ts": "2026-08-28T03:00:00+00:00",
+                "symbol": "NVDA",
+                "headline": "Nvidia rises after hours",
+                "url": "https://example.com/n",
+                "rank": "重要",
+            }
+        ],
+    )
+    assert view["news"][0]["symbol"] == "NVDA"
+    text = format_agent_text(view)
+    assert text.index("today +") < text.index("\nNews\n")
+    assert "holdings news" not in text.lower()
+    assert "NVDA" in text
+    assert "Nvidia rises after hours" in text
+    html = render_desk_html(view)
+    assert ">News</p>" in html
+    assert html.index("today +") < html.index(">News</p>")
+    assert "holdings news" not in html.lower()
+    assert "Nvidia rises after hours" in html
+    assert "https://example.com/n" in html
+    stamp = datetime.fromisoformat("2026-08-28T03:00:00+00:00").astimezone().strftime("%H:%M")
+    chunk = html[html.index(">News</p>") :]
+    assert stamp in chunk
+    assert chunk.index(stamp) < chunk.index("NVDA") < chunk.index("Nvidia rises after hours")
+    assert chunk.count("<td") >= 3

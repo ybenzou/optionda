@@ -24,7 +24,9 @@ from optionda.gui.richview import renderable_html
 from optionda.gui.shell import CommandResult, active_account, dispatch, parse_line, sync_active_env
 from optionda.gui.stats_view import StatsView
 from optionda.gui.terminal_view import TerminalView
+from optionda.config import load_config
 from optionda.gui.theme import app_icon, apply_native_chrome, mono_font
+from optionda.news import format_news_line, items_lookback, poll_news
 
 _BUILTINS = {
     "exit",
@@ -131,6 +133,44 @@ class _DeskWorker(QThread):
             self.failed.emit(str(exc))
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(str(exc))
+
+
+class _NewsWorker(QThread):
+    batch = Signal(object)
+    latest = Signal(str)
+    status = Signal(str)
+
+    def __init__(self, home: Path | None) -> None:
+        super().__init__()
+        self.home = home
+        self._stop = False
+
+    def request_stop(self) -> None:
+        self._stop = True
+
+    def run(self) -> None:
+        first = True
+        while not self._stop:
+            cfg = load_config(self.home)
+            if cfg.news_enabled:
+                try:
+                    poll_news(self.home)
+                    items = items_lookback(self.home)
+                    self.batch.emit(items)
+                    if items:
+                        self.latest.emit(format_news_line(items[0]))
+                    else:
+                        self.status.emit("no holdings news")
+                except Exception as exc:  # noqa: BLE001
+                    self.status.emit(str(exc))
+            else:
+                self.status.emit("news off")
+            wait = 1 if first else max(int(cfg.news_poll_sec or 75), 15)
+            first = False
+            for _ in range(wait):
+                if self._stop:
+                    return
+                self.msleep(1000)
 
 
 class _AddWorker(QThread):
@@ -293,6 +333,12 @@ class MainWindow(QMainWindow):
         self._reload_btn.setObjectName("primary")
         self._reload_btn.clicked.connect(self.reload)
         row.addWidget(self._reload_btn)
+        self._news_line = QLabel()
+        self._news_line.setObjectName("newsFlash")
+        self._news_line.setFont(mono_font(11))
+        self._news_line.setTextFormat(Qt.TextFormat.PlainText)
+        self._news_line.setText("news …")
+        row.addWidget(self._news_line, 1)
         self.setMenuWidget(bar)
         self._tabbar = QTabBar()
         self._tabbar.setObjectName("pageTabs")
@@ -316,6 +362,11 @@ class MainWindow(QMainWindow):
         status.addWidget(self._tabbar, 1)
         status.addWidget(self._new_tab)
         self._idle_status = ""
+        self._news = _NewsWorker(self.home)
+        self._news.batch.connect(self._on_news_batch)
+        self._news.latest.connect(self._on_news_latest)
+        self._news.status.connect(self._on_news_latest)
+        self._news.start()
         self.add_tab()
         self._bind_keys()
         self._sync_prompt()
@@ -475,6 +526,7 @@ class MainWindow(QMainWindow):
             self._stats.calendar.day_changed.connect(
                 lambda _day: self._sync_stats_chrome()
             )
+            self._stats.news.show_items(items_lookback(self.home))
         return self._stats
 
     @property
@@ -508,6 +560,15 @@ class MainWindow(QMainWindow):
             stats.account = self.account
         stats.reload()
         self._sync_stats_chrome()
+
+    def _on_news_batch(self, items: object) -> None:
+        if self._stats is not None:
+            self._stats.news.show_items(list(items or []))
+
+    def _on_news_latest(self, text: object) -> None:
+        line = str(text or "").strip()
+        self._news_line.setText(line)
+        self._news_line.setToolTip(line)
 
     def _recall(self, step: int) -> None:
         if not self._history:
@@ -978,6 +1039,9 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802
         self._spin_timer.stop()
         self._reveal_timer.stop()
+        if self._news is not None:
+            self._news.request_stop()
+            self._news.wait(1500)
         for page in self._pages:
             self._reset_reveal(page)
             self._stop_page(page)

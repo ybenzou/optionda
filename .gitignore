@@ -15,3 +15,4 @@ venv/
 credentials.toml
 mail/session.json
 mail/sends.jsonl
+news/

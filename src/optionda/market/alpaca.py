@@ -137,6 +137,63 @@ class AlpacaClient:
             )
         return out
 
+    def get_news(
+        self,
+        symbols: list[str],
+        *,
+        limit: int = 50,
+        since: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        """Benzinga headlines for holdings. Soft-fail — never break the desk."""
+        uniq = sorted({s.strip().upper() for s in symbols if s and s.strip()})
+        if not uniq:
+            return []
+        params: dict[str, str] = {
+            "symbols": ",".join(uniq),
+            "limit": str(min(max(int(limit), 1), 50)),
+            "sort": "DESC",
+        }
+        if since is not None:
+            instant = since if since.tzinfo else since.replace(tzinfo=timezone.utc)
+            params["start"] = instant.astimezone(timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
+        try:
+            with httpx.Client(timeout=self.timeout, headers=self._headers()) as client:
+                payload = self._get(client, f"{DATA_URL}/v1beta1/news", params)
+        except AlpacaError:
+            return []
+        rows = payload.get("news") if isinstance(payload, dict) else None
+        if not isinstance(rows, list):
+            return []
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            nid = str(row.get("id") or "").strip()
+            headline = str(row.get("headline") or "").strip()
+            if not nid or not headline:
+                continue
+            names = row.get("symbols") if isinstance(row.get("symbols"), list) else []
+            symbol = ""
+            for name in names:
+                token = str(name or "").strip().upper()
+                if token in uniq:
+                    symbol = token
+                    break
+            if not symbol and names:
+                symbol = str(names[0] or "").strip().upper()
+            out.append(
+                {
+                    "id": nid,
+                    "ts": row.get("created_at") or row.get("updated_at"),
+                    "symbol": symbol,
+                    "headline": headline,
+                    "url": str(row.get("url") or "").strip(),
+                }
+            )
+        return out
+
     def get_spot_at(self, symbol: str, as_of: datetime) -> SpotQuote:
         """Latest underlying trade at/before an option quote timestamp."""
         ticker = symbol.strip().upper()

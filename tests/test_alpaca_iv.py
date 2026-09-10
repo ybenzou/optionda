@@ -171,6 +171,54 @@ def test_get_spots_skips_wide_overnight_quote() -> None:
     assert q.as_of == datetime(2026, 8, 25, 7, 23, 7, tzinfo=timezone.utc)
 
 
+def test_get_news_parses_headlines_and_soft_fails() -> None:
+    client = _client("auto")
+
+    def fake_get(_client, url, params=None):
+        assert url.endswith("/v1beta1/news")
+        assert params["symbols"] == "INTC,NVDA"
+        assert params["sort"] == "DESC"
+        return {
+            "news": [
+                {
+                    "id": 9,
+                    "headline": "Nvidia news",
+                    "created_at": "2026-08-28T03:00:00Z",
+                    "url": "https://example.com/n",
+                    "symbols": ["NVDA"],
+                },
+                {
+                    "id": "",
+                    "headline": "skip me",
+                    "symbols": ["INTC"],
+                },
+            ]
+        }
+
+    with patch.object(client, "_get", side_effect=fake_get):
+        with patch("optionda.market.alpaca.httpx.Client") as cls:
+            cls.return_value.__enter__.return_value = MagicMock()
+            rows = client.get_news(["nvda", "intc"], limit=10)
+    assert rows == [
+        {
+            "id": "9",
+            "ts": "2026-08-28T03:00:00Z",
+            "symbol": "NVDA",
+            "headline": "Nvidia news",
+            "url": "https://example.com/n",
+        }
+    ]
+
+    def boom(_client, url, params=None):
+        raise AlpacaError("alpaca HTTP 403: news")
+
+    with patch.object(client, "_get", side_effect=boom):
+        with patch("optionda.market.alpaca.httpx.Client") as cls:
+            cls.return_value.__enter__.return_value = MagicMock()
+            assert client.get_news(["NVDA"]) == []
+    assert client.get_news([]) == []
+
+
 def test_get_spot_at_uses_historical_trade_before_option_quote() -> None:
     from datetime import datetime, timezone
 

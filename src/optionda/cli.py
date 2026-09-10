@@ -118,6 +118,7 @@ from optionda.shellenv import (
     remove_rc_hook,
     render_shellenv,
 )
+from optionda.news import format_news_line, items_lookback, mail_news_payload, poll_news
 from optionda.store import AccountStore, StoreError, realized_pnl_summary
 from optionda.undo import undo_last
 from optionda.sync import (
@@ -1543,6 +1544,7 @@ def _mail_push(*, force: bool, to_addr: Optional[str], do_update: bool) -> None:
         feed=feed,
         rows=rows,
         realized=realized,
+        news=mail_news_payload(home),
     )
     write_latest(view, home)
     try:
@@ -1557,6 +1559,33 @@ def _mail_push(*, force: bool, to_addr: Optional[str], do_update: bool) -> None:
 def export_cmd() -> None:
     """Print a MODEL snapshot and append it to the account log under ~/.optionda."""
     snapshot_once(source="export")
+
+
+@app.command("news")
+def news_cmd() -> None:
+    """Print holdings headlines from the last 24 hours."""
+    store = _store()
+    try:
+        acc = store.require_current()
+    except StoreError as exc:
+        _err(str(exc))
+        raise typer.Exit(1) from exc
+    home = _home_opt()
+    cfg = load_config(home)
+    if not cfg.news_enabled:
+        _ok("news off")
+        return
+    try:
+        poll_news(home, account=acc)
+    except Exception as exc:  # noqa: BLE001
+        _err(f"news failed: {exc}")
+        raise typer.Exit(1) from exc
+    items = items_lookback(home)
+    if not items:
+        _ok("no holdings news")
+        return
+    for item in items:
+        console.print(format_news_line(item))
 
 
 @app.command("snapshot")

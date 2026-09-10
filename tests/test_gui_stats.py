@@ -33,6 +33,7 @@ def test_stats_ops_left_chart_tabs_right(tmp_path, qtbot) -> None:
     assert view.tabs.widget(1) is view.behavior
     assert view._side.indexOf(view.calendar) == 0
     assert view._side.indexOf(view.positions) == 1
+    assert view._side.indexOf(view.news) == 2
     assert view._main.indexOf(view._side) == 0
     assert view._main.indexOf(view.tabs) == 1
     assert not hasattr(view.calendar, "_detail")
@@ -111,7 +112,8 @@ def test_stats_left_calendar_fits_and_list_is_tall(tmp_path, qtbot) -> None:
     view.refresh_visible()
     QApplication.processEvents()
     assert view.calendar.width() >= 360
-    assert view.positions.height() >= 240
+    assert view.positions.height() >= 140
+    assert view.news.height() >= 120
     box = view.calendar.rect()
     for button in view.calendar._buttons:
         if button.isVisible() and button.isEnabled():
@@ -133,7 +135,7 @@ def test_stats_restores_splitters_after_hide(tmp_path, qtbot) -> None:
     QApplication.processEvents()
     view.hide()
     view._main.setSizes([0, 0])
-    view._side.setSizes([0, 0])
+    view._side.setSizes([0, 0, 0])
     view.show()
     qtbot.waitExposed(view)
     QApplication.processEvents()

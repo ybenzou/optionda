@@ -267,6 +267,34 @@ def test_run_every_waits_for_next_clock_slot(tmp_path) -> None:
     assert sent == [1]
 
 
+def test_run_every_continues_after_send_failure(tmp_path) -> None:
+    from optionda.mailer import read_sends, run_every
+
+    clock = {"t": datetime(2026, 8, 24, 12, 0, 0)}
+    sent: list[int] = []
+
+    def send_once() -> None:
+        sent.append(len(sent) + 1)
+        if sent[-1] == 1:
+            raise ConnectionError("SSL EOF")
+
+    def sleep(seconds: float) -> None:
+        clock["t"] = clock["t"] + timedelta(seconds=seconds)
+
+    run_every(
+        30,
+        send_once,
+        home=tmp_path,
+        sleep=sleep,
+        cycles=2,
+        now=lambda: clock["t"],
+    )
+    assert sent == [1, 2]
+    fails = [row for row in read_sends(tmp_path, limit=8) if not row.get("ok")]
+    assert fails
+    assert "SSL EOF" in str(fails[-1].get("error"))
+
+
 def test_run_every_skips_send_while_paused(tmp_path) -> None:
     from optionda.mailer import run_every
 

@@ -7,6 +7,7 @@ import smtplib
 import subprocess
 import sys
 import time
+import traceback
 from importlib import resources
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -173,6 +174,7 @@ def _append_send(home: Path | None, record: dict) -> None:
         "subject": record.get("subject"),
         "ok": record.get("ok"),
         "n": record.get("n"),
+        "error": record.get("error"),
     }
     path = sends_path(home)
     with path.open("a", encoding="utf-8") as fh:
@@ -450,6 +452,21 @@ def stop_mail_worker(home: Path | None = None) -> int | None:
     return pid
 
 
+def _record_cycle_failure(home: Path | None, exc: BaseException) -> None:
+    stamp = datetime.now(timezone.utc).isoformat()
+    text = "".join(traceback.format_exception(exc))
+    sys.stderr.write(f"{stamp} mail cycle failed: {exc}\n{text}")
+    sys.stderr.flush()
+    _append_send(
+        home,
+        {
+            "ts": stamp,
+            "ok": False,
+            "error": str(exc)[:500],
+        },
+    )
+
+
 def run_every(
     minutes: int,
     send_once: Callable[[], None],
@@ -474,7 +491,10 @@ def run_every(
             return
         session = load_session(home)
         if session is None or not session.paused:
-            send_once()
+            try:
+                send_once()
+            except Exception as exc:  # noqa: BLE001 — keep the 30m loop alive
+                _record_cycle_failure(home, exc)
         done += 1
         if cycles is not None and done >= cycles:
             return
