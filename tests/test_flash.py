@@ -82,7 +82,8 @@ def test_chrome_plain_idle_keeps_countdown() -> None:
     from optionda.display.table import format_chrome_plain
 
     idle = format_chrome_plain(poll_busy=False, eta_sec=5, poll_label="5s")
-    assert idle == "5s"
+    assert idle == "  5s"
+    assert len(format_chrome_plain(poll_busy=False, eta_sec=15)) == len(idle)
     assert "\n" not in idle
     busy = format_chrome_plain(
         spin="⠹",
@@ -91,9 +92,16 @@ def test_chrome_plain_idle_keeps_countdown() -> None:
         poll_done=10,
         poll_total=10,
     )
+    early = format_chrome_plain(
+        spin="⠹",
+        poll_busy=True,
+        poll_done=1,
+        poll_total=10,
+    )
     assert "⠹" in busy
     assert "10/10" in busy
-    assert "#" in busy
+    assert "#" not in busy
+    assert len(early) == len(busy)
     assert "\n" not in busy
     assert "fetch" not in busy
     assert "mark" not in busy

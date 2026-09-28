@@ -208,6 +208,7 @@ def price_option(
     style: ExerciseStyle = "american",
     steps: int = DEFAULT_TREE_STEPS,
     greeks: bool = True,
+    only_delta: bool = False,
 ) -> OptionResult:
     """Price equity options. Default style is American (CRR tree).
 
@@ -236,6 +237,24 @@ def price_option(
 
     # A floor keeps small caller-provided trees from producing lattice noise.
     stable_steps = max(int(steps), DEFAULT_TREE_STEPS)
+    if only_delta:
+        d_spot = max(spot * 1e-4, 1e-3)
+        up = _american_price(
+            spot + d_spot, strike, t, iv, rate, dividend, option_type,
+            steps=stable_steps,
+        )
+        dn = _american_price(
+            spot - d_spot, strike, t, iv, rate, dividend, option_type,
+            steps=stable_steps,
+        )
+        return OptionResult(
+            price=0.0,
+            delta=(up - dn) / (2.0 * d_spot),
+            gamma=0.0,
+            vega=0.0,
+            theta=0.0,
+            dte=t * 365.0,
+        )
     price = _american_price(
         spot,
         strike,

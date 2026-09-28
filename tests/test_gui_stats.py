@@ -33,7 +33,7 @@ def test_stats_ops_left_chart_tabs_right(tmp_path, qtbot) -> None:
     assert view.tabs.widget(1) is view.behavior
     assert view._side.indexOf(view.calendar) == 0
     assert view._side.indexOf(view.positions) == 1
-    assert view._side.indexOf(view.news) == 2
+    assert view._side.count() == 2
     assert view._main.indexOf(view._side) == 0
     assert view._main.indexOf(view.tabs) == 1
     assert not hasattr(view.calendar, "_detail")
@@ -113,7 +113,6 @@ def test_stats_left_calendar_fits_and_list_is_tall(tmp_path, qtbot) -> None:
     QApplication.processEvents()
     assert view.calendar.width() >= 360
     assert view.positions.height() >= 140
-    assert view.news.height() >= 120
     box = view.calendar.rect()
     for button in view.calendar._buttons:
         if button.isVisible() and button.isEnabled():
@@ -135,7 +134,7 @@ def test_stats_restores_splitters_after_hide(tmp_path, qtbot) -> None:
     QApplication.processEvents()
     view.hide()
     view._main.setSizes([0, 0])
-    view._side.setSizes([0, 0, 0])
+    view._side.setSizes([0, 0])
     view.show()
     qtbot.waitExposed(view)
     QApplication.processEvents()
@@ -981,4 +980,38 @@ def test_set_live_html_keeps_pinned_chrome_slot(qtbot) -> None:
     view.set_live_html("<pre>next</pre>")
     assert view._status.isVisible()
     assert "1/4" in view._status.text()
+
+
+def test_run_list_click_paints_rows_without_a_text_document(qtbot) -> None:
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+    from rich.console import Group
+    from rich.style import Style
+    from rich.text import Text
+
+    from optionda.gui.richview import renderable_lines
+    from optionda.gui.terminal_view import TerminalView
+
+    name = Text("AVGO 500", style="bold #4c97ff")
+    name.stylize(Style(link="optionda:AVGO261218C00500000"))
+    lines = renderable_lines(Group(name), 40)
+    assert lines[0][0] == "AVGO261218C00500000"
+    view = TerminalView()
+    qtbot.addWidget(view)
+    view.resize(640, 480)
+    view.show()
+    view.set_live_lines(lines)
+    assert view.desk_list.isVisible()
+    assert view.live.isHidden()
+    assert view.live.toPlainText() == ""
+    hint = view.desk_list.sizeHint()
+    view.set_live_lines(
+        (("AVGO261218C00500000", (("AVGO 500", "#4c97ff", "", True),)),)
+    )
+    assert view.desk_list.sizeHint() == hint
+    assert view.live.toPlainText() == ""
+    got: list[str] = []
+    view.desk_list.contract_clicked.connect(got.append)
+    QTest.mouseClick(view.desk_list, Qt.MouseButton.LeftButton, pos=QPoint(12, 4))
+    assert got == ["AVGO261218C00500000"]
 

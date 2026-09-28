@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from datetime import date
 
-from PySide6.QtCore import Qt, QUrl, Signal
-from PySide6.QtGui import QColor, QDesktopServices
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
@@ -435,61 +435,6 @@ class PositionList(QWidget):
             return
         key = item.data(Qt.ItemDataRole.UserRole)
         self.picked.emit(key or None)
-
-
-class NewsFeed(QWidget):
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 8, 8, 0)
-        layout.setSpacing(4)
-        title = QLabel("News")
-        title.setObjectName("title")
-        layout.addWidget(title)
-        self._empty = QLabel("no holdings news")
-        self._empty.setObjectName("muted")
-        self._empty.setFont(mono_font(11))
-        layout.addWidget(self._empty)
-        self.list = QListWidget()
-        self.list.setObjectName("newsFeed")
-        self.list.setFont(mono_font(11))
-        self.list.setUniformItemSizes(True)
-        self.list.setTextElideMode(Qt.TextElideMode.ElideRight)
-        self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.list.itemClicked.connect(self._open)
-        layout.addWidget(self.list, 1)
-        self.list.hide()
-
-    def show_items(self, items: list) -> None:
-        self.list.blockSignals(True)
-        self.list.clear()
-        from optionda.news import NewsItem, format_news_line, normalize_item
-
-        rows = list(items or [])
-        self._empty.setVisible(not rows)
-        self.list.setVisible(bool(rows))
-        for item in rows:
-            if isinstance(item, NewsItem):
-                parsed = item
-            elif isinstance(item, dict):
-                parsed = normalize_item(item)
-            else:
-                continue
-            if parsed is None:
-                continue
-            row = QListWidgetItem(format_news_line(parsed))
-            row.setData(Qt.ItemDataRole.UserRole, parsed.url)
-            row.setToolTip(parsed.headline)
-            if parsed.rank == "重要":
-                row.setForeground(QColor(PROMPT))
-            self.list.addItem(row)
-        self.list.blockSignals(False)
-
-    def _open(self, item: QListWidgetItem) -> None:
-        url = item.data(Qt.ItemDataRole.UserRole)
-        if url:
-            QDesktopServices.openUrl(QUrl(str(url)))
 
 
 class BehaviorWidget(QWidget):

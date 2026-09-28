@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Iterable, Literal
 from zoneinfo import ZoneInfo
 
-from optionda.journal import log_path
+from optionda.journal import last_quote_event, log_path, read_ledger_events
 from optionda.occ import OccError, parse_occ
 from optionda.paths import ensure_home
 
@@ -153,19 +153,9 @@ def _book_row(book: Any, position_id: str | None) -> dict[str, Any] | None:
 
 
 def read_events(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    events: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(event, dict):
-            events.append(event)
-    return events
+    from optionda.journal import load_log_events
+
+    return load_log_events(path, ledger_only=False)
 
 
 @dataclass(frozen=True)
@@ -591,6 +581,58 @@ def _open_lots_from_ids(
     return lots
 
 
+def _book_from_quotes(account: str, home: Path) -> BookSnapshot | None:
+    from optionda.quotes import load_latest_rows
+
+    rows = load_latest_rows(account, home)
+    if not rows:
+        return None
+    stored: list[dict[str, Any]] = []
+    dtes: list[float] = []
+    sum_upnl = 0.0
+    has_upnl = False
+    sum_model = 0.0
+    has_model = False
+    newest: datetime | None = None
+    for row in rows:
+        pos = row.position
+        if row.dte is not None:
+            dtes.append(row.dte)
+        if row.upnl is not None:
+            sum_upnl += row.upnl
+            has_upnl = True
+        if row.notional is not None:
+            sum_model += row.notional
+            has_model = True
+        opened = pos.iv_as_of
+        if newest is None or opened > newest:
+            newest = opened
+        _, _, option_type = _occ_meta(pos.occ_symbol)
+        stored.append(
+            {
+                "occ": pos.occ_symbol,
+                "underlying": pos.underlying,
+                "side": pos.side,
+                "option_type": option_type,
+                "qty": pos.qty,
+                "upnl": row.upnl,
+                "notional": row.notional,
+                "dte": row.dte,
+                "cost": row.cost if row.cost is not None else pos.entry_premium,
+                "model": row.theo,
+            }
+        )
+    return BookSnapshot(
+        ts=newest,
+        source="quotes",
+        sum_upnl=sum_upnl if has_upnl else None,
+        sum_model=sum_model if has_model else None,
+        n=len(stored),
+        avg_dte=(sum(dtes) / len(dtes)) if dtes else None,
+        rows=stored,
+    )
+
+
 def build_report(
     account: str,
     home: Path | None = None,
@@ -608,7 +650,7 @@ def build_report(
     instant = parse_ts(as_of) or datetime.now(timezone.utc)
     end = instant.astimezone(ET).date()
     start = period_start(end, period)
-    raw = events if events is not None else read_events(log_path(account, root))
+    raw = events if events is not None else read_ledger_events(log_path(account, root))
 
     first_open: dict[str, datetime] = {}
     last_occ_for_id: dict[str, str] = {}
@@ -642,8 +684,17 @@ def build_report(
             if sell is not None:
                 sells_all.append(sell)
                 last_occ_for_id[sell.position_id] = sell.occ
-        elif kind in {"run", "export"}:
+        elif kind in {"run", "export", "verify", "snapshot", "mail"}:
             book = _parse_book(event)
+
+    if events is None:
+        quoted = _book_from_quotes(account, root)
+        if quoted is not None:
+            book = quoted
+        elif book.source is None:
+            last = last_quote_event(log_path(account, root))
+            if last is not None:
+                book = _parse_book(last)
 
     if book.source is None:
         from optionda.marks import book_on

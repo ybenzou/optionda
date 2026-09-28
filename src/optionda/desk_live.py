@@ -25,6 +25,7 @@ from optionda.journal import append_export_log, sync_book
 from optionda.market.router import MarketRouter, resolve_poll_interval
 from optionda.market.session import session_due
 from optionda.paths import ensure_home
+from optionda.quotes import load_latest_rows, save_quotes
 from optionda.store import AccountStore, realized_pnl_summary
 
 Paint = Callable[[Any], None]
@@ -121,10 +122,23 @@ class DeskRunner:
         self._view_lock = threading.Lock()
         self.last_view: dict[str, Any] | None = None
         self.notes: list[str] = []
+        self.compact = False
 
     def _check(self) -> None:
         if self.should_stop():
             raise KeyboardInterrupt
+
+    def _remember_sync(self, result, *, announce: bool) -> None:
+        if result.next_close_at is not None:
+            self.next_close_at = result.next_close_at
+        self.next_retry_at = result.next_retry_at
+        if result.completed_session is not None:
+            self.completed_session = result.completed_session
+        if not result.unavailable:
+            self.notes.clear()
+        if announce:
+            for line in sync_notes(result):
+                self._note(line)
 
     def _note(self, text: str) -> None:
         if text:
@@ -229,6 +243,7 @@ class DeskRunner:
             framed=self.framed,
             reveal=reveal,
             reserve_sections=chrome_out and reveal is None,
+            compact=self.compact,
         )
 
     def _next_spin(self) -> str:
@@ -252,7 +267,7 @@ class DeskRunner:
         return renderable_html(self._snapshot(view), self.cols)
 
     def html_at(self, cols: int, rows: int, reveal=None) -> str | None:
-        from optionda.gui.richview import renderable_html
+        from optionda.gui.richview import renderable_html, renderable_lines
 
         self.cols = cols
         self.rows = rows
@@ -260,7 +275,10 @@ class DeskRunner:
             if self.last_view is None:
                 return None
             view = dict(self.last_view)
-        return renderable_html(self._snapshot(view, reveal=reveal), cols)
+        snap = self._snapshot(view, reveal=reveal)
+        if self.compact:
+            return renderable_lines(snap, cols)
+        return renderable_html(snap, cols)
 
     def _panel(
         self,
@@ -337,13 +355,7 @@ class DeskRunner:
             home=self.home,
             on_progress=on_progress,
         )
-        self.next_close_at = result.next_close_at
-        self.next_retry_at = result.next_retry_at
-        if result.completed_session is not None:
-            self.completed_session = result.completed_session
-        if announce:
-            for line in sync_notes(result):
-                self._note(line)
+        self._remember_sync(result, announce=announce)
 
     def commit_prev(self, rows) -> None:
         for row in rows:
@@ -359,6 +371,11 @@ class DeskRunner:
 
     def fetch_first(self, *, console: Console | None = None):
         acc = self.store.require_current()
+        from optionda.journal import migrate_ledger
+        from optionda.quotes import migrate_journal_quotes
+
+        migrate_journal_quotes(acc.name, self.home)
+        migrate_ledger(acc.name, self.home)
         router = MarketRouter(self.home)
         self._refresh_realized(acc.name)
         if console is not None:
@@ -368,9 +385,7 @@ class DeskRunner:
                 result = sync_completed_session(
                     acc, home=self.home, on_progress=on_progress
                 )
-                self.next_close_at = result.next_close_at
-                self.next_retry_at = result.next_retry_at
-                self.completed_session = result.completed_session
+                self._remember_sync(result, announce=False)
                 for line in sync_notes(result):
                     console.print(f"[dim]{line}[/dim]")
                 self._sync(acc, on_progress, announce=False)
@@ -389,7 +404,7 @@ class DeskRunner:
                     total=n_pos,
                 )
         else:
-            hold_rows: list = []
+            hold_rows = load_latest_rows(acc.name, self.home)
 
             def on_progress(label: str, done: int, steps: int) -> None:
                 self._poll(
@@ -408,18 +423,14 @@ class DeskRunner:
                 router,
                 hold_rows,
                 poll_fraction=0.0,
-                poll_label="updating…",
+                poll_label="last quote" if hold_rows else "updating…",
                 poll_busy=True,
                 full=True,
             )
             result = sync_completed_session(
                 acc, home=self.home, on_progress=on_progress
             )
-            self.next_close_at = result.next_close_at
-            self.next_retry_at = result.next_retry_at
-            self.completed_session = result.completed_session
-            for line in sync_notes(result):
-                self._note(line)
+            self._remember_sync(result, announce=True)
             self._sync(acc, on_progress, announce=False)
             rows = mark_account(
                 acc,
@@ -428,8 +439,8 @@ class DeskRunner:
                 on_progress=on_progress,
                 completed_session=self.completed_session,
             )
+        save_quotes(acc.name, rows, home=self.home, source="run")
         sync_book(acc, self.home)
-        append_export_log(acc, rows, feed=router.feed_name, home=self.home, source="run")
         return acc, router, rows
 
     def fetch_live(self, acc, router, rows):
@@ -474,10 +485,8 @@ class DeskRunner:
             poll_label="writing…",
             poll_busy=True,
         )
+        save_quotes(nxt.name, marked, home=self.home, source="run")
         sync_book(nxt, self.home)
-        append_export_log(
-            nxt, marked, feed=nxt_router.feed_name, home=self.home, source="run"
-        )
         return nxt, nxt_router, marked
 
     def play_flash(self, acc, router, rows) -> None:
@@ -577,11 +586,14 @@ class DeskRunner:
 
     def run_once(self, *, source: str = "export") -> None:
         acc = self.store.require_current()
+        from optionda.journal import migrate_ledger
+        from optionda.quotes import migrate_journal_quotes
+
+        migrate_journal_quotes(acc.name, self.home)
+        migrate_ledger(acc.name, self.home)
         router = MarketRouter(self.home)
         result = sync_completed_session(acc, home=self.home)
-        self.completed_session = result.completed_session
-        for line in sync_notes(result):
-            self._note(line)
+        self._remember_sync(result, announce=True)
         hold_rows: list = []
         self._refresh_realized(acc.name)
 
@@ -615,6 +627,7 @@ class DeskRunner:
             on_progress=on_progress,
             completed_session=self.completed_session,
         )
+        save_quotes(acc.name, rows, home=self.home)
         sync_book(acc, self.home)
         append_export_log(acc, rows, feed=router.feed_name, home=self.home, source=source)
         self.paint(self._panel(acc, router, rows, continuous=False))

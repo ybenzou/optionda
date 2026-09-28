@@ -14,7 +14,7 @@ from optionda.market.session import (
     quote_in_close_window,
 )
 from optionda.occ import OccError, parse_occ
-from optionda.paths import ensure_home
+from optionda.paths import ensure_home, resolve_home
 from optionda.pricing.bs import implied_volatility, price_option, years_to_expiry
 
 SURFACE_SCHEMA_VERSION = 3
@@ -82,10 +82,11 @@ class OvernightIvEstimate:
     method: str
 
 
-def surfaces_dir(home: Path | None = None) -> Path:
-    root = ensure_home(home)
+def surfaces_dir(home: Path | None = None, *, create: bool = True) -> Path:
+    root = ensure_home(home) if create else (home if home is not None else resolve_home())
     path = root / "surfaces"
-    path.mkdir(parents=True, exist_ok=True)
+    if create:
+        path.mkdir(parents=True, exist_ok=True)
     return path
 
 
@@ -97,9 +98,11 @@ def surface_session_path(
     underlying: str,
     session_date: date,
     home: Path | None = None,
+    *,
+    create: bool = True,
 ) -> Path:
     return (
-        surfaces_dir(home)
+        surfaces_dir(home, create=create)
         / underlying.strip().upper()
         / f"{session_date.isoformat()}.json"
     )
@@ -187,6 +190,7 @@ def build_surface(
                 dividend=node_dividend,
                 option_type=parts.option_type,
                 style=style,  # type: ignore[arg-type]
+                only_delta=True,
             ).delta
         except (ValueError, OverflowError):
             rejected += 1
@@ -303,7 +307,7 @@ def load_surface_for_session(
     session_date: date,
     home: Path | None = None,
 ) -> IvSurface | None:
-    path = surface_session_path(underlying, session_date, home)
+    path = surface_session_path(underlying, session_date, home, create=False)
     surface = _load_surface_file(path)
     if surface is None or surface.session_date != session_date:
         return None

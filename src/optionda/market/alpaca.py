@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
@@ -44,6 +45,10 @@ _STOCK_FEEDS = ("overnight", "boats", "delayed_sip", "iex")
 
 class AlpacaError(RuntimeError):
     pass
+
+
+_TRANSIENT = (httpx.TransportError, TimeoutError, ConnectionError)
+_ATTEMPTS = 3
 
 
 class AlpacaClient:
@@ -623,10 +628,22 @@ class AlpacaClient:
         url: str,
         params: dict[str, str] | None = None,
     ) -> Any:
-        response = client.get(url, params=params)
-        if response.status_code >= 400:
-            raise AlpacaError(f"alpaca HTTP {response.status_code}: {response.text[:200]}")
-        return response.json()
+        last: Exception | None = None
+        for attempt in range(_ATTEMPTS):
+            try:
+                response = client.get(url, params=params)
+            except _TRANSIENT as exc:
+                last = exc
+                if attempt + 1 == _ATTEMPTS:
+                    raise AlpacaError(f"alpaca connection failed: {exc}") from exc
+                time.sleep(0.4 * (attempt + 1))
+                continue
+            if response.status_code >= 400:
+                raise AlpacaError(
+                    f"alpaca HTTP {response.status_code}: {response.text[:200]}"
+                )
+            return response.json()
+        raise AlpacaError(f"alpaca connection failed: {last}")
 
     @staticmethod
     def _get(client: httpx.Client, url: str, params: dict[str, str] | None = None) -> dict:

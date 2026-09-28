@@ -4,29 +4,53 @@ from __future__ import annotations
 
 import html
 
-from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QColor, QFont, QPainter, QPen, QTextCursor, QTextDocument
-from PySide6.QtWidgets import QLabel, QSizePolicy, QTextEdit, QVBoxLayout, QWidget
+from PySide6.QtCore import QSize, Qt, QUrl, Signal
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen, QTextCursor, QTextDocument
+from PySide6.QtWidgets import (
+    QLabel,
+    QSizePolicy,
+    QSplitter,
+    QTextBrowser,
+    QVBoxLayout,
+    QWidget,
+)
+
+from optionda.gui.strategy_pane import StrategyPane
 
 from optionda.gui.richview import wrap_desk_html
 from optionda.gui.splash import WORD, mark_html
-from optionda.gui.theme import CYAN, MUTED, PROMPT, mono_font
+from optionda.gui.theme import BG, CYAN, MUTED, PROMPT, TEXT, mono_font
+
+# Compact run desk. The table renders at 53 columns; one extra keeps the last glyph off the splitter.
+_DESK_COLS = 54
+_CHART_MIN_PX = 280
 
 
-class _Pane(QTextEdit):
+class _Pane(QTextBrowser):
+    contract_clicked = Signal(str)
+
     def __init__(self, parent: QWidget | None = None, name: str = "term") -> None:
         super().__init__(parent)
         self.setObjectName(name)
         self.setReadOnly(True)
         self.setUndoRedoEnabled(False)
+        self.setOpenLinks(False)
+        self.setOpenExternalLinks(False)
         self.setFont(mono_font(12))
         self.document().setDefaultFont(mono_font(12))
-        self.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        self.setLineWrapMode(QTextBrowser.LineWrapMode.NoWrap)
         self.setAcceptRichText(True)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.setFrameShape(QTextEdit.Shape.NoFrame)
+        self.setFrameShape(QTextBrowser.Shape.NoFrame)
         self.document().setDocumentMargin(0)
+        self.document().setDefaultStyleSheet("a { text-decoration: none; }")
+        self.anchorClicked.connect(self._emit_contract)
+
+    def _emit_contract(self, url: QUrl) -> None:
+        href = url.toString()
+        if href.startswith("optionda:"):
+            self.contract_clicked.emit(href.removeprefix("optionda:"))
 
     def sizeHint(self) -> QSize:  # noqa: N802
         return QSize(100, 80)
@@ -98,25 +122,206 @@ def _splash_label(
     return label
 
 
+class _ChromeLine(QWidget):
+    """Spinner line. Text changes repaint this strip only, not the chart beside it."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("liveChrome")
+        self._text = ""
+        self.setFont(mono_font(12))
+        self.setFixedHeight(max(self.fontMetrics().height() + 4, 16))
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+
+    def text(self) -> str:
+        return self._text
+
+    def setText(self, text: str) -> None:  # noqa: N802
+        if text == self._text:
+            return
+        self._text = text
+        self.update()
+
+    def clear(self) -> None:
+        self.setText("")
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor(BG))
+        painter.setFont(self.font())
+        painter.setPen(QColor(TEXT))
+        painter.drawText(
+            self.rect(),
+            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+            self._text,
+        )
+
+
+class _DeskList(QWidget):
+    """Run desk rows. A paint, not a text document, so refresh and clicks stay cheap."""
+
+    contract_clicked = Signal(str)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("deskList")
+        self._font = mono_font(12)
+        self._bold = QFont(self._font)
+        self._bold.setBold(True)
+        self.setFont(self._font)
+        regular = self.fontMetrics()
+        bold_metrics = QFontMetrics(self._bold)
+        self._line_h = max(regular.height(), bold_metrics.height(), 1)
+        self._ascent = max(regular.ascent(), bold_metrics.ascent())
+        self._lines: tuple = ()
+        self._scroll = 0
+        self._colors: dict[str, QColor] = {}
+        self.setMouseTracking(True)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+        self.hide()
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        return QSize(0, 0)
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        return QSize(0, 0)
+
+    def line_count(self) -> int:
+        return len(self._lines)
+
+    def plain_text(self) -> str:
+        rows = []
+        for _occ, spans in self._lines:
+            rows.append("".join(span[0] for span in spans))
+        return "\n".join(rows)
+
+    def clear(self) -> None:
+        self.set_lines(())
+
+    def set_lines(self, lines) -> None:
+        packed = tuple(lines)
+        if packed == self._lines:
+            return
+        self._lines = packed
+        self._clamp_scroll()
+        self.update()
+
+    def _ink(self, color: str) -> QColor:
+        found = self._colors.get(color)
+        if found is None:
+            found = QColor(color)
+            self._colors[color] = found
+        return found
+
+    def _clamp_scroll(self) -> None:
+        limit = max(0, self._line_h * len(self._lines) - self.height())
+        if self._scroll > limit:
+            self._scroll = limit
+        if self._scroll < 0:
+            self._scroll = 0
+
+    def _occ_at(self, y: float) -> str:
+        if self._line_h <= 0:
+            return ""
+        index = int((y + self._scroll) // self._line_h)
+        if index < 0 or index >= len(self._lines):
+            return ""
+        return str(self._lines[index][0] or "")
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor(BG))
+        top = -self._scroll
+        for _occ, spans in self._lines:
+            if top + self._line_h >= 0 and top < self.height():
+                x = 0
+                baseline = top + self._ascent
+                for text, fg, bg, bold in spans:
+                    font = self._bold if bold else self._font
+                    painter.setFont(font)
+                    width = painter.fontMetrics().horizontalAdvance(text)
+                    if bg:
+                        painter.fillRect(x, top, width, self._line_h, self._ink(bg))
+                    painter.setPen(self._ink(fg))
+                    painter.drawText(x, baseline, text)
+                    x += width
+            top += self._line_h
+            if top > self.height():
+                break
+        painter.end()
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        y = event.position().y() if hasattr(event, "position") else event.y()
+        want = (
+            Qt.CursorShape.PointingHandCursor
+            if self._occ_at(y)
+            else Qt.CursorShape.ArrowCursor
+        )
+        if self.cursor().shape() != want:
+            self.setCursor(want)
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            y = event.position().y() if hasattr(event, "position") else event.y()
+            occ = self._occ_at(y)
+            if occ:
+                self.contract_clicked.emit(occ)
+                event.accept()
+                return
+        super().mouseReleaseEvent(event)
+
+    def wheelEvent(self, event) -> None:  # noqa: N802
+        delta = event.angleDelta().y()
+        if delta:
+            notches = delta / 120.0
+            self._scroll -= int(notches * self._line_h * 3)
+            self._clamp_scroll()
+            self.update()
+        event.accept()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        self._clamp_scroll()
+        super().resizeEvent(event)
+
+
 class TerminalView(QWidget):
     def __init__(self, parent: QWidget | None = None, *, splash: bool = False) -> None:
         super().__init__(parent)
         self.history = _Pane(self, "term")
         self.live = _Pane(self, "termLive")
-        self._status = QLabel()
-        self._status.setObjectName("liveChrome")
-        self._status.setFont(mono_font(12))
-        self._status.setWordWrap(False)
-        line = self._status.fontMetrics().height() + 4
-        self._status.setFixedHeight(max(line, 16))
+        self._status = _ChromeLine()
         self._status.hide()
         inner = QWidget()
+        inner.setMinimumWidth(0)
+        inner.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
         inner_l = QVBoxLayout(inner)
         inner_l.setContentsMargins(0, 0, 0, 0)
         inner_l.setSpacing(0)
         inner_l.addWidget(self._status, 0)
+        self.desk_list = _DeskList()
+        inner_l.addWidget(self.desk_list, 1)
         inner_l.addWidget(self.live, 1)
-        self.desk = _DashFrame(inner, self)
+        self.strategy = StrategyPane(self)
+        self.strategy.hide()
+        self.live.contract_clicked.connect(self.strategy.focus_contract)
+        self.desk_list.contract_clicked.connect(self.strategy.focus_contract)
+        self._split = QSplitter(Qt.Orientation.Horizontal)
+        self._split.setObjectName("deskSplit")
+        self._split.setChildrenCollapsible(False)
+        self._split.addWidget(inner)
+        self._split.addWidget(self.strategy)
+        self._split.setStretchFactor(0, 0)
+        self._split.setStretchFactor(1, 1)
+        handle = self._split.handle(1)
+        if handle is not None:
+            handle.setEnabled(False)
+        self.strategy.setMinimumSize(0, 0)
+        self.strategy.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        self.desk = _DashFrame(self._split, self)
         self.desk.hide()
         self._splash = QWidget(self)
         self._splash.setObjectName("splash")
@@ -142,7 +347,7 @@ class TerminalView(QWidget):
         self._chrome: dict = {}
         self._chrome_slot = False
         self._cell: tuple[float, float] | None = None
-        self.history.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        self.history.setLineWrapMode(QTextBrowser.LineWrapMode.WidgetWidth)
         self.history.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
@@ -157,11 +362,13 @@ class TerminalView(QWidget):
         layout.addWidget(self.desk, 1)
         if splash:
             self.history.hide()
+        self.set_strategy_visible(False)
         self._fit_history()
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         self._fit_history()
+        self._lock_split()
 
     def splash_visible(self) -> bool:
         return not self._splash.isHidden()
@@ -172,6 +379,34 @@ class TerminalView(QWidget):
         self._splash.hide()
         if self.history.isHidden():
             self.history.show()
+
+    def locked_left_width(self) -> int:
+        """Pixel width that fits contract, spot, cost, and model."""
+        advance, _line = self._cell_size()
+        return int(advance * _DESK_COLS) + 4
+
+    def set_strategy_visible(self, visible: bool) -> None:
+        self.strategy.setVisible(visible)
+        self._lock_split()
+
+    def _lock_split(self) -> None:
+        total = self._split.width()
+        handle = self._split.handleWidth()
+        usable = total - handle
+        if usable < 2:
+            return
+        if self.strategy.isHidden():
+            sizes = [usable, 0]
+        else:
+            left = self.locked_left_width()
+            right = usable - left
+            if right < _CHART_MIN_PX:
+                right = min(_CHART_MIN_PX, max(usable // 2, 1))
+                left = usable - right
+            sizes = [left, right]
+        if self._split.sizes() == sizes:
+            return
+        self._split.setSizes(sizes)
 
     def prepare_live(self) -> None:
         self.hide_splash()
@@ -255,16 +490,39 @@ class TerminalView(QWidget):
             self._status.setText(text or " ")
         self._status.show()
 
+    def _table_on_screen(self) -> bool:
+        if not self.desk_list.isHidden() and self.desk_list.line_count():
+            return True
+        return bool(self.live.toPlainText())
+
+    def set_live_frame(self, payload) -> None:
+        if isinstance(payload, (list, tuple)):
+            self.set_live_lines(payload)
+        else:
+            self.set_live_html(str(payload))
+
+    def set_live_lines(self, lines) -> None:
+        """Paint the run list. Later refreshes only repaint this widget."""
+        self.desk_list.set_lines(lines)
+        if not self.live.isHidden():
+            self.live.hide()
+        if self.desk_list.isHidden():
+            self.desk_list.show()
+        if self.desk.isHidden():
+            self.desk.show()
+
     def set_live_html(self, markup: str, *, wrap: bool = False) -> None:
         self.live.setLineWrapMode(
-            QTextEdit.LineWrapMode.WidgetWidth
+            QTextBrowser.LineWrapMode.WidgetWidth
             if wrap
-            else QTextEdit.LineWrapMode.NoWrap
+            else QTextBrowser.LineWrapMode.NoWrap
         )
         if not wrap and not self._chrome_slot:
             self._chrome = {}
             self._status.clear()
             self._status.hide()
+        if not self.desk_list.isHidden():
+            self.desk_list.hide()
         self.live.setHtml(markup)
         if self.desk.isHidden():
             self.desk.show()
@@ -315,11 +573,14 @@ class TerminalView(QWidget):
             self.history.show()
         if self.desk.isHidden():
             self.desk.show()
-        if keep_table and self.live.toPlainText():
-            self.live.show()
+        if keep_table and self._table_on_screen():
+            if not self.desk_list.isHidden():
+                self.desk_list.show()
+            elif self.live.toPlainText():
+                self.live.show()
         elif not keep_table:
             self.live.hide()
-        self._fit_history()
+            self.desk_list.hide()
 
     def bump_live_spin(self) -> bool:
         if not self._chrome.get("poll_busy"):
@@ -347,7 +608,7 @@ class TerminalView(QWidget):
             )
         else:
             self._chrome.pop("text", None)
-        keep = bool(self.live.toPlainText()) or page
+        keep = self._table_on_screen() or page
         self.set_live_chrome(self._chrome, keep_table=keep)
         return True
 
@@ -366,6 +627,8 @@ class TerminalView(QWidget):
         self._chrome_slot = False
         self._status.clear()
         self._status.hide()
+        self.desk_list.clear()
+        self.desk_list.hide()
         self.live.clear()
         self.live.hide()
         self.desk.hide()

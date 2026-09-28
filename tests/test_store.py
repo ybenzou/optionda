@@ -123,8 +123,9 @@ def test_add_delete_append_event_log(tmp_path, monkeypatch) -> None:
     store.add_position(None, again)
     store.delete_position(None, "AAPL270115C00200000")
 
-    path = log_path("demo", tmp_path)
-    events = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    from optionda.journal import read_ledger_events
+
+    events = read_ledger_events(log_path("demo", tmp_path))
     assert [e["event"] for e in events] == ["add", "merge", "delete"]
     assert events[0]["qty_added"] == 2
     assert events[1]["qty"] == 5

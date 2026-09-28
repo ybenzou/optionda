@@ -11,10 +11,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from optionda.analytics import read_events
+from optionda.journal import log_path, read_ledger_events, replace_log, sync_book
 from optionda.config import load_config, save_config
 from optionda.credentials import load_alpaca, save_alpaca
-from optionda.journal import log_path, replace_log, sync_book
 from optionda.models import Account, AppConfig
 from optionda.store import AccountStore, StoreError
 
@@ -294,7 +293,7 @@ def pack_account(
     root = home if home is not None else store.home
     config = load_config(root)
     creds = load_alpaca(root)
-    journal = slim_journal(read_events(log_path(account.name, root)))
+    journal = slim_journal(read_ledger_events(log_path(account.name, root)))
     payload = build_payload(
         account,
         config,

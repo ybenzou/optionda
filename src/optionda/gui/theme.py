@@ -57,10 +57,6 @@ QLabel#kpiLine {{
     color: {TEXT};
     font-size: 13px;
 }}
-QLabel#newsFlash {{
-    color: {MUTED};
-    font-size: 11px;
-}}
 QListWidget {{
     background: {BG};
     color: {TEXT};

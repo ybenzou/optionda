@@ -436,15 +436,9 @@ def realized_pnl_summary(
     total = 0.0
     n_sells = 0
     by_occ: dict[str, float] = {}
-    if not path.exists():
-        return {"realized": 0.0, "n_sells": 0, "by_occ": {}}
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+    from optionda.journal import read_ledger_events
+
+    for event in read_ledger_events(path):
         kind = event.get("event")
         if kind not in {"sell", "undo"}:
             continue

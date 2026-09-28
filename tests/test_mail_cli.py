@@ -87,11 +87,20 @@ def test_mail_send_and_journal_omit_secrets(tmp_path, monkeypatch) -> None:
         result = runner.invoke(app, ["mail"])
     assert result.exit_code == 0, result.output
     smtp.assert_called_once()
-    journal = log_path("demo", tmp_path).read_text(encoding="utf-8")
-    assert "not-a-real-password" not in journal
-    assert "devnull@example.com" not in journal
-    assert "Message-ID" not in journal
-    assert '"event": "mail"' in journal or '"event":"mail"' in journal
+    from optionda.quotes import quote_db_path
+
+    stored = quote_db_path("demo", tmp_path).read_bytes()
+    assert b"not-a-real-password" not in stored
+    assert b"devnull@example.com" not in stored
+    assert b"Message-ID" not in stored
+    import sqlite3
+
+    conn = sqlite3.connect(quote_db_path("demo", tmp_path))
+    try:
+        kinds = [row[0] for row in conn.execute("SELECT source FROM quotes")]
+    finally:
+        conn.close()
+    assert "mail" in kinds
 
 
 def test_mail_paused_one_shot_refuses(tmp_path, monkeypatch) -> None:

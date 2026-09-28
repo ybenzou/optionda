@@ -13,7 +13,7 @@ def main() -> None:
     parser.add_argument("--account", default="")
     parser.add_argument("--home", required=True)
     parser.add_argument("--period", default="all")
-    parser.add_argument("--view", default="term", choices=("term", "stats", "desk"))
+    parser.add_argument("--view", default="term", choices=("term", "stats", "desk", "sql"))
     args = parser.parse_args()
     run_foreground(
         args.account,

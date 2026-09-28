@@ -46,8 +46,9 @@ def test_partial_sell_long_realizes_pnl_and_keeps_remainder(tmp_path, monkeypatc
     assert outcome.position.qty == 1
     assert outcome.position.entry_premium == pytest.approx(6.7)
 
-    lines = log_path("demo", tmp_path).read_text(encoding="utf-8").strip().splitlines()
-    events = [__import__("json").loads(line) for line in lines]
+    from optionda.journal import read_ledger_events
+
+    events = read_ledger_events(log_path("demo", tmp_path))
     sell = next(event for event in events if event["event"] == "sell")
     assert sell["qty_sold"] == 1
     assert sell["exit"] == 8.5
@@ -70,10 +71,9 @@ def test_merge_keeps_opened_at_and_writes_entry_dte(tmp_path, monkeypatch) -> No
     second = store.add_position(None, _pos(qty=1, entry=7.0))
     assert second.merged is True
     assert second.position.opened_at == opened
-    events = [
-        __import__("json").loads(line)
-        for line in log_path("demo", tmp_path).read_text(encoding="utf-8").splitlines()
-    ]
+    from optionda.journal import read_ledger_events
+
+    events = read_ledger_events(log_path("demo", tmp_path))
     merge = next(event for event in events if event["event"] == "merge")
     assert merge["dte_at_entry"] is not None
 

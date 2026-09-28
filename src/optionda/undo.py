@@ -5,8 +5,8 @@ from datetime import date, datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-from optionda.analytics import parse_ts, read_events
-from optionda.journal import append_undo_event, log_path, sync_book
+from optionda.analytics import parse_ts
+from optionda.journal import append_undo_event, log_path, read_ledger_events, sync_book
 from optionda.models import Position
 from optionda.occ import OccError, parse_occ
 from optionda.store import AccountStore, StoreError
@@ -102,7 +102,7 @@ def positions_from_book(book: list[dict[str, Any]]) -> list[Position]:
 
 def undo_last(store: AccountStore) -> UndoResult:
     account = store.require_current()
-    events = read_events(log_path(account.name, store.home))
+    events = read_ledger_events(log_path(account.name, store.home))
     start, end = last_batch_span(events)
     if start < 0:
         raise StoreError("nothing to undo")

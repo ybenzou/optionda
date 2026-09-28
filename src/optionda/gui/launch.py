@@ -13,7 +13,7 @@ from optionda.analytics import Period
 from optionda.journal import logs_dir
 from optionda.paths import ensure_home
 
-View = Literal["term", "stats", "desk"]
+View = Literal["term", "stats", "desk", "sql"]
 APP_USER_MODEL_ID = "yuanben.optionda.desk"
 
 

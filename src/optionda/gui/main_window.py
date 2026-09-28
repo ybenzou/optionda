@@ -20,13 +20,11 @@ from PySide6.QtWidgets import (
 )
 
 from optionda.analytics import Period
-from optionda.gui.richview import renderable_html
+from optionda.gui.richview import renderable_html, renderable_lines
 from optionda.gui.shell import CommandResult, active_account, dispatch, parse_line, sync_active_env
 from optionda.gui.stats_view import StatsView
 from optionda.gui.terminal_view import TerminalView
-from optionda.config import load_config
 from optionda.gui.theme import app_icon, apply_native_chrome, mono_font
-from optionda.news import format_news_line, items_lookback, poll_news
 
 _BUILTINS = {
     "exit",
@@ -39,12 +37,13 @@ _BUILTINS = {
     "?",
     "stats",
     "desk",
+    "sql",
     "run",
     "export",
     "stop",
 }
 
-View = Literal["term", "stats", "desk"]
+View = Literal["term", "stats", "desk", "sql"]
 
 
 class TermPage:
@@ -73,7 +72,7 @@ class _ShellWorker(QThread):
 
 
 class _DeskWorker(QThread):
-    frame = Signal(str)
+    frame = Signal(object)
     chrome = Signal(object)
     note = Signal(str)
     failed = Signal(str)
@@ -95,13 +94,18 @@ class _DeskWorker(QThread):
         return self._stop
 
     def run(self) -> None:
+        # Chain calibration is pure Python. Stay behind the UI thread when both are runnable.
+        self.setPriority(QThread.Priority.LowPriority)
         from optionda.desk_live import DeskRunner
         from optionda.store import AccountStore, StoreError
 
         def paint(renderable) -> None:
             if self._stop:
                 raise KeyboardInterrupt
-            self.frame.emit(renderable_html(renderable, self.cols))
+            if self.mode == "run":
+                self.frame.emit(renderable_lines(renderable, self.cols))
+            else:
+                self.frame.emit(renderable_html(renderable, self.cols))
 
         def on_chrome(payload) -> None:
             if self._stop:
@@ -122,6 +126,7 @@ class _DeskWorker(QThread):
             self.runner = runner
             runner.cols = self.cols
             runner.rows = self.rows
+            runner.compact = self.mode == "run"
             if self.mode == "export":
                 runner.run_once(source="export")
             else:
@@ -133,44 +138,6 @@ class _DeskWorker(QThread):
             self.failed.emit(str(exc))
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(str(exc))
-
-
-class _NewsWorker(QThread):
-    batch = Signal(object)
-    latest = Signal(str)
-    status = Signal(str)
-
-    def __init__(self, home: Path | None) -> None:
-        super().__init__()
-        self.home = home
-        self._stop = False
-
-    def request_stop(self) -> None:
-        self._stop = True
-
-    def run(self) -> None:
-        first = True
-        while not self._stop:
-            cfg = load_config(self.home)
-            if cfg.news_enabled:
-                try:
-                    poll_news(self.home)
-                    items = items_lookback(self.home)
-                    self.batch.emit(items)
-                    if items:
-                        self.latest.emit(format_news_line(items[0]))
-                    else:
-                        self.status.emit("no holdings news")
-                except Exception as exc:  # noqa: BLE001
-                    self.status.emit(str(exc))
-            else:
-                self.status.emit("news off")
-            wait = 1 if first else max(int(cfg.news_poll_sec or 75), 15)
-            first = False
-            for _ in range(wait):
-                if self._stop:
-                    return
-                self.msleep(1000)
 
 
 class _AddWorker(QThread):
@@ -248,6 +215,26 @@ class PromptInput(QLineEdit):
         super().keyPressEvent(event)
 
 
+class _StrategyLoader(QThread):
+    ready = Signal(object)
+
+    def __init__(self, account: str, home: Path | None, *, have_cache: bool) -> None:
+        super().__init__()
+        self.account = account
+        self.home = home
+        self.have_cache = have_cache
+
+    def run(self) -> None:
+        from optionda.strategy import refresh_strategy
+
+        try:
+            series, changed = refresh_strategy(self.account, self.home)
+        except Exception:  # noqa: BLE001 — keep the charts already on screen
+            return
+        if changed or not self.have_cache:
+            self.ready.emit(series)
+
+
 class MainWindow(QMainWindow):
     def __init__(
         self,
@@ -268,6 +255,8 @@ class MainWindow(QMainWindow):
         self._history: list[str] = []
         self._hist_i = 0
         self._worker: _ShellWorker | None = None
+        self._sql = None
+        self._strategy_loader: _StrategyLoader | None = None
         self._pages: list[TermPage] = []
         self._filling = False
         self._resizing = False
@@ -323,7 +312,7 @@ class MainWindow(QMainWindow):
         self._input = PromptInput()
         self._input.setObjectName("promptInput")
         self._input.setFont(mono_font(12))
-        self._input.setPlaceholderText("run   export   stats   add   activate")
+        self._input.setPlaceholderText("run   export   stats   sql   add   activate")
         self._input.returnPressed.connect(self._submit)
         self._input.history_up.connect(lambda: self._recall(-1))
         self._input.history_down.connect(lambda: self._recall(1))
@@ -333,12 +322,6 @@ class MainWindow(QMainWindow):
         self._reload_btn.setObjectName("primary")
         self._reload_btn.clicked.connect(self.reload)
         row.addWidget(self._reload_btn)
-        self._news_line = QLabel()
-        self._news_line.setObjectName("newsFlash")
-        self._news_line.setFont(mono_font(11))
-        self._news_line.setTextFormat(Qt.TextFormat.PlainText)
-        self._news_line.setText("news …")
-        row.addWidget(self._news_line, 1)
         self.setMenuWidget(bar)
         self._tabbar = QTabBar()
         self._tabbar.setObjectName("pageTabs")
@@ -362,15 +345,15 @@ class MainWindow(QMainWindow):
         status.addWidget(self._tabbar, 1)
         status.addWidget(self._new_tab)
         self._idle_status = ""
-        self._news = _NewsWorker(self.home)
-        self._news.batch.connect(self._on_news_batch)
-        self._news.latest.connect(self._on_news_latest)
-        self._news.status.connect(self._on_news_latest)
-        self._news.start()
         self.add_tab()
         self._bind_keys()
         self._sync_prompt()
-        self.show_view("stats" if initial_view in {"stats", "desk"} else "term")
+        if initial_view in {"stats", "desk"}:
+            self.show_view("stats")
+        elif initial_view == "sql":
+            self.show_view("sql")
+        else:
+            self.show_view("term")
 
     @property
     def terminal(self) -> TerminalView:
@@ -526,7 +509,6 @@ class MainWindow(QMainWindow):
             self._stats.calendar.day_changed.connect(
                 lambda _day: self._sync_stats_chrome()
             )
-            self._stats.news.show_items(items_lookback(self.home))
         return self._stats
 
     @property
@@ -543,10 +525,23 @@ class MainWindow(QMainWindow):
             self._set_stats_chrome(True)
             self._sync_stats_chrome()
             QTimer.singleShot(0, stats.refresh_visible)
+        elif view == "sql":
+            self._stack.setCurrentWidget(self._ensure_sql())
+            self._set_stats_chrome(False)
         else:
             self._stack.setCurrentWidget(self._terms)
             self._set_stats_chrome(False)
         self._input.setFocus()
+
+    def _ensure_sql(self):
+        if self._sql is None:
+            from optionda.gui.sql_window import SqlWindow
+            from optionda.paths import resolve_home
+
+            home = self.home if self.home is not None else resolve_home()
+            self._sql = SqlWindow(home)
+            self._stack.addWidget(self._sql)
+        return self._sql
 
     def set_period(self, period: Period) -> None:
         self._stats_period = period
@@ -560,15 +555,6 @@ class MainWindow(QMainWindow):
             stats.account = self.account
         stats.reload()
         self._sync_stats_chrome()
-
-    def _on_news_batch(self, items: object) -> None:
-        if self._stats is not None:
-            self._stats.news.show_items(list(items or []))
-
-    def _on_news_latest(self, text: object) -> None:
-        line = str(text or "").strip()
-        self._news_line.setText(line)
-        self._news_line.setToolTip(line)
 
     def _recall(self, step: int) -> None:
         if not self._history:
@@ -586,7 +572,7 @@ class MainWindow(QMainWindow):
             return
         args = parse_line(line)
         cmd = args[0].lower() if args else ""
-        if self._desk is not None and self._desk.isRunning():
+        if self._desk is not None and self._desk.isRunning() and cmd != "sql":
             if cmd == "stop":
                 self._request_stop(self._desk)
                 return
@@ -595,7 +581,7 @@ class MainWindow(QMainWindow):
                 f"{cmd or 'command'} blocked — run is live, stop first"
             )
             return
-        if self._add is not None and self._add.isRunning():
+        if self._add is not None and self._add.isRunning() and cmd != "sql":
             if cmd == "stop":
                 self._request_stop(self._add)
                 return
@@ -651,6 +637,9 @@ class MainWindow(QMainWindow):
         if result.action in {"run", "export"}:
             self._start_desk(result.action)
             return
+        if result.action == "sql":
+            self._open_sql()
+            return
         if result.action == "stats":
             self.set_period("all")
             if not self.account:
@@ -664,6 +653,9 @@ class MainWindow(QMainWindow):
             self.terminal.append_block(result.text)
         self.show_view("term")
 
+    def _open_sql(self) -> None:
+        self.show_view("sql")
+
     def _start_desk(self, mode: str) -> None:
         if not self.account:
             self.terminal.append_block("activate an account first")
@@ -674,24 +666,28 @@ class MainWindow(QMainWindow):
 
         page = self._page()
         self._reset_reveal(page)
-        self.terminal.set_live_chrome(
-            {
-                "poll_busy": True,
-                "poll_label": "updating…",
-                "poll_done": 0,
-                "poll_total": 1,
-                "page": True,
-                "explain": True,
-                "spin": spinner_frame(0),
-                "text": format_load_progress(
-                    spin=spinner_frame(0),
-                    label="updating…",
-                    done=0,
-                    total=1,
-                ),
-            },
-            keep_table=False,
-        )
+        if not self._show_saved_quotes(compact=mode == "run"):
+            self.terminal.set_live_chrome(
+                {
+                    "poll_busy": True,
+                    "poll_label": "updating…",
+                    "poll_done": 0,
+                    "poll_total": 1,
+                    "page": True,
+                    "explain": True,
+                    "spin": spinner_frame(0),
+                    "text": format_load_progress(
+                        spin=spinner_frame(0),
+                        label="updating…",
+                        done=0,
+                        total=1,
+                    ),
+                },
+                keep_table=False,
+            )
+        else:
+            page.revealed = True
+        self.terminal.set_strategy_visible(mode == "run")
         QApplication.processEvents()
         cols, rows = self.terminal.char_size()
         page.desk = _DeskWorker(self.home, mode, cols, rows)
@@ -701,7 +697,68 @@ class MainWindow(QMainWindow):
         page.desk.failed.connect(lambda message, p=page: self._on_desk_failed(message, p))
         page.desk.finished_ok.connect(lambda p=page: self._on_desk_done(p))
         page.desk.start()
+        if mode == "run":
+            self._kick_strategy()
         self._sync_spin_timer()
+
+    def _show_saved_quotes(self, *, compact: bool = False) -> bool:
+        """Paint the last stored desk before the live fetch starts."""
+        if not self.account:
+            return False
+        from optionda.display.table import render_snapshot, spinner_frame
+        from optionda.gui.richview import renderable_html, renderable_lines
+        from optionda.market.router import MarketRouter, resolve_poll_interval
+        from optionda.quotes import load_latest_rows
+
+        rows = load_latest_rows(self.account, self.home)
+        if not rows:
+            return False
+        router = MarketRouter(self.home)
+        cols, _lines = self.terminal.char_size()
+        snap = render_snapshot(
+            account=self.account,
+            feed=router.feed_name,
+            refresh_sec=resolve_poll_interval(self.home),
+            rows=rows,
+            continuous=True,
+            header_bar=False,
+            framed=False,
+            reserve_sections=True,
+            compact=compact,
+        )
+        if compact:
+            self.terminal.set_live_lines(renderable_lines(snap, cols))
+        else:
+            self.terminal.set_live_html(renderable_html(snap, cols))
+        self.terminal.set_live_chrome(
+            {
+                "poll_busy": True,
+                "poll_label": "last quote",
+                "poll_done": 0,
+                "poll_total": 1,
+                "spin": spinner_frame(0),
+            },
+            keep_table=True,
+        )
+        self.terminal.pin_live_chrome()
+        return True
+
+    def _kick_strategy(self) -> None:
+        if not self.account:
+            return
+        if self._strategy_loader is not None and self._strategy_loader.isRunning():
+            return
+        from optionda.strategy import read_strategy_store
+
+        cached = read_strategy_store(self.account, self.home)
+        if not cached:
+            cached = read_strategy_store(self.account, self.home, allow_stale=True)
+        if cached:
+            self.terminal.strategy.set_series(cached)
+        loader = _StrategyLoader(self.account, self.home, have_cache=bool(cached))
+        loader.ready.connect(self.terminal.strategy.set_series)
+        self._strategy_loader = loader
+        loader.start()
 
     def _start_add(self, line: str) -> None:
         if not self.account:
@@ -709,6 +766,7 @@ class MainWindow(QMainWindow):
             return
         self.show_view("term")
         self.terminal.prepare_live()
+        self.terminal.set_strategy_visible(False)
         from optionda.display.table import format_add_progress, spinner_frame
 
         self.terminal.set_live_chrome(
@@ -748,7 +806,7 @@ class MainWindow(QMainWindow):
                 return
         if page.revealing:
             return
-        page.terminal.set_live_html(markup)
+        page.terminal.set_live_frame(markup)
         if page.revealed:
             page.terminal.pin_live_chrome()
         self._sync_spin_timer()
@@ -812,7 +870,7 @@ class MainWindow(QMainWindow):
         page.reveal_index += 1
         html = page.desk.runner.html_at(page.desk.cols, page.desk.rows, reveal=reveal)
         if html:
-            page.terminal.set_live_html(html)
+            page.terminal.set_live_frame(html)
         if page.reveal_index >= len(page.reveal_steps):
             self._finish_reveal(page, settle=True)
 
@@ -822,7 +880,7 @@ class MainWindow(QMainWindow):
         if settle and page.desk is not None and page.desk.runner is not None:
             html = page.desk.runner.html_at(page.desk.cols, page.desk.rows)
             if html:
-                page.terminal.set_live_html(html)
+                page.terminal.set_live_frame(html)
             page.terminal.pin_live_chrome()
         if not any(item.revealing for item in self._pages):
             self._reveal_timer.stop()
@@ -921,7 +979,7 @@ class MainWindow(QMainWindow):
             reveal = page.reveal_steps[index]
         html = runner.html_at(cols, rows, reveal=reveal)
         if html:
-            page.terminal.set_live_html(html)
+            page.terminal.set_live_frame(html)
 
     def _finish_desk_resize(self) -> None:
         self._resizing = False
@@ -1039,9 +1097,6 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802
         self._spin_timer.stop()
         self._reveal_timer.stop()
-        if self._news is not None:
-            self._news.request_stop()
-            self._news.wait(1500)
         for page in self._pages:
             self._reset_reveal(page)
             self._stop_page(page)

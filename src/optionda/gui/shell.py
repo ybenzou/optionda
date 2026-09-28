@@ -16,12 +16,13 @@ from rich.console import Console
 from optionda.paths import ensure_home
 from optionda.store import AccountStore
 
-Action = Literal["none", "clear", "exit", "stats", "term", "run", "export", "stop"]
+Action = Literal["none", "clear", "exit", "stats", "term", "run", "export", "stop", "sql"]
 PERIODS = {"1m", "3m", "6m", "all"}
 
 WINDOW = """
 window
   stats                  analysis view
+  sql                    read-only database browser
   run                    live MODEL desk (stop to end)
   export                 one snapshot with progress
   stop                   stop a live run
@@ -139,4 +140,6 @@ def dispatch(line: str, *, home: Path | None = None) -> CommandResult:
         return CommandResult(0, text)
     if cmd in {"stats", "desk"}:
         return CommandResult(0, "", action="stats", period=_stats_period(args))
+    if cmd == "sql":
+        return CommandResult(0, "", action="sql")
     return invoke_cli(args)

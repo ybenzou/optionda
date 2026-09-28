@@ -362,6 +362,37 @@ def test_get_option_iv_uses_spot_at_option_quote_time_not_overnight() -> None:
     assert quote.iv == pytest.approx(0.33)
 
 
+def test_request_retries_a_transient_ssl_eof() -> None:
+    import httpx
+
+    calls = {"n": 0}
+
+    class _Response:
+        status_code = 200
+        text = ""
+
+        @staticmethod
+        def json() -> dict:
+            return {"is_open": False}
+
+    def get(url: str, params: dict | None = None) -> _Response:
+        del url, params
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ReadError(
+                "[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol"
+            )
+        return _Response()
+
+    http = type("Http", (), {})()
+    http.get = get
+
+    with patch("optionda.market.alpaca.time.sleep"):
+        payload = AlpacaClient._request(http, "https://example.test/v2/clock")  # type: ignore[arg-type]
+    assert payload["is_open"] is False
+    assert calls["n"] == 2
+
+
 def test_percent_scale_iv_normalized() -> None:
     client = _client("indicative")
     client.iv_mode = "vendor"

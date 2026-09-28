@@ -171,15 +171,13 @@ def test_legacy_cluster_without_batch_id(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("OPTIONDA_ACTIVE", "demo")
     store.add_position(None, _pos(qty=2, entry=6.0))
     store.sell_position(None, "SPCX260918P00100000", qty=1, exit_premium=7.0)
-    path = log_path("demo", tmp_path)
-    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    from optionda.journal import read_ledger_events, replace_log
+
+    rows = read_ledger_events(log_path("demo", tmp_path))
     for row in rows:
         row.pop("batch_id", None)
     rows[0]["ts"] = "2026-08-01T00:00:00+00:00"
-    path.write_text(
-        "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
-        encoding="utf-8",
-    )
+    replace_log("demo", rows, home=tmp_path)
     undo_last(store)
     acc = store.require_current()
     assert acc.positions[0].qty == pytest.approx(2)

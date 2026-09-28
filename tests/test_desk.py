@@ -422,7 +422,7 @@ def test_idle_chrome_keeps_countdown_line(tmp_path, monkeypatch) -> None:
         }
     )
     assert payload.get("page") is not True
-    assert payload["text"] == "5s"
+    assert payload["text"] == "  5s"
 
 
 def test_fetch_live_start_does_not_repaint_table(tmp_path, monkeypatch) -> None:
@@ -500,6 +500,74 @@ def test_fetch_live_start_does_not_repaint_table(tmp_path, monkeypatch) -> None:
     assert all(item.get("page") is not True for item in chromes)
 
 
+def test_cached_quotes_paint_before_the_live_fetch(tmp_path, monkeypatch) -> None:
+    from datetime import date, datetime, timezone
+    from unittest.mock import patch
+
+    from optionda.desk_live import DeskRunner
+    from optionda.market.session import SessionSyncResult
+    from optionda.models import Position, RowMark
+    from optionda.quotes import load_latest_rows, quote_count, save_quotes
+    from optionda.store import AccountStore
+
+    monkeypatch.setenv("OPTIONDA_HOME", str(tmp_path))
+    monkeypatch.setenv("OPTIONDA_ACTIVE", "demo")
+    store = AccountStore(tmp_path)
+    store.create("demo")
+    store.activate("demo")
+    cached = RowMark(
+        position=Position(
+            id="msft1",
+            occ_symbol="MSFT270319C00600000",
+            underlying="MSFT",
+            expiry=date(2027, 3, 19),
+            strike=600.0,
+            option_type="call",
+            qty=1,
+            side="long",
+            iv_frozen=0.30,
+            iv_as_of=datetime(2026, 9, 25, 20, tzinfo=timezone.utc),
+            entry_premium=12.4,
+        ),
+        spot=500.0,
+        theo=18.0,
+        delta=0.4,
+        dte=170.0,
+        notional=1800.0,
+        cost=12.4,
+        upnl=560.0,
+    )
+    live = cached.model_copy(update={"spot": 516.0, "theo": 18.77})
+    save_quotes("demo", [cached], home=tmp_path)
+    order: list[object] = []
+    runner = DeskRunner(
+        home=tmp_path,
+        store=store,
+        paint=lambda _renderable: order.append(runner.last_view["rows"][0].spot),
+        on_chrome=lambda _payload: None,
+    )
+
+    def mark(*_args, **_kwargs):
+        order.append("mark")
+        return [live]
+
+    with (
+        patch("optionda.desk_live.mark_account", side_effect=mark),
+        patch(
+            "optionda.desk_live.sync_completed_session",
+            return_value=SessionSyncResult(),
+        ),
+        patch("optionda.desk_live.sync_book"),
+        patch("optionda.desk_live.append_export_log"),
+    ):
+        _acc, _router, rows = runner.fetch_first(console=None)
+    assert order[0] == 500.0
+    assert order.index("mark") > 0
+    assert rows[0].spot == 516.0
+    assert load_latest_rows("demo", tmp_path)[0].spot == 516.0
+    assert quote_count("demo", tmp_path) == 2
+
+
 def test_empty_busy_poll_does_not_paint_table(tmp_path, monkeypatch) -> None:
     from optionda.desk_live import DeskRunner
     from optionda.market.router import MarketRouter
@@ -558,6 +626,29 @@ def test_add_batch_reports_progress(tmp_path, monkeypatch) -> None:
     assert seen[-1][2] == 2
     assert any("add" in label for label, _d, _s in seen)
     assert any(long in label and "…" not in label for label, _d, _s in seen)
+
+
+def test_failed_clock_keeps_the_known_close_and_retries(tmp_path) -> None:
+    from datetime import datetime, timedelta, timezone
+
+    from optionda.desk_live import DeskRunner
+    from optionda.market.session import SessionSyncResult
+
+    runner = DeskRunner(home=tmp_path, store=object(), paint=lambda _renderable: None)
+    known = datetime(2026, 9, 28, 20, tzinfo=timezone.utc)
+    runner.next_close_at = known
+    runner.notes.append("stale")
+    failed = SessionSyncResult(
+        unavailable="[SSL: UNEXPECTED_EOF_WHILE_READING]",
+        next_retry_at=known + timedelta(minutes=2),
+    )
+    runner._remember_sync(failed, announce=True)
+    assert runner.next_close_at == known
+    assert runner.next_retry_at == failed.next_retry_at
+    assert any("calendar/clock unavailable" in line for line in runner.notes)
+    runner._remember_sync(SessionSyncResult(next_close_at=known), announce=True)
+    assert runner.notes == []
+    assert runner.next_close_at == known
 
 
 def test_sync_notes_skip_routine_surface_lines() -> None:

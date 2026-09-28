@@ -8,10 +8,13 @@ from zoneinfo import ZoneInfo
 from rich import box
 from rich.console import Group
 from rich.panel import Panel
+from rich.style import Style
 from rich.table import Table
 from rich.text import Text
 
+from optionda.display.color import assign_colors
 from optionda.models import RowMark
+from optionda.occ import OccError, parse_occ
 
 _SPINNERS = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 _ASCII_SPIN = ("|", "/", "-", "\\")
@@ -429,20 +432,16 @@ def format_chrome_plain(
     poll_total: int | None = None,
     eta_sec: int | None = None,
 ) -> str:
-    """One-line live-pane chrome: countdown when idle, bar when busy."""
+    """One-line live-pane chrome. Width stays fixed so the desk does not reflow."""
     if not poll_busy:
         if eta_sec is not None:
-            return f"{int(eta_sec)}s"
+            return f"{int(eta_sec):>3}s"
         label = (poll_label or "").strip()
         return label
     steps = max(int(poll_total or 1), 1)
     finished = max(0, min(int(poll_done or 0), steps))
-    frac = finished / steps
-    width = 16
-    filled = min(width, max(0, int(round(width * frac))))
-    bar = "#" * filled + "-" * (width - filled)
     mark = spin or "·"
-    return f"{mark}  {bar}  {finished}/{steps}"
+    return f"{mark} {finished:>2}/{steps:>2}"
 
 
 def _inline_bar(
@@ -703,6 +702,113 @@ def _desk_note_visible(note: str) -> bool:
 SECTION_RESERVE = 2
 
 
+def _contract_name(occ: str) -> str:
+    try:
+        parts = parse_occ(occ)
+    except OccError:
+        return occ
+    return f"{parts.underlying} {parts.strike:g}"
+
+
+def _row_link(cell: Text | str, occ: str) -> Text:
+    text = cell if isinstance(cell, Text) else Text(str(cell))
+    text.stylize(Style(link=f"optionda:{occ}"))
+    return text
+
+
+def _compact_table(
+    rows: list[RowMark],
+    *,
+    prev_spots: dict[str, float],
+    prev_theos: dict[str, float],
+    phase: FlashPhase,
+    show_footer: bool,
+    model_footer: Text,
+    placeholder: bool = True,
+    reserve: int = 0,
+) -> Table:
+    """Narrow run desk: contract, spot, cost, and model price."""
+    table = Table(
+        show_header=True,
+        header_style=_HEADER,
+        box=None,
+        border_style=_MUTED,
+        pad_edge=False,
+        expand=False,
+        show_lines=False,
+        show_footer=show_footer,
+        footer_style="bold",
+        padding=(0, 1),
+        row_styles=("none", "on grey11"),
+    )
+    table.add_column("Contract", style=_OCC, footer="", min_width=10, no_wrap=True)
+    table.add_column("Spot", justify="right", footer="", min_width=14, no_wrap=True)
+    table.add_column(
+        "Cost",
+        justify="right",
+        style=_NUM,
+        footer="",
+        min_width=7,
+        no_wrap=True,
+    )
+    table.add_column(
+        "Model$",
+        justify="right",
+        footer=model_footer if show_footer else "",
+        min_width=16,
+        no_wrap=True,
+    )
+    blank = ("", "", "", "")
+    if not rows:
+        if reserve > 0:
+            for _ in range(reserve):
+                table.add_row(*blank)
+            return table
+        if placeholder:
+            table.add_row(Text("(no positions)", style=_MUTED), "", "", "")
+        return table
+    colors = assign_colors(row.position.occ_symbol for row in rows)
+    for row in rows:
+        pos = row.position
+        cost = _fmt_money(row.cost if row.cost is not None else pos.entry_premium)
+        spot = _spot_cell(
+            row.spot,
+            row.close_spot,
+            prev_spots.get(pos.id),
+            phase=phase,
+        )
+        cells = (
+            (
+                Text(
+                    _contract_name(pos.occ_symbol),
+                    style=f"bold {colors[pos.occ_symbol]}",
+                ),
+                spot,
+                Text(cost, style=_NUM),
+                Text(row.error, style="red"),
+            )
+            if row.error
+            else (
+                Text(
+                    _contract_name(pos.occ_symbol),
+                    style=f"bold {colors[pos.occ_symbol]}",
+                ),
+                spot,
+                Text(cost, style=_NUM),
+                _model_cell(
+                    row.theo,
+                    row.close_premium,
+                    prev_theos.get(pos.id),
+                    phase=phase,
+                ),
+            )
+        )
+        table.add_row(*(_row_link(cell, pos.occ_symbol) for cell in cells))
+    for _ in range(max(0, reserve - len(rows))):
+        table.add_row(*blank)
+    return table
+
+
 def _position_table(
     rows: list[RowMark],
     *,
@@ -715,7 +821,19 @@ def _position_table(
     upnl_footer: Text,
     placeholder: bool = True,
     reserve: int = 0,
+    compact: bool = False,
 ) -> Table:
+    if compact:
+        return _compact_table(
+            rows,
+            prev_spots=prev_spots,
+            prev_theos=prev_theos,
+            phase=phase,
+            show_footer=show_footer,
+            model_footer=model_footer,
+            placeholder=placeholder,
+            reserve=reserve,
+        )
     table = Table(
         show_header=True,
         header_style=_HEADER,
@@ -895,6 +1013,7 @@ def render_snapshot(
     framed: bool = True,
     reveal: DeskReveal | None = None,
     reserve_sections: bool = False,
+    compact: bool = False,
 ) -> Group:
     """Single framed desk: meta + positions + column-aligned totals."""
     up_all, down_all = partition_desk_rows(rows)
@@ -970,6 +1089,7 @@ def render_snapshot(
                 model_footer=model_footer,
                 upnl_footer=upnl_footer,
                 placeholder=placeholder,
+                compact=compact,
             )
         )
     else:
@@ -991,6 +1111,7 @@ def render_snapshot(
                     upnl_footer=upnl_footer,
                     placeholder=placeholder,
                     reserve=reserve,
+                    compact=compact,
                 )
             )
         if down_rows or keep_both:
@@ -1011,6 +1132,7 @@ def render_snapshot(
                     upnl_footer=upnl_footer,
                     placeholder=placeholder,
                     reserve=reserve,
+                    compact=compact,
                 )
             )
 

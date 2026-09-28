@@ -253,6 +253,40 @@ def test_build_surface_rejects_stale_quotes() -> None:
         )
 
 
+def test_live_router_calibrates_outside_the_window_process(tmp_path, monkeypatch) -> None:
+    from optionda.engine import CalibrationResult
+    from optionda.market.router import MarketRouter
+
+    seen: dict[str, object] = {}
+
+    def detached(account, **kwargs):
+        seen["name"] = account.name
+        seen["home"] = kwargs["home"]
+        return CalibrationResult()
+
+    monkeypatch.setattr("optionda.engine._calibrate_detached", detached)
+    as_of = datetime(2026, 8, 4, 20, 0, tzinfo=timezone.utc)
+    position = Position(
+        occ_symbol="SPCX260918P00100000",
+        underlying="SPCX",
+        expiry=date(2026, 9, 18),
+        strike=100.0,
+        option_type="put",
+        iv_frozen=0.86,
+        iv_as_of=as_of,
+        entry_premium=6.7,
+    )
+    result = calibrate_surfaces(
+        Account(name="demo", positions=[position]),
+        router=MarketRouter.__new__(MarketRouter),
+        home=tmp_path,
+        now=as_of,
+    )
+    assert seen == {"name": "demo", "home": tmp_path}
+    assert result.surfaces == {}
+    assert result.errors == {}
+
+
 def test_calibrate_surfaces_persists_each_held_underlying(tmp_path) -> None:
     as_of = datetime(2026, 8, 4, 20, 0, tzinfo=timezone.utc)
     position = Position(

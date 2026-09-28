@@ -96,6 +96,7 @@ from optionda.journal import (
     append_verify_log,
     book_path,
     log_path,
+    migrate_ledger,
     sync_book,
 )
 from optionda.market.session import session_due
@@ -104,6 +105,7 @@ from optionda.market.router import MarketRouter, resolve_poll_interval
 from optionda.occ import OccError, format_occ, parse_occ
 from optionda.pricing.surface import is_surface_fresh, load_surface, sticky_delta_iv
 from optionda.paths import resolve_home, resolve_home_info
+from optionda.quotes import migrate_journal_quotes, save_quotes
 from optionda.promptenv import (
     install_current_env_prompt,
     prompt_installed_in,
@@ -448,6 +450,15 @@ def home_cmd() -> None:
         "[dim]conda/venv → env-local data · otherwise ~/.optionda · "
         "override with OPTIONDA_HOME[/dim]"
     )
+
+
+@app.command("sql")
+def sql_cmd() -> None:
+    """Open the read-only database browser inside the optionda window."""
+    from optionda.gui.launch import run_app
+
+    run_app(_store().active_name() or "", _home_opt(), period="all", initial_view="sql")
+    console.print("optionda opened")
 
 
 @app.command("create")
@@ -1453,6 +1464,8 @@ def collect_mark(*, source: str, quiet: bool = False):
         _err(str(exc))
         raise typer.Exit(1) from exc
     home = _home_opt()
+    migrate_journal_quotes(acc.name, home)
+    migrate_ledger(acc.name, home)
     sync = _sync_session(
         acc,
         home=home,
@@ -1468,6 +1481,7 @@ def collect_mark(*, source: str, quiet: bool = False):
             completed_session=sync.completed_session,
         )
         sync_book(acc, home)
+        save_quotes(acc.name, rows, home=home, source=source)
         append_export_log(acc, rows, feed=feed, home=home, source=source)
     else:
         with _mark_progress() as progress:
@@ -1487,6 +1501,7 @@ def collect_mark(*, source: str, quiet: bool = False):
                 total=n_pos,
             )
             sync_book(acc, home)
+            save_quotes(acc.name, rows, home=home, source=source)
             append_export_log(acc, rows, feed=feed, home=home, source=source)
     realized = float(realized_pnl_summary(acc.name, home)["realized"])
     return acc, rows, feed, realized, home

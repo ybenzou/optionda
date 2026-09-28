@@ -340,3 +340,18 @@ def test_force_rebuilds_existing_session_surface(tmp_path) -> None:
     )
     assert router.chain_calls == ["AAPL"]
     assert "AAPL" in result.surfaces_saved
+
+
+def test_clock_failure_schedules_another_try(tmp_path) -> None:
+    class Down:
+        def get_market_clock(self) -> None:
+            raise RuntimeError(
+                "[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol"
+            )
+
+    before = datetime.now(timezone.utc)
+    result = sync_completed_session(_account("AAPL"), home=tmp_path, router=Down())
+    assert result.completed_session is None
+    assert result.unavailable and "UNEXPECTED_EOF" in result.unavailable
+    assert result.next_retry_at is not None
+    assert before < result.next_retry_at <= before + timedelta(minutes=3)

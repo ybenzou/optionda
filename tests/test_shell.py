@@ -61,6 +61,7 @@ def test_dispatch_builtins() -> None:
     assert dispatch("run").action == "run"
     assert dispatch("export").action == "export"
     assert dispatch("stop").action == "stop"
+    assert dispatch("sql").action == "sql"
 
 
 def test_dispatch_create_and_list(tmp_path, monkeypatch) -> None:

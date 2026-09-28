@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import re
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -29,8 +32,246 @@ def book_path(account: str, home: Path | None = None) -> Path:
 
 
 def log_path(account: str, home: Path | None = None) -> Path:
-    """Append-only event stream (JSONL). Never overwritten."""
+    """Legacy event-log path. The ledger itself lives in SQLite."""
     return logs_dir(home) / f"{account}.jsonl"
+
+
+def ledger_db_path(account: str, home: Path | None = None) -> Path:
+    folder = ensure_home(home) / "ledger"
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder / f"{account}.sqlite"
+
+
+# Quote polls. The trade ledger is everything else.
+_QUOTE_EVENTS = frozenset({"run", "export", "verify", "snapshot", "mail"})
+_EVENT_RE = re.compile(br'"event"\s*:\s*"([A-Za-z0-9_]+)"')
+
+
+def event_kind(line: bytes) -> str:
+    found = _EVENT_RE.search(line[:240])
+    if found is None:
+        return ""
+    return found.group(1).decode("ascii", errors="ignore")
+
+
+def is_quote_snapshot(line: bytes) -> bool:
+    return event_kind(line) in _QUOTE_EVENTS
+
+
+def _ledger_location(path: Path) -> tuple[str, Path] | None:
+    if path.parent.name != "logs" or path.suffix != ".jsonl":
+        return None
+    return path.stem, path.parent.parent
+
+
+def _ledger_connect(account: str, home: Path | None) -> sqlite3.Connection:
+    conn = sqlite3.connect(ledger_db_path(account, home))
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
+
+
+def _ensure_ledger(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS events (
+            seq INTEGER PRIMARY KEY,
+            kind TEXT,
+            payload TEXT NOT NULL
+        )
+        """
+    )
+
+
+def _read_ledger_db(account: str, home: Path) -> list[dict[str, Any]] | None:
+    path = home / "ledger" / f"{account}.sqlite"
+    if not path.exists():
+        return None
+    conn = _ledger_connect(account, home)
+    try:
+        _ensure_ledger(conn)
+        rows = conn.execute("SELECT payload FROM events ORDER BY seq").fetchall()
+    finally:
+        conn.close()
+    events: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            event = json.loads(row["payload"])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+    return events
+
+
+def _read_log_file(path: Path, *, ledger_only: bool) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    events: list[dict[str, Any]] = []
+    with path.open("rb") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            if ledger_only and is_quote_snapshot(line):
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict):
+                events.append(event)
+    return events
+
+
+def _ledger_migrated(account: str, home: Path) -> bool:
+    path = home / "ledger" / f"{account}.sqlite"
+    if not path.exists():
+        return False
+    conn = _ledger_connect(account, home)
+    try:
+        _ensure_ledger(conn)
+        row = conn.execute(
+            "SELECT value FROM meta WHERE key = 'migrated'"
+        ).fetchone()
+    finally:
+        conn.close()
+    return row is not None and row["value"] == "1"
+
+
+def _set_ledger_meta(account: str, home: Path, key: str, value: str) -> None:
+    conn = _ledger_connect(account, home)
+    try:
+        _ensure_ledger(conn)
+        conn.execute(
+            "INSERT INTO meta(key, value) VALUES(?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def last_quote_event(path: Path) -> dict[str, Any] | None:
+    """Parse only the newest quote snapshot. Skips the trade ledger."""
+    if not path.exists():
+        return None
+    last: dict[str, Any] | None = None
+    with path.open("rb") as handle:
+        for line in handle:
+            if not is_quote_snapshot(line):
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict):
+                last = event
+    return last
+
+
+def read_ledger_events(path: Path) -> list[dict[str, Any]]:
+    """Trade events in write order. Quote snapshots stay out of this parse."""
+    return load_log_events(path, ledger_only=True)
+
+
+def load_log_events(path: Path, *, ledger_only: bool) -> list[dict[str, Any]]:
+    """Ledger rows when the sqlite book exists, otherwise the JSONL file."""
+    located = _ledger_location(path)
+    if located is not None:
+        account, home = located
+        stored = _read_ledger_db(account, home)
+        if stored is not None:
+            return stored
+    return _read_log_file(path, ledger_only=ledger_only)
+
+
+def migrate_ledger(account: str, home: Path | None = None) -> int:
+    """Copy the trade JSONL into sqlite, in file order, and keep the file as an archive."""
+    root = ensure_home(home)
+    path = log_path(account, root)
+    if _ledger_migrated(account, root):
+        return 0
+    inserted = 0
+    if path.exists():
+        conn = _ledger_connect(account, root)
+        try:
+            _ensure_ledger(conn)
+            already = conn.execute("SELECT COUNT(*) AS n FROM events").fetchone()["n"]
+            if already:
+                inserted = int(already)
+            else:
+                with path.open("rb") as handle:
+                    for raw in handle:
+                        if not raw.strip() or is_quote_snapshot(raw):
+                            continue
+                        text = raw.decode("utf-8").strip()
+                        try:
+                            event = json.loads(text)
+                        except json.JSONDecodeError:
+                            continue
+                        if not isinstance(event, dict):
+                            continue
+                        conn.execute(
+                            "INSERT INTO events(kind, payload) VALUES(?, ?)",
+                            (str(event.get("event") or ""), text),
+                        )
+                        inserted += 1
+                conn.commit()
+        finally:
+            conn.close()
+        archive = path.with_name(f"{account}.ledger.archive.jsonl")
+        if archive.exists():
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            archive = path.with_name(f"{account}.ledger.archive-{stamp}.jsonl")
+        os.replace(path, archive)
+    _set_ledger_meta(account, root, "migrated", "1")
+    return inserted
+
+
+def archive_quote_snapshots(account: str, home: Path | None = None) -> Path | None:
+    """Move quote snapshots beside the ledger. The original bytes are kept."""
+    src = log_path(account, home)
+    folder = src.parent
+    tmp = folder / f"{account}.ledger.tmp"
+    if tmp.exists() and not src.exists():
+        os.replace(tmp, src)
+        return None
+    if tmp.exists():
+        tmp.unlink()
+    if not src.exists():
+        return None
+    has_snapshot = False
+    with src.open("rb") as handle:
+        for line in handle:
+            if is_quote_snapshot(line):
+                has_snapshot = True
+                break
+    if not has_snapshot:
+        return None
+    archive = folder / f"{account}.archive.jsonl"
+    if archive.exists():
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        archive = folder / f"{account}.archive-{stamp}.jsonl"
+    with src.open("rb") as incoming, tmp.open("wb") as out:
+        for line in incoming:
+            if is_quote_snapshot(line):
+                continue
+            if line and not line.endswith(b"\n"):
+                line += b"\n"
+            out.write(line)
+        out.flush()
+        os.fsync(out.fileno())
+    try:
+        os.replace(src, archive)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
+    os.replace(tmp, src)
+    return archive
 
 
 def _now() -> str:
@@ -81,13 +322,25 @@ def append_event(
     home: Path | None = None,
     ts: datetime | None = None,
 ) -> Path:
-    """Append one JSON object to the account event log (never overwrite)."""
-    path = log_path(account, home)
+    """Append one trade event. Write order is the book order."""
     when = _iso_ts(ts) if ts is not None else _now()
     payload = {"ts": when, "account": account, **event}
-    with path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
-    return path
+    text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    conn = _ledger_connect(account, home)
+    try:
+        _ensure_ledger(conn)
+        conn.execute(
+            "INSERT INTO events(kind, payload) VALUES(?, ?)",
+            (str(event.get("event") or ""), text),
+        )
+        conn.execute(
+            "INSERT INTO meta(key, value) VALUES('migrated', '1') "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return ledger_db_path(account, home)
 
 
 def replace_log(
@@ -96,17 +349,29 @@ def replace_log(
     *,
     home: Path | None = None,
 ) -> Path:
-    """Replace one account journal. Used by unpack, not by live commands."""
-    path = log_path(account, home)
-    if not events:
-        path.write_text("", encoding="utf-8")
-        return path
-    lines = [
-        json.dumps(event, ensure_ascii=False, separators=(",", ":"))
-        for event in events
-    ]
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return path
+    """Replace one account ledger. Used by unpack, not by live commands."""
+    conn = _ledger_connect(account, home)
+    try:
+        _ensure_ledger(conn)
+        conn.execute("DELETE FROM events")
+        conn.executemany(
+            "INSERT INTO events(kind, payload) VALUES(?, ?)",
+            [
+                (
+                    str(event.get("event") or ""),
+                    json.dumps(event, ensure_ascii=False, separators=(",", ":")),
+                )
+                for event in events
+            ],
+        )
+        conn.execute(
+            "INSERT INTO meta(key, value) VALUES('migrated', '1') "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return ledger_db_path(account, home)
 
 
 def _iso_ts(value: datetime | None) -> str | None:
@@ -338,28 +603,11 @@ def append_export_log(
     home: Path | None = None,
     source: str = "export",
 ) -> Path:
-    """Append a mark snapshot (export / run). Always append-only."""
-    total = 0.0
-    total_upnl = 0.0
-    has_upnl = False
-    for row in rows:
-        if row.notional is not None:
-            total += row.notional
-        if row.upnl is not None:
-            total_upnl += row.upnl
-            has_upnl = True
-    return append_event(
-        account.name,
-        {
-            "event": source,  # export | run | verify
-            "feed": feed,
-            "sum_model": round(total, 6),
-            "sum_upnl": round(total_upnl, 6) if has_upnl else None,
-            "n": len(rows),
-            "rows": [_row_record(row) for row in rows],
-        },
-        home=home,
-    )
+    """Store a mark snapshot in the quote database."""
+    from optionda.quotes import quote_db_path, save_quotes
+
+    save_quotes(account.name, rows, home=home, source=source)
+    return quote_db_path(account.name, home)
 
 
 def append_verify_log(

@@ -61,23 +61,66 @@ def recommended_sticky_delta_weight(rows: Iterable[dict[str, Any]]) -> float:
 
 def journal_rows(path: Path) -> list[dict[str, Any]]:
     """Load marked rows from an append-only optionda journal."""
+    found = _snapshot_rows(path)
+    if found:
+        return found
+    archives = sorted(path.parent.glob(f"{path.stem}.archive*.jsonl"))
+    for archive in archives:
+        found = _snapshot_rows(archive)
+        if found:
+            return found
+    return _rows_from_quotes(path)
+
+
+def _snapshot_rows(path: Path) -> list[dict[str, Any]]:
     verify_rows: list[dict[str, Any]] = []
     mark_rows: list[dict[str, Any]] = []
     if not path.exists():
         return verify_rows
-    for line in path.read_text(encoding="utf-8").splitlines():
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        kind = event.get("event")
-        if kind not in {"verify", "export", "run"}:
-            continue
-        bucket = verify_rows if kind == "verify" else mark_rows
-        for row in event.get("rows", []):
-            if isinstance(row, dict):
-                bucket.append(row)
+    with path.open("rb") as handle:
+        for raw in handle:
+            if not raw.strip():
+                continue
+            try:
+                event = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            kind = event.get("event")
+            if kind not in {"verify", "export", "run", "snapshot", "mail"}:
+                continue
+            bucket = verify_rows if kind == "verify" else mark_rows
+            for row in event.get("rows", []):
+                if isinstance(row, dict):
+                    bucket.append(row)
     return verify_rows or mark_rows
+
+
+def _rows_from_quotes(path: Path) -> list[dict[str, Any]]:
+    if path.parent.name != "logs":
+        return []
+    db = path.parent.parent / "quotes" / f"{path.stem}.sqlite"
+    if not db.exists():
+        return []
+    import sqlite3
+
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    try:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(quotes)")}
+        if "source" not in columns:
+            return []
+        verify = conn.execute(
+            "SELECT * FROM quotes WHERE source = 'verify' ORDER BY rowid"
+        ).fetchall()
+        chosen = verify or conn.execute(
+            "SELECT * FROM quotes WHERE source IN ('export', 'run', 'mail', 'snapshot') ORDER BY rowid"
+        ).fetchall()
+    finally:
+        conn.close()
+    rows: list[dict[str, Any]] = []
+    for row in chosen:
+        rows.append({key: row[key] for key in row.keys()})
+    return rows
 
 
 def _number(value: Any) -> float | None:

@@ -3,7 +3,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
+from multiprocessing import get_context
 from pathlib import Path
+from queue import Empty
 
 from optionda.config import dividend_for_symbol, load_config, rate_for_days
 from optionda.market.router import MarketDataError, MarketRouter
@@ -26,8 +28,7 @@ from optionda.market.session import (
     save_pending_state,
     save_session_reference,
 )
-from optionda.analytics import read_events
-from optionda.journal import log_path
+from optionda.journal import log_path, read_ledger_events
 from optionda.models import Account, Position, RowMark
 from optionda.undo import last_operation_times
 from optionda.pricing.bs import price_option, years_to_expiry
@@ -48,6 +49,8 @@ from optionda.pricing.surface import (
 )
 
 ProgressCallback = Callable[[str, int, int], None]
+# Set inside the calibration process so it does not spawn another one.
+_CALIBRATION_CHILD = False
 
 
 def emit_progress(
@@ -83,6 +86,132 @@ def fetch_completed_session(router: MarketRouter) -> CompletedSessionState:
     return resolve_completed_session(clock, sessions)
 
 
+def _detach_calibration(router: MarketRouter | None) -> bool:
+    """Live routers run in a child process. Test doubles stay in-process."""
+    if _CALIBRATION_CHILD:
+        return False
+    return router is None or type(router) is MarketRouter
+
+
+def _session_payload(session: MarketSession | None) -> dict[str, str] | None:
+    if session is None:
+        return None
+    return {
+        "session_date": session.session_date.isoformat(),
+        "open_at": session.open_at.isoformat(),
+        "close_at": session.close_at.isoformat(),
+    }
+
+
+def _session_from_payload(payload: dict[str, str] | None) -> MarketSession | None:
+    if not payload:
+        return None
+    return MarketSession(
+        session_date=date.fromisoformat(payload["session_date"]),
+        open_at=datetime.fromisoformat(payload["open_at"]),
+        close_at=datetime.fromisoformat(payload["close_at"]),
+    )
+
+
+def _calibration_process_main(payload: dict, messages) -> None:
+    global _CALIBRATION_CHILD
+    _CALIBRATION_CHILD = True
+    try:
+        account = Account.model_validate(payload["account"])
+        home = None if payload["home"] is None else Path(payload["home"])
+
+        def report(label: str, done: int, total: int) -> None:
+            messages.put(("progress", (label, done, total)))
+
+        result = _calibrate_surfaces_inline(
+            account,
+            home=home,
+            router=MarketRouter(home),
+            now=datetime.fromisoformat(payload["now"]),
+            max_quote_age=timedelta(seconds=float(payload["age"])),
+            on_progress=report,
+            only=payload["only"],
+            target_session=_session_from_payload(payload["target"]),
+        )
+        messages.put(
+            (
+                "result",
+                {"saved": list(result.surfaces), "errors": dict(result.errors)},
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        messages.put(("error", f"{type(exc).__name__}: {exc}"))
+
+
+def _calibrate_detached(
+    account: Account,
+    *,
+    home: Path | None,
+    now: datetime | None,
+    max_quote_age: timedelta | None,
+    on_progress: ProgressCallback | None,
+    only: set[str] | list[str] | None,
+    target_session: MarketSession | None,
+) -> CalibrationResult:
+    """Price chains in another process so the window keeps the interpreter lock."""
+    current = now or datetime.now(timezone.utc)
+    age = max_quote_age if max_quote_age is not None else MAX_CALIBRATION_QUOTE_AGE
+    payload = {
+        "home": None if home is None else str(home),
+        "account": account.model_dump(mode="json"),
+        "now": current.isoformat(),
+        "age": age.total_seconds(),
+        "only": None if only is None else [str(name) for name in only],
+        "target": _session_payload(target_session),
+    }
+    ctx = get_context("spawn")
+    messages = ctx.Queue()
+    proc = ctx.Process(
+        target=_calibration_process_main,
+        args=(payload, messages),
+        name="optionda-calibrate",
+        daemon=True,
+    )
+    proc.start()
+    saved: list[str] = []
+    errors: dict[str, str] = {}
+    try:
+        while True:
+            try:
+                kind, body = messages.get(timeout=0.5)
+            except Empty:
+                if proc.is_alive():
+                    continue
+                raise RuntimeError(
+                    f"calibration stopped before finishing (exit {proc.exitcode})"
+                )
+            if kind == "progress":
+                label, done, total = body
+                if on_progress is not None:
+                    on_progress(str(label), int(done), int(total))
+                continue
+            if kind == "result":
+                saved = [str(name) for name in body["saved"]]
+                errors = {str(key): str(value) for key, value in body["errors"].items()}
+                break
+            if kind == "error":
+                raise RuntimeError(str(body))
+            raise RuntimeError(f"unexpected calibration message {kind}")
+    finally:
+        if proc.is_alive():
+            proc.terminate()
+        proc.join(timeout=5)
+        messages.close()
+    result = CalibrationResult(errors=errors)
+    for name in saved:
+        surface = load_surface(name, home)
+        if surface is not None:
+            result.surfaces[name] = surface
+        else:
+            result.errors.setdefault(name, "surface missing after calibration")
+    return result
+
+
 def calibrate_surfaces(
     account: Account,
     *,
@@ -99,7 +228,43 @@ def calibrate_surfaces(
     Failures are per-underlying: one dead ticker does not abort the rest.
     Chain fetches are slow; ``on_progress(label, done, total)`` reports each step.
     Pass ``only`` to restrict to new names (e.g. after add).
+
+    A real market router runs this in a child process. The desk window then
+    only receives progress, and the trees do not hold the window's interpreter lock.
     """
+    if _detach_calibration(router):
+        return _calibrate_detached(
+            account,
+            home=home,
+            now=now,
+            max_quote_age=max_quote_age,
+            on_progress=on_progress,
+            only=only,
+            target_session=target_session,
+        )
+    return _calibrate_surfaces_inline(
+        account,
+        home=home,
+        router=router,
+        now=now,
+        max_quote_age=max_quote_age,
+        on_progress=on_progress,
+        only=only,
+        target_session=target_session,
+    )
+
+
+def _calibrate_surfaces_inline(
+    account: Account,
+    *,
+    home: Path | None = None,
+    router: MarketRouter | None = None,
+    now: datetime | None = None,
+    max_quote_age: timedelta | None = None,
+    on_progress: ProgressCallback | None = None,
+    only: set[str] | list[str] | None = None,
+    target_session: MarketSession | None = None,
+) -> CalibrationResult:
     market = router or MarketRouter(home)
     cfg = load_config(home)
     current = now or datetime.now(timezone.utc)
@@ -255,6 +420,7 @@ def sync_completed_session(
         state = fetch_completed_session(market)
     except (MarketDataError, SessionError, Exception) as exc:  # noqa: BLE001
         result.unavailable = str(exc)
+        result.next_retry_at = next_retry_at(1, now or datetime.now(timezone.utc))
         return result
 
     target = state.completed
@@ -690,7 +856,7 @@ def mark_account(
         underlying: load_close_premiums(underlying, home)
         for underlying in set(underlyings)
     }
-    last_ops = last_operation_times(read_events(log_path(account.name, home)))
+    last_ops = last_operation_times(read_ledger_events(log_path(account.name, home)))
 
     def last_op_at(position: Position) -> datetime | None:
         return (
