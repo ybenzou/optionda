@@ -16,7 +16,9 @@ from optionda.journal import (
     append_delete_event,
     append_refresh_iv_event,
     append_sell_event,
+    ledger_seq,
     log_path,
+    read_ledger_events,
     sync_book,
 )
 from optionda.models import Account, Position
@@ -427,16 +429,45 @@ class AccountStore:
             )
 
 
+_REALIZED_CACHE: dict[tuple[str, str], tuple[int, dict[str, Any]]] = {}
+
+
 def realized_pnl_summary(
     account: str,
     home: Path | None = None,
 ) -> dict[str, Any]:
     """Sum realized cash PnL from journal ``sell`` events for one account."""
+    root = ensure_home(home)
+    path = root / "ledger" / f"{account}.sqlite"
+    if path.exists():
+        seq = ledger_seq(account, root)
+        key = (str(root), account)
+        hit = _REALIZED_CACHE.get(key)
+        if hit is not None and hit[0] == seq:
+            summary = hit[1]
+            return {
+                "realized": summary["realized"],
+                "n_sells": summary["n_sells"],
+                "by_occ": dict(summary["by_occ"]),
+            }
+    else:
+        seq = None
+        key = None
+    summary = _realized_pnl_scan(account, root)
+    if key is not None and seq is not None:
+        _REALIZED_CACHE[key] = (seq, summary)
+    return {
+        "realized": summary["realized"],
+        "n_sells": summary["n_sells"],
+        "by_occ": dict(summary["by_occ"]),
+    }
+
+
+def _realized_pnl_scan(account: str, home: Path) -> dict[str, Any]:
     path = log_path(account, home)
     total = 0.0
     n_sells = 0
     by_occ: dict[str, float] = {}
-    from optionda.journal import read_ledger_events
 
     for event in read_ledger_events(path):
         kind = event.get("event")

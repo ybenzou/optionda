@@ -257,6 +257,82 @@ def test_add_summary_fills_live_pane(tmp_path, qtbot) -> None:
     assert "HOOD261218C00150000" not in history
 
 
+def test_add_rows_paint_in_the_live_pane(qtbot) -> None:
+    from optionda.display.table import format_add_rows
+    from optionda.gui.terminal_view import TerminalView
+
+    view = TerminalView()
+    qtbot.addWidget(view)
+    view.resize(900, 600)
+    view.show()
+    view.begin_turn('add "IBM 261218 300 C x6 @ 1.4; SKHY 261218 250 C x1 @ 5.5"')
+    lines = [
+        "IBM 261218 300 C x6 @ 1.4",
+        "SKHY 261218 250 C x1 @ 5.5",
+    ]
+    view.set_live_chrome(
+        {
+            "rows": lines,
+            "active": 0,
+            "note": None,
+            "page": True,
+            "poll_busy": True,
+            "poll_done": 0,
+            "poll_total": 2,
+            "spin": "⠋",
+            "html": format_add_rows(lines, done=0, active=0, tick=0, spin="⠋"),
+        },
+        keep_table=False,
+    )
+    live = view.live.toPlainText()
+    assert "IBM 261218 300 C x6 @ 1.4" in live
+    assert "SKHY 261218 250 C x1 @ 5.5" in live
+    assert "#" not in live
+    assert view.live.isVisible()
+    assert not view._status.isVisible()
+    import re
+
+    def _fill(html: str) -> int:
+        runs = re.findall(r"#61d6d6\">(━+)", html)
+        return len(runs[0]) if runs else 0
+
+    before = _fill(view._chrome["html"])
+    assert view.bump_live_spin()
+    assert view.bump_live_spin()
+    assert view.bump_live_spin()
+    assert _fill(view._chrome["html"]) > before
+    assert "SKHY 261218 250 C x1 @ 5.5" in view.live.toPlainText()
+
+
+def test_add_preview_plays_rows_without_booking(tmp_path, qtbot, monkeypatch) -> None:
+    from optionda.gui.main_window import MainWindow
+
+    def booked(*_args, **_kwargs):
+        raise AssertionError("preview wrote a fill")
+
+    monkeypatch.setattr("optionda.batch.run_add", booked)
+    window = MainWindow("demo", tmp_path, period="all", initial_view="term")
+    qtbot.addWidget(window)
+    window.resize(1100, 700)
+    window.show()
+    window._input.setText("add preview")
+    window._submit()
+    window._preview_timer.stop()
+    live = window.terminal.live.toPlainText()
+    assert "IBM 261218 300 C x6 @ 1.4" in live
+    assert "SPCX 261218 205 C x6 @ 1.99" in live
+    assert "#" not in live
+    for _ in range(200):
+        window._tick_add_preview()
+        if window._preview_state and window._preview_state.get("footer"):
+            break
+    shown = window.terminal.live.toPlainText()
+    assert "preview only — book unchanged" in shown
+    assert "IBM 261218 300 C x6 @ 1.4" in shown
+    assert window._input.isEnabled()
+    assert not (tmp_path / "ledger").exists()
+
+
 def test_add_progress_fills_live_pane(tmp_path, qtbot) -> None:
     from optionda.display.table import format_add_progress
     from optionda.gui.terminal_view import TerminalView
@@ -716,10 +792,14 @@ def test_first_page_shows_slash_splash(tmp_path, qtbot) -> None:
     qtbot.waitExposed(window)
     first = window.terminal
     assert first.splash_visible()
+    from optionda import __version__
+
     mark = first._splash.findChild(QLabel, "splashMark")
     word = first._splash.findChild(QLabel, "splashWord")
+    version = first._splash.findChild(QLabel, "splashVersion")
     assert mark is not None and "////" in mark.text()
     assert word is not None and "////" in word.text()
+    assert version is not None and version.text() == __version__
     assert mark.sizeHint().width() == word.sizeHint().width()
     splash = first._splash
     splash_mid = splash.rect().center().y()

@@ -36,6 +36,47 @@ def log_path(account: str, home: Path | None = None) -> Path:
     return logs_dir(home) / f"{account}.jsonl"
 
 
+def last_ledger_event(account: str, home: Path | None = None) -> dict | None:
+    root = ensure_home(home)
+    path = root / "ledger" / f"{account}.sqlite"
+    if not path.exists():
+        return None
+    conn = sqlite3.connect(path)
+    try:
+        row = conn.execute(
+            "SELECT payload FROM events ORDER BY seq DESC LIMIT 1"
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    finally:
+        conn.close()
+    if row is None or row[0] is None:
+        return None
+    try:
+        event = json.loads(row[0])
+    except json.JSONDecodeError:
+        return None
+    return event if isinstance(event, dict) else None
+
+
+def ledger_seq(account: str, home: Path | None = None) -> int:
+    """Highest event seq, or 0 when the book has no sqlite ledger yet."""
+    root = ensure_home(home)
+    path = root / "ledger" / f"{account}.sqlite"
+    if not path.exists():
+        return 0
+    conn = sqlite3.connect(path)
+    try:
+        row = conn.execute("SELECT MAX(seq) FROM events").fetchone()
+    except sqlite3.OperationalError:
+        return 0
+    finally:
+        conn.close()
+    if row is None or row[0] is None:
+        return 0
+    return int(row[0])
+
+
 def ledger_db_path(account: str, home: Path | None = None) -> Path:
     folder = ensure_home(home) / "ledger"
     folder.mkdir(parents=True, exist_ok=True)

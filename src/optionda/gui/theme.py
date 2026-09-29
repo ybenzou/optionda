@@ -276,6 +276,12 @@ QLabel#splashWord {{
     color: {CYAN};
     font-size: 11pt;
 }}
+QLabel#splashVersion {{
+    background: transparent;
+    color: {TEXT};
+    font-size: 12pt;
+    padding-top: 8px;
+}}
 """
 
 

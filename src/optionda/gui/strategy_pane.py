@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from bisect import bisect_left, bisect_right
-from datetime import date
+from datetime import date, datetime, time, timezone
+from pathlib import Path
 from math import hypot
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QSize, Qt, QTimer
+from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QSize, Qt, QTimer
 from PySide6.QtGui import QBrush, QColor, QCursor, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QFrame,
@@ -14,7 +15,6 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
-    QLayout,
     QPushButton,
     QSizePolicy,
     QVBoxLayout,
@@ -30,6 +30,7 @@ from optionda.strategy import (
     month_bounds,
     shift_month,
     shift_week,
+    hold_days,
     slice_window,
     week_bounds,
     year_bounds,
@@ -78,6 +79,48 @@ def _pnl_limits(values: list[float]) -> tuple[float, float]:
 _EPOCH = date(2020, 1, 6)  # Monday
 _WEEKEND = 0.35
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+_SESSIONS: set[date] = set()
+_SESSION_YEARS: set[int] = set()
+_SPANS: list[tuple[date, date]] = []
+_SHIFT: dict[date, int] = {}
+
+
+def bind_sessions(
+    days: set[date] | None,
+    spans: list[tuple[date, date]] | None = None,
+) -> None:
+    """Open sessions from the stored calendar. Empty keeps every weekday.
+
+    ``spans`` are the ranges that were actually fetched. A missing weekday
+    counts as a holiday only inside those ranges, so a short recent calendar
+    does not erase the rest of the year.
+    """
+    global _SESSIONS, _SESSION_YEARS, _SPANS, _SHIFT
+    from optionda.market.calendar_file import known_holiday
+
+    _SESSIONS = set(days or ())
+    if spans is None and _SESSIONS:
+        spans = [(min(_SESSIONS), max(_SESSIONS))]
+    _SPANS = list(spans or ())
+    _SESSION_YEARS = {day.year for day in _SESSIONS}
+    _SHIFT = {}
+    if not _SESSIONS:
+        return
+    count = 0
+    cursor = _EPOCH
+    horizon = max((end for _start, end in _SPANS), default=_EPOCH)
+    horizon = date(max(horizon.year, max(_SESSION_YEARS, default=horizon.year)) + 1, 12, 31)
+    while cursor <= horizon:
+        if cursor > _EPOCH and known_holiday(cursor, _SESSIONS, _SPANS):
+            count += 1
+        _SHIFT[cursor] = count
+        cursor = date.fromordinal(cursor.toordinal() + 1)
+
+
+def _closed(day: date) -> bool:
+    from optionda.market.calendar_file import known_holiday
+
+    return known_holiday(day, _SESSIONS, _SPANS)
 
 
 def _x(day: date) -> float:
@@ -85,8 +128,10 @@ def _x(day: date) -> float:
     weeks, dow = divmod((day - _EPOCH).days, 7)
     stride = 4 + _WEEKEND
     if dow <= 4:
-        return weeks * stride + dow
-    return weeks * stride + 4 + (dow - 4) / 3 * _WEEKEND
+        raw = weeks * stride + dow
+    else:
+        raw = weeks * stride + 4 + (dow - 4) / 3 * _WEEKEND
+    return raw - _SHIFT.get(day, 0)
 
 
 def _axis_ticks(first: date, last: date, *, months: bool = False) -> list[tuple[float, str]]:
@@ -96,7 +141,7 @@ def _axis_ticks(first: date, last: date, *, months: bool = False) -> list[tuple[
     day = first
     while day <= last:
         dow = day.weekday()
-        if dow < 5:
+        if dow < 5 and not _closed(day):
             if months or span > 80:
                 key = (day.year, day.month)
                 if key not in seen:
@@ -105,7 +150,7 @@ def _axis_ticks(first: date, last: date, *, months: bool = False) -> list[tuple[
                     if first.year != last.year:
                         name = f"{name} {day.year % 100:02d}"
                     ticks.append((_x(day), name))
-            elif span > 16 and dow not in (0, 2, 4):
+            elif span > 16 and dow not in (0, 2, 4) and day.day != 1:
                 pass
             else:
                 ticks.append((_x(day), str(day.day)))
@@ -120,7 +165,12 @@ class StrategyPane(QWidget):
         self._mode = "week"
         self._anchor = date.today()
         self._series: list[ContractSeries] = []
+        self._shown: list[ContractSeries] = []
         self._focus: str | None = None
+        self._book_sink = None
+        self._home: Path | None = None
+        self._account = ""
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
@@ -164,6 +214,13 @@ class StrategyPane(QWidget):
         self._plot = None
         self._paint_window()
 
+    def set_book(self, account: str, home: Path | None) -> None:
+        self._account = account
+        self._home = home
+        from optionda.market.calendar_file import load_calendar
+
+        bind_sessions(*load_calendar(home))
+
     def minimumSizeHint(self) -> QSize:  # noqa: N802
         return QSize(0, 0)
 
@@ -183,12 +240,92 @@ class StrategyPane(QWidget):
         if not occ:
             return
         self._focus = None if self._focus == occ else occ
+        if self._plot is not None and self._mode == "week":
+            self._render()
+            return
         apply = getattr(self._plot, "apply_focus", None)
         if apply is not None:
             apply(self._focus)
+        self._publish_book()
 
     def focus_occ(self) -> str | None:
         return self._focus
+
+    def set_book_sink(self, sink) -> None:
+        self._book_sink = sink
+
+    def publish_book(self) -> None:
+        self._publish_book()
+
+    def book_rows(self) -> list[tuple[str, str, str, str, str]]:
+        """Rows for the lower-left book: occ, name, color, hold, realized."""
+        from optionda.gui.format import signed_money
+
+        colors = assign_colors(series.occ for series in self._shown)
+        realized: dict[str, float] = {}
+        if self._account and self._home is not None:
+            from optionda.store import realized_pnl_summary
+
+            realized = realized_pnl_summary(self._account, self._home).get("by_occ") or {}
+        full = {series.occ: series for series in self._series}
+        ranked = sorted(
+            self._shown,
+            key=lambda series: _book_size(full.get(series.occ, series)),
+            reverse=True,
+        )
+        rows: list[tuple[str, str, str, str, str]] = []
+        for window in ranked:
+            source = full.get(window.occ, window)
+            days = hold_days(source.points)
+            held = f"{days}d" if days is not None else ""
+            amount = realized.get(window.occ.upper())
+            money = "" if amount is None else signed_money(amount)
+            rows.append((window.occ, _line_name(window.occ), colors[window.occ], held, money))
+        return rows
+
+    def _publish_book(self) -> None:
+        if self._book_sink is None:
+            return
+        self._book_sink(self.book_rows(), self._focus)
+
+    def _live_marks(self) -> list[tuple[float, float]]:
+        if self._mode != "week" or not self._focus or not self._account or self._home is None:
+            return []
+        from zoneinfo import ZoneInfo
+
+        from optionda.quotes import intraday_pnl
+
+        day = datetime.now(ZoneInfo("America/New_York")).date()
+        marks = intraday_pnl(self._account, self._focus, day, self._home)
+        if len(marks) < 2:
+            return []
+        return [(_live_x(when, day), pnl) for when, pnl in marks]
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        key = event.key()
+        if key in (Qt.Key.Key_Up, Qt.Key.Key_Down):
+            self._move_focus(-1 if key == Qt.Key.Key_Up else 1)
+            return
+        if key == Qt.Key.Key_BracketLeft:
+            self.show_previous()
+            return
+        if key == Qt.Key.Key_BracketRight:
+            self.show_next()
+            return
+        super().keyPressEvent(event)
+
+    def _move_focus(self, step: int) -> None:
+        occs = [series.occ for series in self._shown]
+        if not occs:
+            return
+        if self._focus not in occs:
+            picked = occs[0] if step > 0 else occs[-1]
+        else:
+            index = occs.index(self._focus)
+            picked = occs[(index + step) % len(occs)]
+        if picked == self._focus:
+            return
+        self.focus_contract(picked)
 
     def window_label(self) -> str:
         return self._label.text()
@@ -254,10 +391,19 @@ class StrategyPane(QWidget):
 
     def _bounds(self) -> tuple[date, date]:
         if self._mode == "year":
-            return year_bounds(self._anchor)
+            return year_bounds(self._anchor, opened=self._first_record(self._anchor.year))
         if self._mode == "week":
             return week_bounds(self._anchor)
         return month_bounds(self._anchor)
+
+    def _first_record(self, year: int) -> date | None:
+        days = [
+            point.day
+            for series in self._series
+            for point in series.points
+            if point.day.year == year
+        ]
+        return min(days) if days else None
 
     def _paint_window(self) -> None:
         if self._mode == "year":
@@ -273,36 +419,52 @@ class StrategyPane(QWidget):
 
     def _render(self) -> None:
         self._paint_window()
-        self._plot = None
-        while self._board_layout.count():
-            item = self._board_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.hide()
-                widget.deleteLater()
         start, end = self._bounds()
         shown = [
             window
             for series in self._series
             if (window := slice_window(series, start, end)).points
         ]
+        self._shown = shown
         if not shown:
-            empty = QLabel("no open positions")
-            empty.setObjectName("muted")
-            empty.setFont(mono_font(11))
-            self._board_layout.addWidget(empty)
+            if self._plot is not None:
+                self._plot.hide()
+            self._empty.setText("no positions in this window")
+            self._empty.show()
+            self._publish_book()
             return
+        self._empty.hide()
         book = [series.occ for series in self._series]
-        self._board_layout.addWidget(
-            _pnl_chart(
+        if self._plot is None:
+            self._plot = _pnl_chart(
                 shown,
                 focus=self._focus,
                 book=book,
                 on_pick=self.focus_contract,
                 months=self._mode == "year",
+                live=self._live_marks(),
+                window=(start, end),
             )
-        )
-        self._plot = self._board_layout.itemAt(0).widget()
+            self._board_layout.addWidget(self._plot)
+        else:
+            self._plot.reload_chart(
+                shown,
+                focus=self._focus,
+                book=book,
+                on_pick=self.focus_contract,
+                months=self._mode == "year",
+                live=self._live_marks(),
+                window=(start, end),
+            )
+            self._plot.show()
+        self._publish_book()
+
+
+def _book_size(series: ContractSeries) -> float:
+    """Current contracts. A flat name sorts after anything still held."""
+    if not series.points:
+        return 0.0
+    return max(series.points[-1].qty, 0.0)
 
 
 def _line_name(occ: str) -> str:
@@ -493,7 +655,7 @@ def _triangle(head: QPointF, tail: QPointF) -> QPainterPath:
     if length < 1:
         return path
     ux, uy = dx / length, dy / length
-    half = 8.0
+    half = max(3.0, min(8.0, length * 0.45))
     path.moveTo(head)
     path.lineTo(tail.x() - uy * half, tail.y() + ux * half)
     path.lineTo(tail.x() + uy * half, tail.y() - ux * half)
@@ -504,25 +666,40 @@ def _triangle(head: QPointF, tail: QPointF) -> QPainterPath:
 def _vertical_arrow(area: QPointF, pnl: QPointF, *, upward: bool) -> QPainterPath:
     """Add points up, sell points down, and the mark stays off both strokes.
 
-    Screen y grows downward. When the two lines are close, the mark sits just
-    outside the pair instead of being stretched across them.
+    Screen y grows downward. A wide gap keeps a triangle in the middle, no
+    taller than half the gap and never more than 22px. A tight gap or a
+    crossing uses an 8px triangle just outside the percent line.
     """
     x = area.x()
-    top = min(area.y(), pnl.y())
-    bottom = max(area.y(), pnl.y())
-    length = 22.0
-    pad = 6.0
-    if bottom - top >= length + pad * 2:
-        mid = (top + bottom) / 2.0
+    gap = abs(area.y() - pnl.y())
+    if gap >= 16.0:
+        length = min(22.0, gap / 2.0)
+        mid = (area.y() + pnl.y()) / 2.0
         head_y = mid - length / 2.0 if upward else mid + length / 2.0
         tail_y = mid + length / 2.0 if upward else mid - length / 2.0
-    elif upward:
-        head_y = top - pad - length
-        tail_y = top - pad
-    else:
-        tail_y = bottom + pad
-        head_y = bottom + pad + length
+        return _triangle(QPointF(x, head_y), QPointF(x, tail_y))
+    head_y, tail_y = _tight_arrow(area.y(), pnl.y(), upward=upward)
     return _triangle(QPointF(x, head_y), QPointF(x, tail_y))
+
+
+def _tight_arrow(area_y: float, pnl_y: float, *, upward: bool) -> tuple[float, float]:
+    """8px head and tail. Prefer the percent line; step outside if that hits the area."""
+    length = 8.0
+    pad = 4.0
+
+    def beside(origin: float) -> tuple[float, float]:
+        if upward:
+            tail_y = origin - pad
+            return tail_y - length, tail_y
+        tail_y = origin + pad
+        return tail_y + length, tail_y
+
+    head_y, tail_y = beside(pnl_y)
+    lo, hi = (head_y, tail_y) if head_y <= tail_y else (tail_y, head_y)
+    if lo - 1.0 <= area_y <= hi + 1.0:
+        outer = min(area_y, pnl_y) if upward else max(area_y, pnl_y)
+        head_y, tail_y = beside(outer)
+    return head_y, tail_y
 
 
 class _TradeLink(QGraphicsPathItem):
@@ -577,6 +754,39 @@ class _GapFill(QGraphicsPathItem):
         self.setPath(path)
 
 
+def _fit_window(plot_item, first: date, last: date) -> None:
+    """Show the selected week, month, or year, not only the days that have points."""
+    import pyqtgraph as pg
+
+    box = plot_item.getViewBox()
+    box.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
+    x0 = _x(first)
+    x1 = _x(last)
+    if x1 < x0:
+        x0, x1 = x1, x0
+    if x1 == x0:
+        x1 = x0 + 1.0
+    pad = (x1 - x0) * 0.02
+    box.setXRange(x0 - pad, x1 + pad, padding=0)
+
+
+def _live_x(when: datetime, day: date) -> float:
+    """Place a snapshot inside today's slot so it cannot move yesterday's close."""
+    from zoneinfo import ZoneInfo
+
+    et = when.astimezone(ZoneInfo("America/New_York"))
+    minutes = et.hour * 60 + et.minute
+    opened = 9 * 60 + 30
+    closed = 16 * 60
+    span = closed - opened
+    frac = 0.0 if span <= 0 else (minutes - opened) / span
+    if frac < 0.0:
+        frac = 0.0
+    elif frac > 1.0:
+        frac = 1.0
+    return _x(day) + frac * 0.8
+
+
 def _pnl_chart(
     series: list[ContractSeries],
     *,
@@ -584,6 +794,8 @@ def _pnl_chart(
     book: list[str] | None = None,
     on_pick=None,
     months: bool = False,
+    live: list[tuple[float, float]] | None = None,
+    window: tuple[date, date] | None = None,
 ) -> QWidget:
     import pyqtgraph as pg
 
@@ -628,65 +840,6 @@ def _pnl_chart(
         price.linkedViewChanged(item.vb, price.XAxis)
 
     item.vb.sigResized.connect(_sync_price)
-    colors = assign_colors(book if book is not None else (contract.occ for contract in series))
-    painted: list[tuple[str, str, object, object]] = []
-    ends: dict[str, tuple[float, float]] = {}
-    strokes: list[tuple[str, list[float], list[float], float, float]] = []
-    guides: dict[str, object] = {}
-    outcomes: dict[str, list] = {}
-    anchors: dict[str, list] = {}
-    host.level_guides = guides  # type: ignore[attr-defined]
-    host.outcome_segments = outcomes  # type: ignore[attr-defined]
-    host.trade_links = anchors  # type: ignore[attr-defined]
-    draw_order = sorted(
-        range(len(series)),
-        key=lambda index: max((point.qty for point in series[index].points), default=0),
-        reverse=True,
-    )
-    for index in draw_order:
-        contract = series[index]
-        color = colors[contract.occ]
-        area = None
-        curve = None
-        qty_days = [_x(point.day) for point in contract.points]
-        if qty_days:
-            area = pg.PlotDataItem(
-                qty_days,
-                [_qty_height(point.qty) for point in contract.points],
-                fillLevel=0,
-            )
-            item.addItem(area)
-        price_points = [
-            (point.day, point.pnl_pct)
-            for point in contract.points
-            if point.pnl_pct is not None
-        ]
-        if price_points:
-            last_day, last_pnl = price_points[-1]
-            xs = [_x(day) for day, _value in price_points]
-            ys = [value for _day, value in price_points]
-            ends[contract.occ] = (xs[-1], last_pnl)
-            strokes.append((contract.occ, xs, ys, min(ys), max(ys)))
-            curve = pg.PlotDataItem(xs, ys, antialias=True)
-            price.addItem(curve)
-            guide = pg.PlotDataItem(antialias=True)
-            price.addItem(guide, ignoreBounds=True)
-            guides[contract.occ] = guide
-        bands = []
-        for tone, samples in _gap_runs(contract):
-            band = _GapFill(tone, samples)
-            plot.scene().addItem(band)
-            bands.append(band)
-        outcomes[contract.occ] = bands
-        marks = []
-        for view_x, height, pnl, side in _trade_anchors(contract):
-            link = _TradeLink(color, side)
-            link.anchor = (view_x, height, pnl)  # type: ignore[attr-defined]
-            link.hide()
-            plot.scene().addItem(link)
-            marks.append(link)
-        anchors[contract.occ] = marks
-        painted.append((contract.occ, color, area, curve))
     cost = pg.InfiniteLine(
         pos=0,
         angle=0,
@@ -701,150 +854,288 @@ def _pnl_chart(
     cost.setZValue(15)
     price.addItem(cost)
     plot.cost_line = cost  # type: ignore[attr-defined]
-    peak = max((point.qty for contract in series for point in contract.points), default=0)
-    plot.getAxis("left").setTicks([_qty_ticks(peak)])
-    point_days = [point.day for contract in series for point in contract.points]
-    if point_days:
-        plot.getAxis("bottom").setTicks(
-            [_axis_ticks(min(point_days), max(point_days), months=months)]
-        )
-    item.enableAutoRange()
-    ys = [value for _occ, _xs, stroke, _low, _high in strokes for value in stroke]
-    low, high = _pnl_limits(ys)
-    price.setYRange(low, high, padding=0)
-    _sync_price()
-    legend = _Legend(series, colors, focus, on_pick)
-    def _apply_focus(selected: str | None) -> None:
-        present = {occ for occ, _color, _area, _curve in painted}
-        active = selected if selected in present else None
-        host.focus_roles = {}
-        for occ, color, area, curve in painted:
-            role = "all" if active is None else ("hot" if occ == active else "dim")
-            host.focus_roles[occ] = role
-            area_pen, area_brush, curve_pen, level = _series_ink(color, role)
-            if area is not None:
-                area.setPen(area_pen)
-                area.setBrush(area_brush)
-                area.setZValue(level)
-            if curve is not None:
-                curve.setPen(curve_pen)
-                curve.setZValue(level + 1)
-            guide = guides.get(occ)
-            if guide is not None:
-                pen, rank = _guide_ink(color, role)
-                guide.setPen(pen)
-                guide.setZValue(rank)
-        host.focused = active  # type: ignore[attr-defined]
-        _place_links()
-        legend.apply(active)
-        box = getattr(plot, "strategy_crosshair", None)
-        if box is not None:
-            box.apply_focus(active)
-
-    link_stamp = {"sig": None}
-
-    def _place_links(*_args) -> None:
-        active = getattr(host, "focused", None)
-        _sync_price()
-        rect = item.vb.sceneBoundingRect()
-        x_low, x_high = item.vb.viewRange()[0]
-        px_low, px_high = price.viewRange()[0]
-        low, high = price.viewRange()[1]
-        signature = (
-            active,
-            round(rect.left(), 1),
-            round(rect.top(), 1),
-            round(rect.width(), 1),
-            round(rect.height(), 1),
-            round(float(x_low), 4),
-            round(float(x_high), 4),
-            round(float(px_low), 4),
-            round(float(px_high), 4),
-            round(float(low), 3),
-            round(float(high), 3),
-        )
-        if link_stamp["sig"] == signature:
-            return
-        link_stamp["sig"] = signature
-        ready = not rect.isEmpty()
-        for occ, bands in outcomes.items():
-            for band in bands:
-                if not ready or occ != active:
-                    band.hide()
-                    continue
-                band.place(item.vb, price)
-                band.show()
-        for occ, marks in anchors.items():
-            show = ready and occ == active
-            for link in marks:
-                if not show:
-                    link.hide()
-                    continue
-                view_x, height, pnl = link.anchor
-                link.setPath(
-                    _vertical_arrow(
-                        item.vb.mapViewToScene(QPointF(view_x, height)),
-                        price.mapViewToScene(QPointF(view_x, pnl)),
-                        upward=link.upward,
-                    )
-                )
-                link.show()
-
-    placed = {"right": None}
-
-    def _place_guides() -> None:
-        right = round(float(price.viewRange()[0][1]), 4)
-        if placed["right"] == right:
-            return
-        placed["right"] = right
-        for occ, guide in guides.items():
-            end_x, end_y = ends[occ]
-            if end_x >= right:
-                guide.hide()
-                continue
-            guide.setData([end_x, right], [end_y, end_y])
-            guide.show()
-
-    def _on_xrange(*_args) -> None:
-        _place_guides()
-        _place_links()
-
+    drawn: list[tuple[str, object]] = []
+    slots = {
+        "apply_focus": lambda _selected: None,
+        "place_links": lambda *_args: None,
+        "place_guides": lambda: None,
+        "on_click": lambda _event: None,
+    }
+    host.level_guides = {}  # type: ignore[attr-defined]
+    host.outcome_segments = {}  # type: ignore[attr-defined]
+    host.trade_links = {}  # type: ignore[attr-defined]
     host.focus_roles = {}
     host.focused = None  # type: ignore[attr-defined]
+
+    def _on_xrange(*_args) -> None:
+        slots["place_guides"]()
+        slots["place_links"]()
+
+    def _dispatch_click(event) -> None:
+        slots["on_click"](event)
+
     price.sigXRangeChanged.connect(_on_xrange)
-    item.vb.sigResized.connect(_place_links)
-    item.vb.sigRangeChanged.connect(_place_links)
-    price.sigYRangeChanged.connect(_place_links)
-    _place_guides()
+    item.vb.sigResized.connect(lambda *_args: slots["place_links"]())
+    item.vb.sigRangeChanged.connect(lambda *_args: slots["place_links"]())
+    price.sigYRangeChanged.connect(lambda *_args: slots["place_links"]())
+    plot.scene().sigMouseClicked.connect(_dispatch_click)
+    plot._line_click = _dispatch_click  # type: ignore[attr-defined]
+    _bind_crosshair(plot, item, series, {}, focus)
 
-    def _pick(x: float, y: float, px: float, py: float) -> None:
-        if on_pick is None:
-            return
-        occ = _nearest_stroke(strokes, x, y, px, py)
-        if occ is not None:
-            on_pick(occ)
+    def reload(
+        next_series,
+        *,
+        focus=None,
+        book=None,
+        on_pick=None,
+        months=False,
+        live: list[tuple[float, float]] | None = None,
+        window: tuple[date, date] | None = None,
+    ) -> None:
+        slots["place_links"] = lambda *_args: None
+        slots["place_guides"] = lambda: None
+        slots["on_click"] = lambda _event: None
+        for kind, obj in drawn:
+            if kind == "qty":
+                item.removeItem(obj)
+            elif kind == "price":
+                price.removeItem(obj)
+            else:
+                plot.scene().removeItem(obj)
+        drawn.clear()
+        colors = assign_colors(
+            book if book is not None else (contract.occ for contract in next_series)
+        )
+        painted: list[tuple[str, str, object, object]] = []
+        ends: dict[str, tuple[float, float]] = {}
+        strokes: list[tuple[str, list[float], list[float], float, float]] = []
+        guides: dict[str, object] = {}
+        outcomes: dict[str, list] = {}
+        anchors: dict[str, list] = {}
+        host.level_guides = guides  # type: ignore[attr-defined]
+        host.outcome_segments = outcomes  # type: ignore[attr-defined]
+        host.trade_links = anchors  # type: ignore[attr-defined]
+        draw_order = sorted(
+            range(len(next_series)),
+            key=lambda index: max((point.qty for point in next_series[index].points), default=0),
+            reverse=True,
+        )
+        for index in draw_order:
+            contract = next_series[index]
+            color = colors[contract.occ]
+            area = None
+            curve = None
+            qty_days = [_x(point.day) for point in contract.points]
+            if qty_days:
+                area = pg.PlotDataItem(
+                    qty_days,
+                    [_qty_height(point.qty) for point in contract.points],
+                    fillLevel=0,
+                )
+                item.addItem(area)
+                drawn.append(("qty", area))
+            price_points = [
+                (point.day, point.pnl_pct)
+                for point in contract.points
+                if point.pnl_pct is not None
+            ]
+            if price_points:
+                _last_day, last_pnl = price_points[-1]
+                xs = [_x(day) for day, _value in price_points]
+                ys = [value for _day, value in price_points]
+                ends[contract.occ] = (xs[-1], last_pnl)
+                strokes.append((contract.occ, xs, ys, min(ys), max(ys)))
+                curve = pg.PlotDataItem(xs, ys, antialias=True)
+                price.addItem(curve)
+                drawn.append(("price", curve))
+                guide = pg.PlotDataItem(antialias=True)
+                price.addItem(guide, ignoreBounds=True)
+                drawn.append(("price", guide))
+                guides[contract.occ] = guide
+            bands = []
+            for tone, samples in _gap_runs(contract):
+                band = _GapFill(tone, samples)
+                plot.scene().addItem(band)
+                drawn.append(("scene", band))
+                bands.append(band)
+            outcomes[contract.occ] = bands
+            marks = []
+            for view_x, height, pnl, side in _trade_anchors(contract):
+                link = _TradeLink(color, side)
+                link.anchor = (view_x, height, pnl)  # type: ignore[attr-defined]
+                link.hide()
+                plot.scene().addItem(link)
+                drawn.append(("scene", link))
+                marks.append(link)
+            anchors[contract.occ] = marks
+            painted.append((contract.occ, color, area, curve))
+        peak = max(
+            (point.qty for contract in next_series for point in contract.points),
+            default=0,
+        )
+        plot.getAxis("left").setTicks([_qty_ticks(peak)])
+        point_days = [point.day for contract in next_series for point in contract.points]
+        if window is not None:
+            first_day, last_day = window
+        elif point_days:
+            first_day, last_day = min(point_days), max(point_days)
+        else:
+            first_day = last_day = None
+        if first_day is not None and last_day is not None:
+            plot.getAxis("bottom").setTicks(
+                [_axis_ticks(first_day, last_day, months=months)]
+            )
+        item.enableAutoRange()
+        ys = [value for _occ, _xs, stroke, _low, _high in strokes for value in stroke]
+        low, high = _pnl_limits(ys)
+        price.setYRange(low, high, padding=0)
+        _sync_price()
 
-    def _on_click(event) -> None:
-        if on_pick is None or event.button() != Qt.MouseButton.LeftButton or event.double():
-            return
-        pos = event.scenePos()
-        bounds = price.sceneBoundingRect()
-        if bounds.isEmpty() or not bounds.contains(pos):
-            return
-        view = price.mapSceneToView(pos)
-        px, py = price.viewPixelSize()
-        _pick(float(view.x()), float(view.y()), float(px), float(py))
+        link_stamp = {"sig": None}
 
-    plot.pick_view = _pick  # type: ignore[attr-defined]
-    plot._line_click = _on_click  # type: ignore[attr-defined]
-    if on_pick is not None:
-        plot.scene().sigMouseClicked.connect(_on_click)
+        def _place_links(*_args) -> None:
+            active = getattr(host, "focused", None)
+            _sync_price()
+            rect = item.vb.sceneBoundingRect()
+            x_low, x_high = item.vb.viewRange()[0]
+            px_low, px_high = price.viewRange()[0]
+            y_low, y_high = price.viewRange()[1]
+            signature = (
+                active,
+                round(rect.left(), 1),
+                round(rect.top(), 1),
+                round(rect.width(), 1),
+                round(rect.height(), 1),
+                round(float(x_low), 4),
+                round(float(x_high), 4),
+                round(float(px_low), 4),
+                round(float(px_high), 4),
+                round(float(y_low), 3),
+                round(float(y_high), 3),
+            )
+            if link_stamp["sig"] == signature:
+                return
+            link_stamp["sig"] = signature
+            ready = not rect.isEmpty()
+            for occ, bands in outcomes.items():
+                for band in bands:
+                    if not ready or occ != active:
+                        band.hide()
+                        continue
+                    band.place(item.vb, price)
+                    band.show()
+            for occ, marks in anchors.items():
+                show = ready and occ == active
+                for link in marks:
+                    if not show:
+                        link.hide()
+                        continue
+                    view_x, height, pnl = link.anchor
+                    link.setPath(
+                        _vertical_arrow(
+                            item.vb.mapViewToScene(QPointF(view_x, height)),
+                            price.mapViewToScene(QPointF(view_x, pnl)),
+                            upward=link.upward,
+                        )
+                    )
+                    link.show()
 
-    host.apply_focus = _apply_focus  # type: ignore[attr-defined]
-    _apply_focus(focus)
-    layout.addWidget(legend)
+        placed = {"right": None}
+
+        def _place_guides() -> None:
+            right = round(float(price.viewRange()[0][1]), 4)
+            if placed["right"] == right:
+                return
+            placed["right"] = right
+            for occ, guide in guides.items():
+                end_x, end_y = ends[occ]
+                if end_x >= right:
+                    guide.hide()
+                    continue
+                guide.setData([end_x, right], [end_y, end_y])
+                guide.show()
+
+        def _apply_focus(selected: str | None) -> None:
+            present = {occ for occ, _color, _area, _curve in painted}
+            active = selected if selected in present else None
+            host.focus_roles = {}
+            for occ, color, area, curve in painted:
+                role = "all" if active is None else ("hot" if occ == active else "dim")
+                host.focus_roles[occ] = role
+                area_pen, area_brush, curve_pen, level = _series_ink(color, role)
+                if area is not None:
+                    area.setPen(area_pen)
+                    area.setBrush(area_brush)
+                    area.setZValue(level)
+                if curve is not None:
+                    curve.setPen(curve_pen)
+                    curve.setZValue(level + 1)
+                guide = guides.get(occ)
+                if guide is not None:
+                    pen, rank = _guide_ink(color, role)
+                    guide.setPen(pen)
+                    guide.setZValue(rank)
+            host.focused = active  # type: ignore[attr-defined]
+            _place_links()
+            box = getattr(plot, "strategy_crosshair", None)
+            if box is not None:
+                box.apply_focus(active)
+
+        def _pick(x: float, y: float, px: float, py: float) -> None:
+            if on_pick is None:
+                return
+            occ = _nearest_stroke(strokes, x, y, px, py)
+            if occ is not None:
+                on_pick(occ)
+
+        def _on_click(event) -> None:
+            if on_pick is None or event.button() != Qt.MouseButton.LeftButton or event.double():
+                return
+            pos = event.scenePos()
+            bounds = price.sceneBoundingRect()
+            if bounds.isEmpty() or not bounds.contains(pos):
+                return
+            view = price.mapSceneToView(pos)
+            px, py = price.viewPixelSize()
+            _pick(float(view.x()), float(view.y()), float(px), float(py))
+
+        slots["place_links"] = _place_links
+        slots["place_guides"] = _place_guides
+        slots["on_click"] = _on_click
+        slots["apply_focus"] = _apply_focus
+        plot.pick_view = _pick  # type: ignore[attr-defined]
+        host.apply_focus = _apply_focus  # type: ignore[attr-defined]
+        if live and focus:
+            xs = [point[0] for point in live]
+            ys = [point[1] for point in live]
+            color = colors.get(focus, MUTED)
+            trace = pg.PlotDataItem(xs, ys, antialias=True)
+            red, green, blue = pg.colorTuple(pg.mkColor(color))[:3]
+            trace.setPen(pg.mkPen(red, green, blue, 120, width=1.4))
+            price.addItem(trace)
+            drawn.append(("price", trace))
+            host.live_trace = trace  # type: ignore[attr-defined]
+        else:
+            host.live_trace = None  # type: ignore[attr-defined]
+        refresh = getattr(plot, "refresh_crosshair", None)
+        if refresh is not None:
+            refresh(next_series, colors, focus)
+        _place_guides()
+        _apply_focus(focus)
+        if first_day is not None and last_day is not None:
+            _fit_window(item, first_day, last_day)
+
+    host.reload_chart = reload  # type: ignore[attr-defined]
     layout.addWidget(plot, 1)
-    _bind_crosshair(plot, item, series, colors, focus)
+    reload(
+        series,
+        focus=focus,
+        book=book,
+        on_pick=on_pick,
+        months=months,
+        live=live,
+        window=window,
+    )
     return host
 
 
@@ -885,121 +1176,6 @@ def _series_ink(color: str, role: str):
     )
 
 
-class _FlowLayout(QLayout):
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._items: list = []
-        self.setSpacing(14)
-
-    def addItem(self, item) -> None:  # noqa: N802
-        self._items.append(item)
-
-    def count(self) -> int:
-        return len(self._items)
-
-    def itemAt(self, index: int):  # noqa: N802
-        if 0 <= index < len(self._items):
-            return self._items[index]
-        return None
-
-    def takeAt(self, index: int):  # noqa: N802
-        if 0 <= index < len(self._items):
-            return self._items.pop(index)
-        return None
-
-    def expandingDirections(self):  # noqa: N802
-        return Qt.Orientation(0)
-
-    def hasHeightForWidth(self) -> bool:  # noqa: N802
-        return True
-
-    def heightForWidth(self, width: int) -> int:  # noqa: N802
-        return self._arrange(QRect(0, 0, width, 0), apply=False)
-
-    def setGeometry(self, rect: QRect) -> None:  # noqa: N802
-        super().setGeometry(rect)
-        self._arrange(rect, apply=True)
-
-    def sizeHint(self) -> QSize:  # noqa: N802
-        return self.minimumSize()
-
-    def minimumSize(self) -> QSize:  # noqa: N802
-        size = QSize()
-        for item in self._items:
-            size = size.expandedTo(item.minimumSize())
-        margins = self.contentsMargins()
-        return size + QSize(margins.left() + margins.right(), margins.top() + margins.bottom())
-
-    def _arrange(self, rect: QRect, *, apply: bool) -> int:
-        margins = self.contentsMargins()
-        space = self.spacing()
-        left = rect.x() + margins.left()
-        right = rect.right() - margins.right()
-        x = left
-        y = rect.y() + margins.top()
-        line = 0
-        for item in self._items:
-            hint = item.sizeHint()
-            if x > left and x + hint.width() > right:
-                x = left
-                y += line + space
-                line = 0
-            if apply:
-                item.setGeometry(QRect(x, y, hint.width(), hint.height()))
-            x += hint.width() + space
-            line = max(line, hint.height())
-        return y + line + margins.bottom() - rect.y()
-
-
-class _LegendChip(QLabel):
-    def __init__(self, occ: str, name: str, legend: "_Legend") -> None:
-        super().__init__(f"● {name}", legend)
-        self._occ = occ
-        self._legend = legend
-        self.setFont(mono_font(11))
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-
-    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._legend.pick(self._occ)
-        super().mouseReleaseEvent(event)
-
-
-class _Legend(QWidget):
-    def __init__(
-        self,
-        series: list[ContractSeries],
-        colors: dict[str, str],
-        focus: str | None,
-        on_pick,
-    ) -> None:
-        super().__init__()
-        self.setObjectName("strategyLegend")
-        self._on_pick = on_pick
-        self._colors = colors
-        self._chips: dict[str, _LegendChip] = {}
-        flow = _FlowLayout(self)
-        flow.setContentsMargins(0, 0, 0, 0)
-        for contract in series:
-            chip = _LegendChip(contract.occ, _line_name(contract.occ), self)
-            self._chips[contract.occ] = chip
-            flow.addWidget(chip)
-        policy = QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
-        policy.setHeightForWidth(True)
-        self.setSizePolicy(policy)
-        self.setStyleSheet(f"background: {BG};")
-        self.apply(focus)
-
-    def apply(self, selected: str | None) -> None:
-        for occ, chip in self._chips.items():
-            color = MUTED if selected and occ != selected else self._colors[occ]
-            chip.setStyleSheet(f"color: {color}; background: transparent; border: none;")
-
-    def pick(self, occ: str) -> None:
-        if self._on_pick is not None:
-            self._on_pick(occ)
-
-
 class _Hairline(QWidget):
     """One-pixel crosshair drawn on the viewport, not in the plot scene.
 
@@ -1027,6 +1203,7 @@ def _bind_crosshair(
     focus: str | None = None,
 ) -> None:
     days = sorted({point.day for contract in series for point in contract.points})
+    feed = {"series": series, "colors": colors, "days": days}
     line = _Hairline(plot.viewport())
     popup = _Crosshair(plot)
     popup.set_focus(focus)
@@ -1070,17 +1247,17 @@ def _bind_crosshair(
             popup.show()
 
     def _show(day: date, local: QPoint | None = None) -> None:
-        if not days:
+        if not feed["days"]:
             _hide()
             return
-        snapped = day if day in days else _nearest_day(days, _x(day))
+        snapped = day if day in feed["days"] else _nearest_day(feed["days"], _x(day))
         if snapped is None:
             _hide()
             return
         if state["day"] == snapped:
             return
         state["day"] = snapped
-        popup.set_rows(series, snapped, colors)
+        popup.set_rows(feed["series"], snapped, feed["colors"])
         _move_line(snapped)
         if local is None:
             popup.adjustSize()
@@ -1095,7 +1272,7 @@ def _bind_crosshair(
         if bounds.isEmpty() or not bounds.contains(pos):
             _hide()
             return
-        when = _nearest_day(days, float(item.vb.mapSceneToView(pos).x()))
+        when = _nearest_day(feed["days"], float(item.vb.mapSceneToView(pos).x()))
         if when is None:
             _hide()
             return
@@ -1134,6 +1311,21 @@ def _bind_crosshair(
     plot.viewport().installEventFilter(watcher)
     plot._crosshair_watcher = watcher  # type: ignore[attr-defined]
     plot.show_crosshair = lambda day: _show(day)  # type: ignore[attr-defined]
+
+    def refresh(next_series, next_colors, next_focus=None) -> None:
+        feed["series"] = next_series
+        feed["colors"] = next_colors
+        feed["days"] = sorted(
+            {point.day for contract in next_series for point in contract.points}
+        )
+        popup.set_focus(next_focus)
+        popup._widths = None
+        popup._sized = False
+        state["day"] = None
+        line.hide()
+        popup.hide()
+
+    plot.refresh_crosshair = refresh  # type: ignore[attr-defined]
 
 
 class _Crosshair(QFrame):

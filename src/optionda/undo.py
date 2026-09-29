@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -25,6 +26,27 @@ class UndoResult:
 
 def new_batch_id() -> str:
     return uuid4().hex[:12]
+
+
+_OPS_CACHE: dict[tuple[str, str], tuple[int, dict[str, datetime]]] = {}
+
+
+def cached_last_operation_times(account: str, home: Path | None = None) -> dict[str, datetime]:
+    """Last fill time per contract. Unchanged ledger seq reuses the previous scan."""
+    from optionda.journal import ledger_seq
+    from optionda.paths import ensure_home
+
+    root = ensure_home(home)
+    if not (root / "ledger" / f"{account}.sqlite").exists():
+        return last_operation_times(read_ledger_events(log_path(account, root)))
+    seq = ledger_seq(account, root)
+    key = (str(root), account)
+    hit = _OPS_CACHE.get(key)
+    if hit is not None and hit[0] == seq:
+        return hit[1]
+    ops = last_operation_times(read_ledger_events(log_path(account, root)))
+    _OPS_CACHE[key] = (seq, ops)
+    return ops
 
 
 def last_operation_times(events: list[dict[str, Any]]) -> dict[str, datetime]:

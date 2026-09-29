@@ -303,6 +303,65 @@ def format_poll_status(
     return _fit_width(body)
 
 
+_ADD_TEXT = "#cccccc"
+_ADD_MUTED = "#767676"
+_ADD_GREEN = "#16c60c"
+_ADD_CYAN = "#61d6d6"
+_ADD_TRACK = "#333333"
+_ADD_MARK = "━"
+
+
+def format_add_rows(
+    lines: list[str],
+    *,
+    done: int = 0,
+    active: int | None = None,
+    tick: int = 0,
+    spin: str | None = None,
+    note: str | None = None,
+    footer: str | None = None,
+    bar_width: int = 24,
+) -> str:
+    """One bar per add. Finished rows stay full; only the active row advances."""
+    import html as html_lib
+
+    width = max(int(bar_width), 8)
+    finished = max(0, min(int(done or 0), len(lines)))
+    blocks: list[str] = []
+    for index, line in enumerate(lines):
+        if index < finished:
+            filled = width
+            name_color = _ADD_TEXT
+            fill_color = _ADD_GREEN
+            mark, mark_color = "✓", _ADD_GREEN
+        elif active is not None and index == active:
+            filled = min(width - 1, 1 + max(int(tick), 0) // 2)
+            name_color = _ADD_CYAN
+            fill_color = _ADD_CYAN
+            mark, mark_color = (spin or "·"), _ADD_CYAN
+        else:
+            filled = 0
+            name_color = _ADD_MUTED
+            fill_color = _ADD_TRACK
+            mark, mark_color = "·", _ADD_MUTED
+        name = html_lib.escape(line)
+        parts = []
+        if filled:
+            parts.append(f'<span style="color:{fill_color}">{_ADD_MARK * filled}</span>')
+        if filled < width:
+            parts.append(f'<span style="color:{_ADD_TRACK}">{_ADD_MARK * (width - filled)}</span>')
+        bar = "".join(parts)
+        blocks.append(
+            f'<span style="color:{mark_color}">{html_lib.escape(mark)}</span>'
+            f'<span style="color:{name_color}">  {name}</span><br>{bar}'
+        )
+    body = "<br><br>".join(blocks)
+    tail = footer if footer else (explain_progress(note) if note else "")
+    if tail:
+        body += f'<br><br><span style="color:{_ADD_MUTED}">{html_lib.escape(tail)}</span>'
+    return body
+
+
 def format_add_progress(
     *,
     spin: str | None = None,
@@ -702,12 +761,29 @@ def _desk_note_visible(note: str) -> bool:
 SECTION_RESERVE = 2
 
 
-def _contract_name(occ: str) -> str:
+def _contract_name(occ: str, *, with_expiry: bool = False) -> str:
     try:
         parts = parse_occ(occ)
     except OccError:
         return occ
-    return f"{parts.underlying} {parts.strike:g}"
+    name = f"{parts.underlying} {parts.strike:g}"
+    if with_expiry:
+        name = f"{name} {parts.expiry.month}/{parts.expiry.day}"
+    return name
+
+
+def _expiry_collisions(occs) -> set[tuple[str, float]]:
+    from collections import Counter
+
+    keys = []
+    for occ in occs:
+        try:
+            parts = parse_occ(occ)
+        except OccError:
+            continue
+        keys.append((parts.underlying, parts.strike))
+    counts = Counter(keys)
+    return {key for key, count in counts.items() if count > 1}
 
 
 def _row_link(cell: Text | str, occ: str) -> Text:
@@ -768,8 +844,14 @@ def _compact_table(
             table.add_row(Text("(no positions)", style=_MUTED), "", "", "")
         return table
     colors = assign_colors(row.position.occ_symbol for row in rows)
+    collisions = _expiry_collisions(row.position.occ_symbol for row in rows)
     for row in rows:
         pos = row.position
+        try:
+            parts = parse_occ(pos.occ_symbol)
+            collide = (parts.underlying, parts.strike) in collisions
+        except OccError:
+            collide = False
         cost = _fmt_money(row.cost if row.cost is not None else pos.entry_premium)
         spot = _spot_cell(
             row.spot,
@@ -780,7 +862,7 @@ def _compact_table(
         cells = (
             (
                 Text(
-                    _contract_name(pos.occ_symbol),
+                    _contract_name(pos.occ_symbol, with_expiry=collide),
                     style=f"bold {colors[pos.occ_symbol]}",
                 ),
                 spot,
@@ -790,7 +872,7 @@ def _compact_table(
             if row.error
             else (
                 Text(
-                    _contract_name(pos.occ_symbol),
+                    _contract_name(pos.occ_symbol, with_expiry=collide),
                     style=f"bold {colors[pos.occ_symbol]}",
                 ),
                 spot,

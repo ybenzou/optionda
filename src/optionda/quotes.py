@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from optionda.models import Position, RowMark
@@ -28,6 +28,8 @@ _TEXT = {
     "surface_session",
     "last_op_at",
     "spot_source",
+    "spot_as_of",
+    "surface_as_of",
     "error",
     "source",
 }
@@ -63,7 +65,15 @@ _COLUMNS = (
     "error",
     "source",
     "live",
+    "surface_as_of",
+    "model_low",
+    "model_high",
+    "spot_as_of",
+    "rate_used",
+    "dividend_used",
 )
+
+_KEEP_DAYS = 92
 
 
 def quote_db_path(account: str, home: Path | None = None) -> Path:
@@ -88,18 +98,19 @@ def save_quotes(
         if not rows:
             conn.execute("DELETE FROM latest")
             conn.commit()
-            return
-        records = [_record(when, row, source) for row in rows]
-        placeholders = ", ".join("?" for _ in _COLUMNS)
-        names = ", ".join(_COLUMNS)
-        conn.executemany(
-            f"INSERT INTO quotes ({names}) VALUES ({placeholders})",
-            records,
-        )
-        _upsert_latest(conn, names, placeholders, records)
-        conn.commit()
+        else:
+            records = [_record(when, row, source) for row in rows]
+            placeholders = ", ".join("?" for _ in _COLUMNS)
+            names = ", ".join(_COLUMNS)
+            conn.executemany(
+                f"INSERT INTO quotes ({names}) VALUES ({placeholders})",
+                records,
+            )
+            _upsert_latest(conn, names, placeholders, records)
+            conn.commit()
     finally:
         conn.close()
+    _archive_if_due(account, home)
 
 
 def load_latest_rows(account: str, home: Path | None = None) -> list[RowMark]:
@@ -117,6 +128,43 @@ def load_latest_rows(account: str, home: Path | None = None) -> list[RowMark]:
     return [_row_mark(row) for row in found]
 
 
+def intraday_pnl(
+    account: str,
+    occ: str,
+    day: date,
+    home: Path | None = None,
+) -> list[tuple[datetime, float]]:
+    """Today's run snapshots for one contract. Yesterday's close is not included."""
+    path = ensure_home(home) / "quotes" / f"{account}.sqlite"
+    if not path.exists():
+        return []
+    from zoneinfo import ZoneInfo
+
+    et = ZoneInfo("America/New_York")
+    start = datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc) - timedelta(days=1)
+    end = start + timedelta(days=3)
+    conn = _connect(path)
+    try:
+        _ensure_schema(conn)
+        found = conn.execute(
+            "SELECT ts, pnl_pct FROM quotes WHERE occ = ? AND ts >= ? AND ts < ? "
+            "AND source = 'run' ORDER BY ts",
+            (occ, start.isoformat(), end.isoformat()),
+        ).fetchall()
+    finally:
+        conn.close()
+    points: list[tuple[datetime, float]] = []
+    for row in found:
+        when = _parse_dt(row["ts"])
+        pnl = _float(row["pnl_pct"])
+        if when is None or pnl is None:
+            continue
+        if when.astimezone(et).date() != day:
+            continue
+        points.append((when, pnl))
+    return points
+
+
 def quote_count(account: str, home: Path | None = None) -> int:
     path = ensure_home(home) / "quotes" / f"{account}.sqlite"
     if not path.exists():
@@ -128,6 +176,82 @@ def quote_count(account: str, home: Path | None = None) -> int:
     finally:
         conn.close()
     return int(row["n"] if row is not None else 0)
+
+
+def archive_db_path(account: str, home: Path | None = None) -> Path:
+    folder = ensure_home(home) / "quotes"
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder / f"{account}.archive.sqlite"
+
+
+def archive_stale_quotes(
+    account: str,
+    home: Path | None = None,
+    *,
+    now: datetime | None = None,
+) -> int:
+    """Move snapshots older than a quarter into the archive. Latest stays put."""
+    path = ensure_home(home) / "quotes" / f"{account}.sqlite"
+    if not path.exists():
+        return 0
+    when = now or datetime.now(timezone.utc)
+    cutoff = (when - timedelta(days=_KEEP_DAYS)).astimezone(timezone.utc).isoformat()
+    archive = archive_db_path(account, home)
+    arch = _connect(archive)
+    try:
+        _ensure_schema(arch)
+        arch.commit()
+    finally:
+        arch.close()
+    conn = _connect(path)
+    try:
+        _ensure_schema(conn)
+        conn.execute("ATTACH DATABASE ? AS archive_db", (str(archive),))
+        before = conn.execute(
+            "SELECT COUNT(*) AS n FROM quotes WHERE ts < ?",
+            (cutoff,),
+        ).fetchone()
+        moved = int(before["n"] if before is not None else 0)
+        if moved:
+            conn.execute("BEGIN")
+            conn.execute(
+                "INSERT INTO archive_db.quotes SELECT * FROM quotes WHERE ts < ?",
+                (cutoff,),
+            )
+            conn.execute("DELETE FROM quotes WHERE ts < ?", (cutoff,))
+            conn.commit()
+        return moved
+    finally:
+        conn.close()
+
+
+def _archive_if_due(account: str, home: Path | None, now: datetime | None = None) -> None:
+    path = ensure_home(home) / "quotes" / f"{account}.sqlite"
+    if not path.exists():
+        return
+    when = now or datetime.now(timezone.utc)
+    today = when.astimezone(timezone.utc).date().isoformat()
+    conn = _connect(path)
+    try:
+        _ensure_schema(conn)
+        row = conn.execute(
+            "SELECT value FROM meta WHERE key = 'archived_on'"
+        ).fetchone()
+        if row is not None and row["value"] == today:
+            return
+    finally:
+        conn.close()
+    archive_stale_quotes(account, home, now=when)
+    conn = _connect(path)
+    try:
+        conn.execute(
+            "INSERT INTO meta(key, value) VALUES('archived_on', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (today,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _connect(path: Path) -> sqlite3.Connection:
@@ -246,6 +370,12 @@ def _record(ts: str, row: RowMark, source: str = "live") -> tuple:
         row.error,
         source,
         row.live,
+        row.surface_as_of.isoformat() if row.surface_as_of is not None else None,
+        row.model_low,
+        row.model_high,
+        row.spot_as_of.isoformat() if row.spot_as_of is not None else None,
+        row.rate_used,
+        row.dividend_used,
     )
 
 
@@ -286,6 +416,12 @@ def _row_mark(row: sqlite3.Row) -> RowMark:
         last_op_at=_parse_dt(row["last_op_at"]),
         spot_source=row["spot_source"],
         error=row["error"],
+        surface_as_of=_parse_dt(row["surface_as_of"]) if "surface_as_of" in row.keys() else None,
+        model_low=_float(row["model_low"]) if "model_low" in row.keys() else None,
+        model_high=_float(row["model_high"]) if "model_high" in row.keys() else None,
+        spot_as_of=_parse_dt(row["spot_as_of"]) if "spot_as_of" in row.keys() else None,
+        rate_used=_float(row["rate_used"]) if "rate_used" in row.keys() else None,
+        dividend_used=_float(row["dividend_used"]) if "dividend_used" in row.keys() else None,
     )
 
 
@@ -512,6 +648,12 @@ def _snapshot_record(ts: str, kind: str, row: dict) -> tuple | None:
         row.get("error"),
         kind,
         _float(row.get("live")),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
     )
 
 

@@ -81,9 +81,9 @@ def test_strategy_pane_switches_month_and_year(qtbot) -> None:
     assert pane.window_label() == "2026-09"
     assert pane.chart_count() == 1
     assert pane.findChildren(QLabel, "strategyPayback") == []
-    legend = pane.findChild(QWidget, "strategyLegend")
-    assert legend is not None
-    assert any(chip.text() == "● SPCX 205 12/18/26" for chip in legend.findChildren(QLabel))
+    assert pane.findChild(QWidget, "strategyLegend") is None
+    assert any(row[1] == "SPCX 205 12/18/26" for row in pane.book_rows())
+    assert any(row[3].endswith("d") for row in pane.book_rows())
     plot = pane.findChild(QWidget, "strategyPlot")
     assert plot is not None
     labels = [text for _pos, text in plot.getAxis("bottom")._tickLevels[0]]
@@ -95,16 +95,235 @@ def test_strategy_pane_switches_month_and_year(qtbot) -> None:
     assert pane.chart_count() == 1
     pane.show_year()
     assert pane.window_label() == "2026"
+    assert pane._current_plot() is plot
     plot = pane._current_plot()
     assert plot is not None
     year_labels = [text for _pos, text in plot.getAxis("bottom")._tickLevels[0]]
-    assert year_labels == ["Aug", "Sep"]
+    assert year_labels[0] == "Aug"
+    assert year_labels[-1] == "Dec"
+    assert "Jan" not in year_labels
+    assert "Sep" in year_labels
     pane.show_month()
     assert pane.window_label() == "2026-08"
     plot = pane.findChild(QWidget, "strategyPlot")
     assert plot is not None
     assert plot.getAxis("right").labelText == "vs cost %"
     assert plot.getAxis("left").labelText == "qty"
+
+
+def test_week_shows_a_close_inside_the_window(qtbot) -> None:
+    from optionda.gui.strategy_pane import StrategyPane
+
+    closed = ContractSeries(
+        occ="INTC261016C00140000",
+        points=[
+            StrategyPoint(date(2026, 9, 8), 5, 2.0, 20.0, 1.5, -25.0),
+            StrategyPoint(date(2026, 9, 10), 0, 2.0, 20.0, 1.8, -10.0),
+        ],
+        trades=[TradeMark(date(2026, 9, 10), "sell", 5, 1.8)],
+        payback_days=None,
+    )
+    earlier = ContractSeries(
+        occ="HOOD261218C00150000",
+        points=[
+            StrategyPoint(date(2026, 7, 10), 2, 3.0, 40.0, 2.0, -30.0),
+            StrategyPoint(date(2026, 7, 20), 0, 3.0, 40.0, 2.5, -16.0),
+        ],
+        trades=[],
+        payback_days=None,
+    )
+    pane = StrategyPane()
+    qtbot.addWidget(pane)
+    pane.resize(900, 640)
+    pane.show()
+    pane.set_series([_series(), closed, earlier], anchor=date(2026, 9, 10))
+    names = {row[1]: row[3] for row in pane.book_rows()}
+    assert any(name.startswith("INTC") for name in names)
+    assert any(name.startswith("SPCX") for name in names)
+    assert not any(name.startswith("HOOD") for name in names)
+    held = next(days for name, days in names.items() if name.startswith("INTC"))
+    assert held == "3d"
+
+
+def test_book_lists_larger_positions_first(qtbot) -> None:
+    from optionda.gui.strategy_pane import StrategyPane
+
+    def held(occ: str, qty: float) -> ContractSeries:
+        return ContractSeries(
+            occ=occ,
+            points=[StrategyPoint(date(2026, 9, 4), qty, 1.0, 100.0, 1.0, 0.0)],
+            trades=[],
+            payback_days=None,
+        )
+
+    flat = ContractSeries(
+        occ="INTC261016C00140000",
+        points=[
+            StrategyPoint(date(2026, 9, 8), 30, 2.0, 20.0, 1.5, -25.0),
+            StrategyPoint(date(2026, 9, 10), 0, 2.0, 20.0, 1.8, -10.0),
+        ],
+        trades=[],
+        payback_days=None,
+    )
+    pane = StrategyPane()
+    qtbot.addWidget(pane)
+    pane.resize(900, 640)
+    pane.show()
+    pane.set_series(
+        [
+            held("CSCO261218C00130000", 4),
+            held("AVGO261218C00500000", 40),
+            held("IBM261218C00300000", 12),
+            flat,
+        ],
+        anchor=date(2026, 9, 15),
+    )
+    pane.show_month()
+    names = [row[1] for row in pane.book_rows()]
+    assert [name.split()[0] for name in names] == ["AVGO", "IBM", "CSCO", "INTC"]
+
+
+def test_book_panel_sits_under_the_desk_list(qtbot) -> None:
+    from PySide6.QtWidgets import QApplication
+
+    from optionda.gui.terminal_view import TerminalView
+
+    view = TerminalView()
+    qtbot.addWidget(view)
+    view.resize(1400, 800)
+    view.show()
+    view.prepare_live()
+    view.desk_list.show()
+    view.desk_list.set_lines([("SPCX261218C00205000", (("SPCX 205", "#cccccc", "", False),))])
+    view.set_strategy_visible(True)
+    view.strategy.set_series([_series()], anchor=date(2026, 9, 15))
+    view.strategy.show_month()
+    QApplication.processEvents()
+    view._left.activate()
+    assert view.book.isVisible()
+    text = view.book.plain_text()
+    assert "held" in text and "realized" in text
+    assert "SPCX 205 12/18/26" in text
+    assert view.book.geometry().top() >= view.desk_list.geometry().bottom() - 2
+    from PySide6.QtCore import QPoint
+    from PySide6.QtTest import QTest
+
+    QTest.mouseClick(view.book, Qt.MouseButton.LeftButton, pos=QPoint(24, view.book._line_h + 4))
+    assert view.strategy.focus_occ() == "SPCX261218C00205000"
+
+
+def test_book_realized_column_stays_clear_of_held(qtbot) -> None:
+    from optionda.gui.terminal_view import _BookPanel
+
+    book = _BookPanel()
+    qtbot.addWidget(book)
+    book.resize(420, 220)
+    book.set_rows(
+        [
+            ("A", "AVGO 500 12/18/26", "#8c53ea", "44d", "+2,506"),
+            ("B", "SPCX 205 12/18/26", "#16c60c", "22d", "-6.36"),
+            ("C", "XLV 160 12/18/26", "#cccccc", "149d", ""),
+        ]
+    )
+    metrics = book.fontMetrics()
+    name_right, held_x, held_w, money_x, money_w = book._column_layout(metrics, book.width())
+    assert held_x + held_w <= money_x
+    assert name_right <= held_x
+    assert money_w >= metrics.horizontalAdvance("realized")
+    assert money_w >= metrics.horizontalAdvance("+2,506")
+    assert held_w >= metrics.horizontalAdvance("149d")
+    assert money_x + money_w <= book.width()
+
+
+def test_book_stays_under_the_full_desk_list(qtbot) -> None:
+    from PySide6.QtWidgets import QApplication
+
+    from optionda.gui.terminal_view import TerminalView
+
+    view = TerminalView()
+    qtbot.addWidget(view)
+    view.resize(1400, 800)
+    view.show()
+    view.prepare_live()
+    lines = [
+        (f"OCC{i:02d}", ((f"NAME {i}", "#cccccc", "", False),))
+        for i in range(18)
+    ]
+    view.desk_list.show()
+    view.desk_list.set_lines(lines)
+    view.set_strategy_visible(True)
+    view.strategy.set_series([_series()], anchor=date(2026, 9, 15))
+    view.strategy.show_month()
+    QApplication.processEvents()
+    view._left.activate()
+    assert view.book.isVisible()
+    assert view.book.geometry().top() >= view.desk_list.geometry().bottom() - 1
+    content = view.desk_list._line_h * len(lines)
+    host = view._left.parentWidget()
+    assert host is not None
+    if content + view.book._line_h * 3 <= host.height():
+        assert view.desk_list.height() == content
+
+
+def test_book_row_shows_a_pointing_hand(qtbot) -> None:
+    from PySide6.QtCore import QPoint
+    from PySide6.QtTest import QTest
+
+    from optionda.gui.terminal_view import _BookPanel
+
+    book = _BookPanel()
+    qtbot.addWidget(book)
+    book.resize(420, 200)
+    book.set_rows([("SPCX261218C00205000", "SPCX 205 12/18/26", "#8c53ea", "22d", "+1")])
+    book.show()
+    QTest.mouseMove(book, QPoint(24, book._line_h + 4))
+    assert book.cursor().shape() == Qt.CursorShape.PointingHandCursor
+    QTest.mouseMove(book, QPoint(24, 2))
+    assert book.cursor().shape() == Qt.CursorShape.ArrowCursor
+
+
+def test_partial_calendar_does_not_collapse_month_or_year(qtbot) -> None:
+    from optionda.gui.strategy_pane import StrategyPane, bind_sessions
+
+    bind_sessions(
+        {
+            date(2026, 9, 21),
+            date(2026, 9, 22),
+            date(2026, 9, 23),
+            date(2026, 9, 24),
+            date(2026, 9, 25),
+            date(2026, 9, 28),
+            date(2026, 9, 29),
+            date(2026, 9, 30),
+            date(2026, 10, 1),
+            date(2026, 10, 2),
+            date(2026, 10, 5),
+            date(2026, 10, 6),
+        }
+    )
+    try:
+        pane = StrategyPane()
+        qtbot.addWidget(pane)
+        pane.resize(900, 640)
+        pane.show()
+        held = _series()
+        held.points.append(StrategyPoint(date(2026, 9, 29), 14, 3.7, 150.0, 3.3, -10.0))
+        pane.set_series([held], anchor=date(2026, 9, 29))
+        week = pane._current_plot().getViewBox().viewRange()[0]
+        pane.show_month()
+        assert pane.window_label() == "2026-09"
+        month = pane._current_plot().getViewBox().viewRange()[0]
+        labels = [text for _pos, text in pane._current_plot().getAxis("bottom")._tickLevels[0]]
+        assert "1" in labels
+        assert month[1] - month[0] > (week[1] - week[0]) + 4
+        pane.show_year()
+        assert pane.window_label() == "2026"
+        year_labels = [text for _pos, text in pane._current_plot().getAxis("bottom")._tickLevels[0]]
+        assert year_labels[0] == "Aug"
+        assert year_labels[-1] == "Dec"
+        assert "Jan" not in year_labels
+    finally:
+        bind_sessions(None)
 
 
 def test_run_desk_compact_shows_cost_and_model(qtbot) -> None:
@@ -188,7 +407,9 @@ def test_run_desk_compact_shows_cost_and_model(qtbot) -> None:
     ]
     forward = assign_colors(book)
     backward = assign_colors(reversed(book))
+    partial = assign_colors(book[:4])
     assert forward == backward
+    assert all(partial[occ] == forward[occ] == contract_color(occ) for occ in book[:4])
     assert len(set(forward.values())) == len(book)
 
 
@@ -324,12 +545,6 @@ def test_clicking_a_contract_highlights_its_line(qtbot) -> None:
     assert host.focus_roles[occ] == "all"
     assert guide.isVisible()
     assert guide.opts["pen"].widthF() == 1
-    chip = next(item for item in pane.findChildren(QLabel) if item.text() == "● SPCX 205 12/18/26")
-    qtbot.mouseClick(chip, Qt.MouseButton.LeftButton)
-    assert pane.focus_occ() == occ
-    assert host.focus_roles[occ] == "hot"
-    qtbot.mouseClick(chip, Qt.MouseButton.LeftButton)
-    assert pane.focus_occ() is None
     assert host.focus_roles[occ] == "all"
 
 
@@ -490,6 +705,38 @@ def test_trade_runs_cover_the_four_outcomes() -> None:
     )
     assert [side for _x, _h, _pnl, side in _trade_anchors(opened_before_the_line)] == ["add"]
     assert [tone for tone, _samples in _gap_runs(opened_before_the_line)] == ["down"]
+
+
+def test_trade_arrow_shrinks_when_the_lines_meet(qtbot) -> None:
+    from PySide6.QtCore import QPointF
+
+    from optionda.gui.strategy_pane import _vertical_arrow
+
+    def span(path):
+        rect = path.boundingRect()
+        return rect.top(), rect.bottom(), rect.height()
+
+    top, bottom, height = span(_vertical_arrow(QPointF(10, 0), QPointF(10, 100), upward=True))
+    assert height <= 22.5
+    assert top >= 4
+    assert bottom <= 96
+
+    top, bottom, height = span(_vertical_arrow(QPointF(10, 0), QPointF(10, 40), upward=False))
+    assert 14 <= height <= 20.5
+    assert top >= 4
+    assert bottom <= 36
+
+    top, bottom, height = span(_vertical_arrow(QPointF(10, 40), QPointF(10, 46), upward=True))
+    assert height <= 9
+    assert bottom <= 36
+
+    top, bottom, height = span(_vertical_arrow(QPointF(10, 50), QPointF(10, 50), upward=True))
+    assert height <= 9
+    assert bottom <= 46
+
+    top, bottom, height = span(_vertical_arrow(QPointF(10, 40), QPointF(10, 46), upward=False))
+    assert height <= 9
+    assert top >= 50
 
 
 def test_focus_shows_trade_arrows_and_colored_stretches(qtbot) -> None:

@@ -63,8 +63,17 @@ class KpiBar(QWidget):
         self._line.setFont(mono_font(12))
         row.addWidget(self._line, 1)
 
-    def show_report(self, report: StatsReport) -> None:
-        self._line.setText(kpi_line(report))
+    def show_report(self, report: StatsReport, day: date | None = None) -> None:
+        text = kpi_line(report)
+        if day is not None:
+            daily = next((item for item in report.calendar if item.day == day), None)
+            realized = 0.0 if daily is None else daily.realized
+            floating = "—" if daily is None or daily.mark_delta is None else signed_money(daily.mark_delta)
+            text = (
+                f"{text}    {day.isoformat()}  "
+                f"当日已实现 {signed_money(realized)}  当日浮动（EOD） {floating}"
+            )
+        self._line.setText(text)
         tone = "pos" if report.realized > 0 else "neg" if report.realized < 0 else "neutral"
         self._line.setStyleSheet(f"color: {_tone_color(tone)};")
 
@@ -102,6 +111,9 @@ class PerformanceChart(QWidget):
         self.plot.setLabel("left", "")
         self._zero = pg.InfiniteLine(pos=0, angle=0, pen=pg.mkPen(HAIR, style=Qt.PenStyle.DotLine))
         self.plot.addItem(self._zero)
+        self._marker = pg.InfiniteLine(angle=90, pen=pg.mkPen(PROMPT, width=1.2), movable=False)
+        self._marker.hide()
+        self.plot.addItem(self._marker)
         self._line = self.plot.plot(pen=pg.mkPen(TEXT, width=1.5))
         self._realized = self.plot.plot(
             pen=pg.mkPen(MUTED, width=1.0, style=Qt.PenStyle.DashLine)
@@ -143,6 +155,13 @@ class PerformanceChart(QWidget):
             return
         last_day = (report.mark_curve or report.cumulative or [(report.as_of, 0.0)])[-1][0]
         self._place_tip(xs[-1], ys[-1], f"{last_day.isoformat()}  {signed_money(ys[-1])}")
+
+    def show_marker(self, day: date | None) -> None:
+        if day is None:
+            self._marker.hide()
+            return
+        self._marker.setPos(day_ts(day))
+        self._marker.show()
 
     def _show_position(self, report: StatsReport, position_id: str) -> None:
         label = position_id

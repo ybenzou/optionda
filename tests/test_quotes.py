@@ -60,6 +60,58 @@ def test_quotes_keep_latest_and_history(tmp_path) -> None:
     assert pnl == (18.77 - 12.4) / 12.4 * 100
 
 
+def test_quote_rows_keep_the_surface_band_and_rate(tmp_path) -> None:
+    row = _row(spot=516.0, model=18.77).model_copy(
+        update={
+            "surface_session_date": date(2026, 9, 25),
+            "surface_as_of": datetime(2026, 9, 25, 20, tzinfo=timezone.utc),
+            "model_low": 17.5,
+            "model_high": 19.2,
+            "spot_as_of": datetime(2026, 9, 26, 14, tzinfo=timezone.utc),
+            "rate_used": 0.045,
+            "dividend_used": 0.01,
+        }
+    )
+    save_quotes("main", [row], home=tmp_path, ts=datetime(2026, 9, 26, 15, tzinfo=timezone.utc))
+    latest = load_latest_rows("main", tmp_path)[0]
+    assert latest.surface_session_date == date(2026, 9, 25)
+    assert latest.surface_as_of == datetime(2026, 9, 25, 20, tzinfo=timezone.utc)
+    assert latest.model_low == 17.5
+    assert latest.model_high == 19.2
+    assert latest.spot_as_of == datetime(2026, 9, 26, 14, tzinfo=timezone.utc)
+    assert latest.rate_used == 0.045
+    assert latest.dividend_used == 0.01
+
+
+def test_quarter_old_snapshots_move_to_the_archive(tmp_path) -> None:
+    from optionda.backtest import journal_rows
+    from optionda.journal import log_path
+    from optionda.quotes import archive_db_path
+
+    save_quotes(
+        "main",
+        [_row(spot=500.0, model=18.0)],
+        home=tmp_path,
+        ts=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        source="run",
+    )
+    save_quotes(
+        "main",
+        [_row(spot=516.0, model=18.77)],
+        home=tmp_path,
+        ts=datetime(2026, 9, 20, tzinfo=timezone.utc),
+        source="run",
+    )
+    assert quote_count("main", tmp_path) == 1
+    conn = sqlite3.connect(archive_db_path("main", tmp_path))
+    archived = conn.execute("SELECT COUNT(*) FROM quotes").fetchone()[0]
+    conn.close()
+    assert archived == 1
+    rows = journal_rows(log_path("main", tmp_path))
+    assert len(rows) == 2
+    assert {row["spot"] for row in rows} == {500.0, 516.0}
+
+
 def test_empty_book_clears_latest_and_keeps_history(tmp_path) -> None:
     save_quotes("main", [_row(spot=500.0, model=18.0)], home=tmp_path)
     save_quotes("main", [], home=tmp_path)

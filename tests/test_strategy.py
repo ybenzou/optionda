@@ -213,6 +213,14 @@ def test_month_window_carries_qty_from_before() -> None:
     assert window.points[0].pnl_pct is None
     assert window.points[-1].qty == 5
     assert year_bounds(date(2026, 9, 15)) == (date(2026, 1, 1), date(2026, 12, 31))
+    assert year_bounds(date(2026, 9, 15), opened=date(2026, 8, 12)) == (
+        date(2026, 8, 1),
+        date(2026, 12, 31),
+    )
+    assert year_bounds(date(2026, 9, 15), opened=date(2026, 1, 6)) == (
+        date(2026, 1, 1),
+        date(2026, 12, 31),
+    )
     assert shift_month(date(2026, 9, 15), -1) == date(2026, 8, 1)
     assert shift_month(date(2026, 1, 15), -1) == date(2025, 12, 1)
 
@@ -290,3 +298,22 @@ def test_strategy_cache_rebuilds_from_journal(tmp_path) -> None:
     rebuilt, changed = refresh_strategy("main", home, end=date(2026, 9, 4))
     assert changed is True
     assert rebuilt[0].points[-1].qty == 3
+
+
+def test_offscreen_refresh_leaves_pricing_to_the_worker(tmp_path, monkeypatch) -> None:
+    from optionda.strategy import refresh_strategy
+
+    seen: dict[str, object] = {}
+
+    def offscreen(account, home, end):
+        seen["account"] = account
+        seen["end"] = end
+        return [], False
+
+    monkeypatch.setattr("optionda.strategy._refresh_offscreen", offscreen)
+    series, changed = refresh_strategy(
+        "main", tmp_path, end=date(2026, 9, 4), offscreen=True
+    )
+    assert seen == {"account": "main", "end": date(2026, 9, 4)}
+    assert series == []
+    assert changed is False

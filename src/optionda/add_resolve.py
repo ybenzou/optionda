@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from optionda.asof import split_asof_prefix
+from optionda.asof import apply_asof, split_asof_prefix
 from optionda.batch import read_batch_lines
 from optionda.occ import OccError, as_sell_line, parse_leg_line
 
@@ -44,6 +44,19 @@ def _validated_line(token: str) -> str:
     sell_rest = as_sell_line(rest)
     parse_leg_line(sell_rest if sell_rest is not None else rest)
     return token.strip()
+
+
+def add_progress_lines(items: list[str]) -> tuple[list[str], list[str]]:
+    """Parse an add command into book lines and one label per fill.
+
+    Parsing stays local. The labels are what the progress rows show, in the
+    same order ``run_add`` will report them.
+    """
+    resolved = resolve_add_lines(items)
+    labels = [rest for rest, _asof in apply_asof(resolved)]
+    if not labels:
+        raise ValueError("no positions to add")
+    return resolved, labels
 
 
 def resolve_add_lines(items: list[str]) -> list[str]:

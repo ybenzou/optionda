@@ -247,7 +247,38 @@ def build_surface(
     )
 
 
-def save_surface(surface: IvSurface, home: Path | None = None) -> Path:
+def append_surface_log(
+    home: Path | None,
+    *,
+    underlying: str,
+    session: str | None,
+    accepted,
+    rejected,
+    seconds: float | None,
+    error: str | None,
+) -> None:
+    """One line per calibration. Not part of the trade ledger."""
+    folder = ensure_home(home) / "surfaces"
+    folder.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "underlying": underlying,
+        "session": session,
+        "accepted": accepted,
+        "rejected": rejected,
+        "seconds": seconds,
+        "error": error,
+    }
+    with (folder / "log.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload) + "\n")
+
+
+def save_surface(
+    surface: IvSurface,
+    home: Path | None = None,
+    *,
+    seconds: float | None = None,
+) -> Path:
     path = surface_path(surface.underlying, home)
     payload = {
         "schema_version": surface.schema_version,
@@ -299,6 +330,16 @@ def save_surface(surface: IvSurface, home: Path | None = None) -> Path:
         dated = surface_session_path(surface.underlying, surface.session_date, home)
         dated.parent.mkdir(parents=True, exist_ok=True)
         dated.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    quality = surface.quality or {}
+    append_surface_log(
+        home,
+        underlying=surface.underlying,
+        session=surface.session_date.isoformat() if surface.session_date else None,
+        accepted=quality.get("accepted"),
+        rejected=quality.get("rejected"),
+        seconds=seconds,
+        error=None,
+    )
     return path
 
 

@@ -51,7 +51,7 @@ def test_dispatch_builtins() -> None:
     assert dispatch("term").action == "term"
     stats = dispatch("stats 1m")
     assert stats.action == "stats"
-    assert stats.period == "all"
+    assert stats.period == "1m"
     help_text = dispatch("help")
     assert "activate" in help_text.text
     assert "pack" in help_text.text

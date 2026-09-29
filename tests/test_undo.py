@@ -184,6 +184,54 @@ def test_legacy_cluster_without_batch_id(tmp_path, monkeypatch) -> None:
     assert realized_pnl_summary("demo", tmp_path)["realized"] == pytest.approx(0.0)
 
 
+def test_realized_summary_reuses_the_scan_until_the_ledger_moves(tmp_path, monkeypatch) -> None:
+    store = AccountStore(tmp_path)
+    store.create("demo")
+    monkeypatch.setenv("OPTIONDA_ACTIVE", "demo")
+    store.add_position(None, _pos(qty=2, entry=6.0))
+    store.sell_position(None, "SPCX260918P00100000", qty=1, exit_premium=7.0)
+    first = realized_pnl_summary("demo", tmp_path)
+    calls = {"n": 0}
+    from optionda import store as store_mod
+
+    real = store_mod._realized_pnl_scan
+
+    def wrapped(account, home):
+        calls["n"] += 1
+        return real(account, home)
+
+    monkeypatch.setattr(store_mod, "_realized_pnl_scan", wrapped)
+    again = realized_pnl_summary("demo", tmp_path)
+    assert again["realized"] == pytest.approx(first["realized"])
+    assert calls["n"] == 0
+    store.sell_position(None, "SPCX260918P00100000", qty=1, exit_premium=8.0)
+    moved = realized_pnl_summary("demo", tmp_path)
+    assert calls["n"] == 1
+    assert moved["realized"] != pytest.approx(first["realized"])
+
+
+def test_last_op_cache_skips_the_ledger_until_seq_changes(tmp_path, monkeypatch) -> None:
+    store = AccountStore(tmp_path)
+    store.create("demo")
+    monkeypatch.setenv("OPTIONDA_ACTIVE", "demo")
+    store.add_position(None, _pos(qty=2, entry=6.0))
+    from optionda.undo import cached_last_operation_times, read_ledger_events
+
+    cached_last_operation_times("demo", tmp_path)
+    calls = {"n": 0}
+
+    def wrapped(path):
+        calls["n"] += 1
+        return read_ledger_events(path)
+
+    monkeypatch.setattr("optionda.undo.read_ledger_events", wrapped)
+    cached_last_operation_times("demo", tmp_path)
+    assert calls["n"] == 0
+    store.sell_position(None, "SPCX260918P00100000", qty=1, exit_premium=7.0)
+    cached_last_operation_times("demo", tmp_path)
+    assert calls["n"] == 1
+
+
 def test_undo_without_mutations_errors(tmp_path, monkeypatch) -> None:
     store = AccountStore(tmp_path)
     store.create("demo")

@@ -277,6 +277,15 @@ class AlpacaClient:
             raise AlpacaError("unexpected alpaca calendar shape")
         sessions = parse_calendar_days(rows)
         _calendar_cache[key] = (now, sessions)
+        if self.home is not None and sessions:
+            from optionda.market.calendar_file import remember_calendar_days
+
+            remember_calendar_days(
+                self.home,
+                (item.session_date for item in sessions),
+                start=start,
+                end=end,
+            )
         return sessions
 
     def get_completed_calendar_window(

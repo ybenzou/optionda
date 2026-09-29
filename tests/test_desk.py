@@ -21,6 +21,49 @@ def test_signed_money_and_hold() -> None:
     assert hold_label(0.2).endswith("h")
 
 
+def test_add_rows_list_every_leg_and_fill_one_at_a_time() -> None:
+    import re
+
+    from optionda.display.table import format_add_rows
+
+    lines = [
+        "IBM 261218 300 C x6 @ 1.4",
+        "SKHY 261218 250 C x1 @ 5.5",
+    ]
+    waiting = format_add_rows(lines, done=0, active=0, tick=0, spin="⠋")
+    assert "IBM 261218 300 C x6 @ 1.4" in waiting
+    assert "SKHY 261218 250 C x1 @ 5.5" in waiting
+    plain_marks = (
+        waiting.replace("#61d6d6", "")
+        .replace("#333333", "")
+        .replace("#767676", "")
+        .replace("#cccccc", "")
+        .replace("#16c60c", "")
+    )
+    assert "#" not in plain_marks
+    assert waiting.count("━") == 24 * 2
+    def _cyan_fill(html: str) -> int:
+        runs = re.findall(r"#61d6d6\">(━+)", html)
+        return len(runs[0]) if runs else 0
+
+    started = format_add_rows(lines, done=0, active=0, tick=0, spin="⠋")
+    later = format_add_rows(lines, done=0, active=0, tick=8, spin="⠙")
+    assert _cyan_fill(later) > _cyan_fill(started)
+    assert "⠙" in later.split("SKHY")[0]
+    done = format_add_rows(lines, done=1, active=1, tick=0, spin="⠹")
+    assert done.split("SKHY")[0].count("✓") == 1
+    assert "⠹" in done.split("SKHY")[0]
+    parked = format_add_rows(
+        lines,
+        done=2,
+        active=None,
+        note="1/2 chain  IBM chain…",
+    )
+    assert parked.count("✓") == 2
+    assert "Calibrating IV surfaces" in parked
+    assert "IBM 261218 300 C x6 @ 1.4" in parked
+
+
 def test_add_progress_keeps_full_label() -> None:
     from optionda.display.table import format_add_progress
 

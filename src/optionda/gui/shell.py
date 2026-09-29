@@ -55,6 +55,16 @@ def parse_line(line: str) -> list[str]:
 
 
 def _stats_period(args: list[str]) -> str:
+    for arg in args[1:]:
+        key = arg.strip().lower()
+        if key in {"1", "1m", "month"}:
+            return "1m"
+        if key in {"3", "3m"}:
+            return "3m"
+        if key in {"6", "6m"}:
+            return "6m"
+        if key in {"a", "all"}:
+            return "all"
     return "all"
 
 

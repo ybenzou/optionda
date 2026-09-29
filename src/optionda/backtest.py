@@ -98,29 +98,36 @@ def _snapshot_rows(path: Path) -> list[dict[str, Any]]:
 def _rows_from_quotes(path: Path) -> list[dict[str, Any]]:
     if path.parent.name != "logs":
         return []
-    db = path.parent.parent / "quotes" / f"{path.stem}.sqlite"
-    if not db.exists():
-        return []
+    folder = path.parent.parent / "quotes"
+    # Older months live in the archive. Read that first so time order stays intact.
+    dbs = [
+        folder / f"{path.stem}.archive.sqlite",
+        folder / f"{path.stem}.sqlite",
+    ]
+    verify: list[dict[str, Any]] = []
+    marks: list[dict[str, Any]] = []
     import sqlite3
 
-    conn = sqlite3.connect(db)
-    conn.row_factory = sqlite3.Row
-    try:
-        columns = {row[1] for row in conn.execute("PRAGMA table_info(quotes)")}
-        if "source" not in columns:
-            return []
-        verify = conn.execute(
-            "SELECT * FROM quotes WHERE source = 'verify' ORDER BY rowid"
-        ).fetchall()
-        chosen = verify or conn.execute(
-            "SELECT * FROM quotes WHERE source IN ('export', 'run', 'mail', 'snapshot') ORDER BY rowid"
-        ).fetchall()
-    finally:
-        conn.close()
-    rows: list[dict[str, Any]] = []
-    for row in chosen:
-        rows.append({key: row[key] for key in row.keys()})
-    return rows
+    for db in dbs:
+        if not db.exists():
+            continue
+        conn = sqlite3.connect(db)
+        conn.row_factory = sqlite3.Row
+        try:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(quotes)")}
+            if "source" not in columns:
+                continue
+            for row in conn.execute(
+                "SELECT * FROM quotes WHERE source = 'verify' ORDER BY rowid"
+            ):
+                verify.append({key: row[key] for key in row.keys()})
+            for row in conn.execute(
+                "SELECT * FROM quotes WHERE source IN ('export', 'run', 'mail', 'snapshot') ORDER BY rowid"
+            ):
+                marks.append({key: row[key] for key in row.keys()})
+        finally:
+            conn.close()
+    return verify or marks
 
 
 def _number(value: Any) -> float | None:

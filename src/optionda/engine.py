@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sys
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -28,9 +30,8 @@ from optionda.market.session import (
     save_pending_state,
     save_session_reference,
 )
-from optionda.journal import log_path, read_ledger_events
 from optionda.models import Account, Position, RowMark
-from optionda.undo import last_operation_times
+from optionda.undo import cached_last_operation_times
 from optionda.pricing.bs import price_option, years_to_expiry
 from optionda.pricing.surface import (
     FRESH_CALIBRATION_QUOTE_AGE,
@@ -49,8 +50,57 @@ from optionda.pricing.surface import (
 )
 
 ProgressCallback = Callable[[str, int, int], None]
-# Set inside the calibration process so it does not spawn another one.
+# Set inside a worker process so it does not spawn another one.
 _CALIBRATION_CHILD = False
+
+
+def _relax_priority() -> None:
+    """This process only prices. The window should keep the CPU."""
+    if sys.platform != "win32":
+        return
+    import ctypes
+
+    below_normal = 0x00004000
+    kernel = ctypes.windll.kernel32
+    kernel.SetPriorityClass(kernel.GetCurrentProcess(), below_normal)
+
+
+def _await_child(entry, payload, on_progress: ProgressCallback | None):
+    """Run ``entry`` in a spawned process. This process only forwards progress."""
+    ctx = get_context("spawn")
+    messages = ctx.Queue()
+    proc = ctx.Process(
+        target=entry,
+        args=(payload, messages),
+        name="optionda-worker",
+        daemon=True,
+    )
+    proc.start()
+    try:
+        while True:
+            try:
+                kind, body = messages.get(timeout=0.5)
+            except Empty:
+                if proc.is_alive():
+                    continue
+                raise RuntimeError(
+                    f"worker stopped before finishing (exit {proc.exitcode})"
+                )
+            if kind == "progress":
+                label, done, total = body
+                if on_progress is not None:
+                    on_progress(str(label), int(done), int(total))
+                continue
+            if kind == "result":
+                return body
+            if kind == "error":
+                raise RuntimeError(str(body))
+            raise RuntimeError(f"unexpected worker message {kind}")
+    finally:
+        if proc.is_alive():
+            proc.terminate()
+        proc.join(timeout=5)
+        messages.close()
 
 
 def emit_progress(
@@ -116,6 +166,7 @@ def _session_from_payload(payload: dict[str, str] | None) -> MarketSession | Non
 def _calibration_process_main(payload: dict, messages) -> None:
     global _CALIBRATION_CHILD
     _CALIBRATION_CHILD = True
+    _relax_priority()
     try:
         account = Account.model_validate(payload["account"])
         home = None if payload["home"] is None else Path(payload["home"])
@@ -164,44 +215,9 @@ def _calibrate_detached(
         "only": None if only is None else [str(name) for name in only],
         "target": _session_payload(target_session),
     }
-    ctx = get_context("spawn")
-    messages = ctx.Queue()
-    proc = ctx.Process(
-        target=_calibration_process_main,
-        args=(payload, messages),
-        name="optionda-calibrate",
-        daemon=True,
-    )
-    proc.start()
-    saved: list[str] = []
-    errors: dict[str, str] = {}
-    try:
-        while True:
-            try:
-                kind, body = messages.get(timeout=0.5)
-            except Empty:
-                if proc.is_alive():
-                    continue
-                raise RuntimeError(
-                    f"calibration stopped before finishing (exit {proc.exitcode})"
-                )
-            if kind == "progress":
-                label, done, total = body
-                if on_progress is not None:
-                    on_progress(str(label), int(done), int(total))
-                continue
-            if kind == "result":
-                saved = [str(name) for name in body["saved"]]
-                errors = {str(key): str(value) for key, value in body["errors"].items()}
-                break
-            if kind == "error":
-                raise RuntimeError(str(body))
-            raise RuntimeError(f"unexpected calibration message {kind}")
-    finally:
-        if proc.is_alive():
-            proc.terminate()
-        proc.join(timeout=5)
-        messages.close()
+    body = _await_child(_calibration_process_main, payload, on_progress)
+    saved = [str(name) for name in body["saved"]]
+    errors = {str(key): str(value) for key, value in body["errors"].items()}
     result = CalibrationResult(errors=errors)
     for name in saved:
         surface = load_surface(name, home)
@@ -308,6 +324,7 @@ def _calibrate_surfaces_inline(
                 raise ValueError(
                     f"no underlying spot at option quote time {quote_time.isoformat()}"
                 )
+            started = time.perf_counter()
             surface = build_surface(
                 underlying,
                 spot=spot_q.price,
@@ -321,7 +338,7 @@ def _calibrate_surfaces_inline(
                 dividend=lambda symbol: dividend_for_symbol(cfg, symbol),
                 style=cfg.option_style,
             )
-            save_surface(surface, home)
+            save_surface(surface, home, seconds=time.perf_counter() - started)
             result.surfaces[underlying] = surface
             if surface.session_date is not None:
                 persist_close_premiums(
@@ -336,6 +353,17 @@ def _calibrate_surfaces_inline(
             report(f"{underlying} ok", index + 1)
         except Exception as exc:  # noqa: BLE001
             result.errors[underlying] = str(exc)
+            from optionda.pricing.surface import append_surface_log
+
+            append_surface_log(
+                home,
+                underlying=underlying,
+                session=None,
+                accepted=None,
+                rejected=None,
+                seconds=None,
+                error=str(exc),
+            )
             report(f"{underlying} skip", index + 1)
     if on_progress is not None:
         on_progress("done", total, total)
@@ -795,6 +823,52 @@ def attach_live_option_mids(
     return attached
 
 
+def _mark_process_main(payload: dict, messages) -> None:
+    global _CALIBRATION_CHILD
+    _CALIBRATION_CHILD = True
+    _relax_priority()
+    try:
+        account = Account.model_validate(payload["account"])
+        home = None if payload["home"] is None else Path(payload["home"])
+
+        def report(label: str, done: int, total: int) -> None:
+            messages.put(("progress", (label, done, total)))
+
+        rows = mark_account(
+            account,
+            home=home,
+            router=MarketRouter(home),
+            now=None if payload["now"] is None else datetime.fromisoformat(payload["now"]),
+            on_progress=report,
+            completed_session=_session_from_payload(payload["target"]),
+            phase_count=int(payload["phase_count"]),
+        )
+        messages.put(("result", [row.model_dump(mode="json") for row in rows]))
+    except Exception as exc:  # noqa: BLE001
+        messages.put(("error", f"{type(exc).__name__}: {exc}"))
+
+
+def _mark_detached(
+    account: Account,
+    *,
+    home: Path | None,
+    now: datetime | None,
+    on_progress: ProgressCallback | None,
+    completed_session: MarketSession | None,
+    phase_count: int,
+) -> list[RowMark]:
+    """Price the book in another process so the window keeps the interpreter lock."""
+    payload = {
+        "home": None if home is None else str(home),
+        "account": account.model_dump(mode="json"),
+        "now": None if now is None else now.isoformat(),
+        "phase_count": phase_count,
+        "target": _session_payload(completed_session),
+    }
+    body = _await_child(_mark_process_main, payload, on_progress)
+    return [RowMark.model_validate(row) for row in body]
+
+
 def mark_account(
     account: Account,
     *,
@@ -805,6 +879,15 @@ def mark_account(
     completed_session: MarketSession | None = None,
     phase_count: int = 2,
 ) -> list[RowMark]:
+    if _detach_calibration(router):
+        return _mark_detached(
+            account,
+            home=home,
+            now=now,
+            on_progress=on_progress,
+            completed_session=completed_session,
+            phase_count=phase_count,
+        )
     cfg = load_config(home)
     market = router or MarketRouter(home)
     underlyings = [p.underlying for p in account.positions]
@@ -856,7 +939,7 @@ def mark_account(
         underlying: load_close_premiums(underlying, home)
         for underlying in set(underlyings)
     }
-    last_ops = last_operation_times(read_ledger_events(log_path(account.name, home)))
+    last_ops = cached_last_operation_times(account.name, home)
 
     def last_op_at(position: Position) -> datetime | None:
         return (

@@ -16,12 +16,14 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from optionda.analytics import et_date
-from optionda.journal import log_path, read_ledger_events
+from optionda.journal import ledger_seq, log_path, read_ledger_events
 from optionda.marks import _read_close_cache, _read_mark_cache
 from optionda.occ import OccError, parse_occ
 from optionda.paths import ensure_home
 
 _MUTATIONS = frozenset({"add", "merge", "sell", "delete", "undo", "refresh_iv"})
+# Set inside the rebuild process so it does not spawn another one.
+_STRATEGY_CHILD = False
 _MULTIPLIER = 100
 _CACHE_SCHEMA = 8
 _STACKED = frozenset({"add", "merge", "sell", "delete", "undo"})
@@ -51,6 +53,16 @@ class ContractSeries:
     points: list[StrategyPoint]
     trades: list[TradeMark]
     payback_days: int | None
+
+
+def hold_days(points: list[StrategyPoint]) -> int | None:
+    """Calendar days from the first fill through the exit, or through the last mark."""
+    opened = next((point.day for point in points if point.qty > 0), None)
+    if opened is None:
+        return None
+    closed = next((point.day for point in points if point.day >= opened and point.qty <= 0), None)
+    end = closed if closed is not None else points[-1].day
+    return (end - opened).days + 1
 
 
 def payback_days(points: list[StrategyPoint]) -> int | None:
@@ -92,8 +104,17 @@ def shift_month(day: date, delta: int) -> date:
     return date(year, month, 1)
 
 
-def year_bounds(day: date) -> tuple[date, date]:
-    return date(day.year, 1, 1), date(day.year, 12, 31)
+def year_bounds(day: date, *, opened: date | None = None) -> tuple[date, date]:
+    """Calendar year, starting at the first month that has a record.
+
+    A book that opens in August does not draw January through July.
+    A record in January still starts the axis on January 1.
+    """
+    start = date(day.year, 1, 1)
+    end = date(day.year, 12, 31)
+    if opened is not None and opened.year == day.year and opened > start:
+        start = date(opened.year, opened.month, 1)
+    return start, end
 
 
 def slice_window(series: ContractSeries, start: date, end: date) -> ContractSeries:
@@ -122,6 +143,8 @@ def build_strategy(
     closes: dict[tuple[str, date], float] | None = None,
     marks: dict[tuple[str, date], tuple[float, float]] | None = None,
     end: date | None = None,
+    sessions: set[date] | None = None,
+    spans: list[tuple[date, date]] | None = None,
 ) -> list[ContractSeries]:
     mutations = [event for event in events if event.get("event") in _MUTATIONS]
     if not mutations:
@@ -129,7 +152,7 @@ def build_strategy(
     last = end or datetime.now().date()
     spot = closes or {}
     priced = marks or {}
-    daily, trades = _replay(mutations, last)
+    daily, trades = _replay(mutations, last, sessions, spans)
     if not daily:
         return []
     held_occs = {
@@ -148,7 +171,7 @@ def build_strategy(
         held_cost: float | None = None
         live = False
         occ_trades = trades.get(occ, [])
-        for day in _weekdays(first_day, last):
+        for day in _weekdays(first_day, last, sessions, spans):
             held = (daily.get(day) or {}).get(occ)
             if held is not None and held.qty > 0:
                 close_spot = spot.get((held.underlying, day))
@@ -220,6 +243,8 @@ class _Chip:
 def _replay(
     events: list[dict[str, Any]],
     last: date,
+    sessions: set[date] | None = None,
+    spans: list[tuple[date, date]] | None = None,
 ) -> tuple[dict[date, dict[str, _Lot]], dict[str, list[TradeMark]]]:
     """File order, then place surviving deltas on their calendar day.
 
@@ -251,7 +276,7 @@ def _replay(
     live = [chip for chip in chips if not chip.dead and chip.day <= last]
     if not live:
         return {}, {}
-    return _daily_from_chips(live, last), _trade_marks(live)
+    return _daily_from_chips(live, last, sessions, spans), _trade_marks(live)
 
 
 def _undo_stack(stack: list[tuple[str, Any]], n: int) -> None:
@@ -330,6 +355,8 @@ def _chips_for(event: dict[str, Any], day: date, order: int) -> list[_Chip]:
 def _daily_from_chips(
     live: list[_Chip],
     last: date,
+    sessions: set[date] | None = None,
+    spans: list[tuple[date, date]] | None = None,
 ) -> dict[date, dict[str, _Lot]]:
     grouped: dict[str, list[_Chip]] = {}
     for chip in live:
@@ -367,7 +394,7 @@ def _daily_from_chips(
     first = min(chip.day for chip in live)
     carried: dict[str, tuple[float, float | None, float | None, str, str]] = {}
     daily: dict[date, dict[str, _Lot]] = {}
-    for day in _weekdays(first, last):
+    for day in _weekdays(first, last, sessions, spans):
         for pid, (snapped, occ, underlying) in folded.items():
             latest = max((stamp for stamp in snapped if stamp <= day), default=None)
             if latest is None:
@@ -432,11 +459,43 @@ def read_strategy_store(
     return _series_from_cache(cached)
 
 
+def _strategy_process_main(payload: dict, messages) -> None:
+    global _STRATEGY_CHILD
+    _STRATEGY_CHILD = True
+    try:
+        from optionda.engine import _relax_priority
+
+        _relax_priority()
+        series, changed = refresh_strategy(
+            payload["account"],
+            None if payload["home"] is None else Path(payload["home"]),
+            end=date.fromisoformat(payload["end"]),
+        )
+        messages.put(("result", (series, changed)))
+    except Exception as exc:  # noqa: BLE001
+        messages.put(("error", f"{type(exc).__name__}: {exc}"))
+
+
+def _refresh_offscreen(
+    account: str,
+    home: Path,
+    end: date,
+) -> tuple[list[ContractSeries], bool]:
+    from optionda.engine import _await_child
+
+    return _await_child(
+        _strategy_process_main,
+        {"account": account, "home": str(home), "end": end.isoformat()},
+        None,
+    )
+
+
 def refresh_strategy(
     account: str,
     home: Path | None = None,
     *,
     end: date | None = None,
+    offscreen: bool = False,
 ) -> tuple[list[ContractSeries], bool]:
     """Bring the sqlite store up to date. Run snapshots do not force a rebuild."""
     root = ensure_home(home)
@@ -450,17 +509,24 @@ def refresh_strategy(
     if cached is not None and _run_tail_only(path, meta, stamp, last):
         _touch_log_size(root, account, stamp)
         return cached, False
+    if offscreen and not _STRATEGY_CHILD:
+        return _refresh_offscreen(account, root, last)
     events = [
         event
         for event in read_ledger_events(path)
         if event.get("event") in _MUTATIONS
     ]
     closes = _load_closes(root, events, last)
+    from optionda.market.calendar_file import load_calendar
+
+    sessions, spans = load_calendar(root)
     series = build_strategy(
         events,
         closes=closes,
         marks=_load_marks(root, account),
         end=last,
+        sessions=sessions,
+        spans=spans,
     )
     _write_sqlite(root, account, _stamp(root, account), last, series)
     return series, True
@@ -558,10 +624,18 @@ def _model_price(occ: str, lot: _Lot, day: date, close: float | None) -> float |
     return marked.model
 
 
-def _weekdays(start: date, end: date):
+def _weekdays(
+    start: date,
+    end: date,
+    sessions: set[date] | None = None,
+    spans: list[tuple[date, date]] | None = None,
+):
+    """Trading days. A fetched calendar drops holidays inside that range only."""
+    from optionda.market.calendar_file import known_holiday
+
     day = start
     while day <= end:
-        if day.weekday() < 5:
+        if day.weekday() < 5 and not known_holiday(day, sessions, spans):
             yield day
         day += timedelta(days=1)
 
@@ -634,21 +708,7 @@ def _load_marks(home: Path, account: str) -> dict[tuple[str, date], tuple[float,
 
 
 def _ledger_seq(home: Path, account: str) -> int:
-    path = home / "ledger" / f"{account}.sqlite"
-    if not path.exists():
-        return 0
-    import sqlite3
-
-    conn = sqlite3.connect(path)
-    try:
-        row = conn.execute("SELECT MAX(seq) FROM events").fetchone()
-    except sqlite3.OperationalError:
-        return 0
-    finally:
-        conn.close()
-    if row is None or row[0] is None:
-        return 0
-    return int(row[0])
+    return ledger_seq(account, home)
 
 
 def _stamp(home: Path, account: str) -> dict[str, int]:

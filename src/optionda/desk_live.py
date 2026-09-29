@@ -154,6 +154,24 @@ class DeskRunner:
         self.cols = cols
         self.rows = rows
 
+    def _poll_news(self, account) -> None:
+        """Headlines on the configured interval. They stay out of the ledger."""
+        from optionda.config import load_config
+        from optionda.news import poll_news
+
+        cfg = load_config(self.home)
+        interval = int(getattr(cfg, "news_poll_sec", 0) or 0)
+        if interval <= 0 or not cfg.news_enabled:
+            return
+        now = time.monotonic()
+        if now - getattr(self, "_news_at", 0.0) < interval:
+            return
+        self._news_at = now
+        try:
+            poll_news(self.home, account=account)
+        except Exception:  # noqa: BLE001 — a news miss must not stop the desk
+            return
+
     def _refresh_realized(self, account: str) -> None:
         self._realized = float(realized_pnl_summary(account, self.home)["realized"])
 
@@ -487,6 +505,7 @@ class DeskRunner:
         )
         save_quotes(nxt.name, marked, home=self.home, source="run")
         sync_book(nxt, self.home)
+        self._poll_news(nxt)
         return nxt, nxt_router, marked
 
     def play_flash(self, acc, router, rows) -> None:

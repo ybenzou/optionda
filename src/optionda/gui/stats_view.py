@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QEventLoop, QThread, QTimer, Signal
 from PySide6.QtWidgets import (
     QFrame,
     QSizePolicy,
@@ -23,6 +23,29 @@ from optionda.gui.widgets import (
     PerformanceChart,
     PositionList,
 )
+
+
+class _ReportLoader(QThread):
+    ready = Signal(object)
+
+    def __init__(self, account: str, home: Path | None, period: Period) -> None:
+        super().__init__()
+        self.account = account
+        self.home = home
+        self.period = period
+
+    def run(self) -> None:
+        try:
+            report = build_report(
+                self.account,
+                self.home,
+                period=self.period,
+                as_of=datetime.now(timezone.utc),
+            )
+        except Exception as exc:  # noqa: BLE001 — shown by the caller
+            self.ready.emit(exc)
+            return
+        self.ready.emit(report)
 
 
 class StatsView(QWidget):
@@ -86,6 +109,8 @@ class StatsView(QWidget):
         self._side = side
         self._main = main
         self._picked: str | None = None
+        self._day: date | None = None
+        self._loader: _ReportLoader | None = None
         self.reload()
 
     def _load(self) -> StatsReport:
@@ -103,13 +128,43 @@ class StatsView(QWidget):
         self.reload()
 
     def reload(self) -> None:
-        self.report = self._load()
+        if self._loader is not None and self._loader.isRunning():
+            return
+        loader = _ReportLoader(self.account, self.home, self.period)
+        self._loader = loader
+        loop = QEventLoop(self)
+        holder: dict[str, object] = {}
+
+        def _finish(payload: object) -> None:
+            holder["payload"] = payload
+            loop.quit()
+
+        loader.ready.connect(_finish)
+        loader.start()
+        loop.exec()
+        payload = holder.get("payload")
+        if isinstance(payload, Exception):
+            raise payload
+        if not isinstance(payload, StatsReport):
+            return
+        self.report = payload
         self._picked = None
-        self.kpi.show_report(self.report)
+        self._paint()
+
+    def _paint(self) -> None:
+        self.kpi.show_report(self.report, day=self._day)
         self.chart.show_report(self.report)
-        self.calendar.show_report(self.report)
+        self.chart.show_marker(self._day)
+        self.calendar.show_report(self.report, selected=self._day)
         self.positions.show_report(self.report)
         self.behavior.show_report(self.report)
+
+    def select_day(self, day: object) -> None:
+        self._day = day if isinstance(day, date) else None
+        if not hasattr(self, "report"):
+            return
+        self.kpi.show_report(self.report, day=self._day)
+        self.chart.show_marker(self._day)
 
     def _on_pick(self, position_id: object) -> None:
         key = position_id if isinstance(position_id, str) and position_id else None

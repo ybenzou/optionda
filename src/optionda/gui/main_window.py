@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Literal
 
@@ -56,6 +57,7 @@ class TermPage:
         self.revealing = False
         self.reveal_steps: list = []
         self.reveal_index = 0
+        self.reveal_lines = None
         self.desk_finished = False
 
 
@@ -140,14 +142,59 @@ class _DeskWorker(QThread):
             self.failed.emit(str(exc))
 
 
+_ADD_STEP = re.compile(r"^add\s+(\d+)/(\d+)\s+")
+_PREVIEW_LINES = (
+    "IBM 261218 300 C x6 @ 1.4",
+    "SKHY 261218 250 C x1 @ 5.5",
+    "AVGO 261218 500 C x5 @ 2.2",
+    "SPCX 261218 205 C x6 @ 1.99",
+)
+_PREVIEW_NOTE = "preview only — book unchanged"
+
+
+def _add_chrome(
+    labels: list[str],
+    *,
+    done: int,
+    active: int | None,
+    spin: str,
+    tick: int = 0,
+    note: str | None = None,
+    footer: str | None = None,
+) -> dict:
+    from optionda.display.table import format_add_rows
+
+    return {
+        "rows": list(labels),
+        "active": active,
+        "note": note,
+        "spin": spin,
+        "poll_label": note or "",
+        "poll_busy": True,
+        "poll_done": done,
+        "poll_total": max(len(labels), 1),
+        "page": True,
+        "html": format_add_rows(
+            labels,
+            done=done,
+            active=active,
+            tick=tick,
+            spin=spin,
+            note=note,
+            footer=footer,
+        ),
+    }
+
+
 class _AddWorker(QThread):
     chrome = Signal(object)
     finished_result = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, line: str, home: Path | None) -> None:
+    def __init__(self, lines: list[str], labels: list[str], home: Path | None) -> None:
         super().__init__()
-        self._line = line
+        self._lines = lines
+        self._labels = labels
         self._home = home
         self._stop = False
 
@@ -158,40 +205,44 @@ class _AddWorker(QThread):
         return self._stop
 
     def run(self) -> None:
-        from optionda.add_resolve import resolve_add_lines
         from optionda.batch import run_add
-        from optionda.display.table import format_add_progress, spinner_frame
+        from optionda.display.table import spinner_frame
         from optionda.store import AccountStore, StoreError
 
-        args = parse_line(self._line)
         spin = 0
+        finished = 0
+        active: int | None = 0 if self._labels else None
+        note: str | None = None
 
         def on_progress(label: str, done: int, steps: int) -> None:
-            nonlocal spin
+            nonlocal spin, finished, active, note
             if self._stop:
                 raise KeyboardInterrupt
             spin += 1
-            payload = {
-                "spin": spinner_frame(spin),
-                "poll_label": label,
-                "poll_busy": True,
-                "poll_done": done,
-                "poll_total": steps,
-                "poll_fraction": min(done, steps) / max(steps, 1),
-                "page": True,
-            }
-            payload["text"] = format_add_progress(
-                spin=payload["spin"],
-                label=label,
-                done=done,
-                total=steps,
+            matched = _ADD_STEP.match(label or "")
+            if matched:
+                index = int(matched.group(1))
+                finished = max(0, min(int(done), len(self._labels)))
+                active = index - 1 if done < index else None
+                note = None
+            else:
+                finished = len(self._labels)
+                active = None
+                note = label
+            _ = steps
+            self.chrome.emit(
+                _add_chrome(
+                    self._labels,
+                    done=finished,
+                    active=active,
+                    spin=spinner_frame(spin),
+                    note=note,
+                )
             )
-            self.chrome.emit(payload)
 
         try:
-            lines = resolve_add_lines(args[1:])
             store = AccountStore(self._home)
-            result = run_add(store, lines, home=store.home, on_progress=on_progress)
+            result = run_add(store, self._lines, home=store.home, on_progress=on_progress)
             self.finished_result.emit(result)
         except KeyboardInterrupt:
             self.finished_result.emit(CommandResult(0, "add stopped"))
@@ -228,7 +279,9 @@ class _StrategyLoader(QThread):
         from optionda.strategy import refresh_strategy
 
         try:
-            series, changed = refresh_strategy(self.account, self.home)
+            series, changed = refresh_strategy(
+                self.account, self.home, offscreen=True
+            )
         except Exception:  # noqa: BLE001 — keep the charts already on screen
             return
         if changed or not self.have_cache:
@@ -255,6 +308,8 @@ class MainWindow(QMainWindow):
         self._history: list[str] = []
         self._hist_i = 0
         self._worker: _ShellWorker | None = None
+        self._preview_timer: QTimer | None = None
+        self._preview_state: dict | None = None
         self._sql = None
         self._strategy_loader: _StrategyLoader | None = None
         self._pages: list[TermPage] = []
@@ -487,6 +542,39 @@ class MainWindow(QMainWindow):
         self.account = name
         self._prompt_account.setText(name)
         self._prompt_account.setVisible(bool(name))
+        self._show_undo_hint()
+
+    def _show_undo_hint(self) -> None:
+        if not self.account:
+            self.statusBar().clearMessage()
+            return
+        from optionda.journal import last_ledger_event
+
+        event = last_ledger_event(self.account, self.home)
+        kind = "" if event is None else str(event.get("event") or "")
+        if kind not in {"add", "merge", "sell", "delete", "undo"}:
+            self.statusBar().clearMessage()
+            return
+        occ = str(event.get("occ") or "").strip()
+        self.statusBar().showMessage(f"undo {kind} {occ} — Enter".strip())
+
+    def _confirm_undo(self) -> None:
+        if self._desk is not None and self._desk.isRunning():
+            return
+        if self._add is not None and self._add.isRunning():
+            return
+        if not self.account:
+            return
+        from optionda.store import AccountStore, StoreError
+        from optionda.undo import undo_last
+
+        try:
+            result = undo_last(AccountStore(self.home))
+        except StoreError:
+            self._show_undo_hint()
+            return
+        self.terminal.append_block(f"undid {result.n_events}")
+        self._show_undo_hint()
 
     def _prompt_plain(self) -> str:
         name = self.account
@@ -506,9 +594,7 @@ class MainWindow(QMainWindow):
                 period=self._stats_period,
             )
             self._stack.addWidget(self._stats)
-            self._stats.calendar.day_changed.connect(
-                lambda _day: self._sync_stats_chrome()
-            )
+            self._stats.calendar.day_changed.connect(self._stats.select_day)
         return self._stats
 
     @property
@@ -569,6 +655,7 @@ class MainWindow(QMainWindow):
     def _submit(self) -> None:
         line = self._input.text().strip()
         if not line:
+            self._confirm_undo()
             return
         args = parse_line(line)
         cmd = args[0].lower() if args else ""
@@ -579,6 +666,19 @@ class MainWindow(QMainWindow):
             self._input.clear()
             self.terminal.append_block(
                 f"{cmd or 'command'} blocked — run is live, stop first"
+            )
+            return
+        if (
+            self._preview_timer is not None
+            and self._preview_timer.isActive()
+            and cmd != "sql"
+        ):
+            if cmd == "stop":
+                self._stop_add_preview()
+                return
+            self._input.clear()
+            self.terminal.append_block(
+                f"{cmd or 'command'} blocked — add preview is playing, stop first"
             )
             return
         if self._add is not None and self._add.isRunning() and cmd != "sql":
@@ -602,6 +702,9 @@ class MainWindow(QMainWindow):
             return
         if cmd in _BUILTINS:
             self._apply_result(dispatch(line, home=self.home))
+            return
+        if cmd == "add" and len(args) >= 2 and args[1].lower() == "preview":
+            self._start_add_preview(args[2:])
             return
         if cmd == "add" and len(args) >= 2 and not any(a.startswith("-") for a in args[1:]):
             self._start_add(line)
@@ -641,7 +744,8 @@ class MainWindow(QMainWindow):
             self._open_sql()
             return
         if result.action == "stats":
-            self.set_period("all")
+            period = result.period if result.period in {"1m", "3m", "6m", "all"} else "all"
+            self.set_period(period)
             if not self.account:
                 self.terminal.append_block("activate an account first")
                 self.show_view("term")
@@ -753,12 +857,101 @@ class MainWindow(QMainWindow):
         cached = read_strategy_store(self.account, self.home)
         if not cached:
             cached = read_strategy_store(self.account, self.home, allow_stale=True)
+        self.terminal.strategy.set_book(self.account, self.home)
         if cached:
             self.terminal.strategy.set_series(cached)
         loader = _StrategyLoader(self.account, self.home, have_cache=bool(cached))
         loader.ready.connect(self.terminal.strategy.set_series)
         self._strategy_loader = loader
         loader.start()
+
+    def _start_add_preview(self, items: list[str]) -> None:
+        """Play the add rows without reading or writing the book."""
+        self.show_view("term")
+        self.terminal.prepare_live()
+        self.terminal.set_strategy_visible(False)
+        if items:
+            from optionda.add_resolve import add_progress_lines
+
+            try:
+                _resolved, labels = add_progress_lines(items)
+            except ValueError as exc:
+                self.terminal.append_block(str(exc))
+                return
+        else:
+            labels = list(_PREVIEW_LINES)
+        self._stop_add_preview(redraw=False)
+        self._preview_state = {
+            "labels": labels,
+            "done": 0,
+            "active": 0,
+            "tick": 0,
+            "note": None,
+            "footer": None,
+        }
+        self._paint_add_preview()
+        timer = QTimer(self)
+        timer.setInterval(80)
+        timer.timeout.connect(self._tick_add_preview)
+        self._preview_timer = timer
+        self._input.setEnabled(False)
+        timer.start()
+
+    def _paint_add_preview(self) -> None:
+        from optionda.display.table import spinner_frame
+
+        state = self._preview_state
+        if state is None:
+            return
+        self.terminal.set_live_chrome(
+            _add_chrome(
+                state["labels"],
+                done=state["done"],
+                active=state["active"],
+                spin=spinner_frame(state["tick"]),
+                tick=state["tick"],
+                note=state["note"],
+                footer=state.get("footer"),
+            ),
+            keep_table=False,
+        )
+
+    def _tick_add_preview(self) -> None:
+        state = self._preview_state
+        if state is None:
+            return
+        if state.get("footer"):
+            self._stop_add_preview(redraw=False)
+            return
+        state["tick"] += 1
+        if 1 + state["tick"] // 2 >= 23:
+            state["done"] += 1
+            state["tick"] = 0
+            if state["done"] >= len(state["labels"]):
+                state["active"] = None
+                state["footer"] = _PREVIEW_NOTE
+                self._paint_add_preview()
+                self._stop_add_preview(redraw=False)
+                self.terminal.append_block(_PREVIEW_NOTE)
+                self._input.setEnabled(True)
+                self._input.setFocus()
+                return
+            state["active"] = state["done"]
+        self._paint_add_preview()
+
+    def _stop_add_preview(self, *, redraw: bool = True) -> None:
+        timer = self._preview_timer
+        if timer is not None:
+            timer.stop()
+        self._preview_timer = None
+        if not redraw:
+            return
+        self._preview_state = None
+        self.terminal.clear_live()
+        self.terminal.append_block("stopped")
+        self._input.clear()
+        self._input.setEnabled(True)
+        self._input.setFocus()
 
     def _start_add(self, line: str) -> None:
         if not self.account:
@@ -767,27 +960,25 @@ class MainWindow(QMainWindow):
         self.show_view("term")
         self.terminal.prepare_live()
         self.terminal.set_strategy_visible(False)
-        from optionda.display.table import format_add_progress, spinner_frame
+        from optionda.add_resolve import add_progress_lines
+        from optionda.display.table import spinner_frame
 
+        try:
+            resolved, labels = add_progress_lines(parse_line(line)[1:])
+        except ValueError as exc:
+            self.terminal.append_block(str(exc))
+            return
         self.terminal.set_live_chrome(
-            {
-                "poll_busy": True,
-                "poll_label": "updating…",
-                "poll_done": 0,
-                "poll_total": 1,
-                "page": True,
-                "spin": spinner_frame(0),
-                "text": format_add_progress(
-                    spin=spinner_frame(0),
-                    label="updating…",
-                    done=0,
-                    total=1,
-                ),
-            },
+            _add_chrome(
+                labels,
+                done=0,
+                active=0 if labels else None,
+                spin=spinner_frame(0),
+            ),
             keep_table=False,
         )
         page = self._page()
-        page.add = _AddWorker(line, self.home)
+        page.add = _AddWorker(resolved, labels, self.home)
         page.add.chrome.connect(lambda payload, p=page: self._on_add_chrome(payload, p))
         page.add.finished_result.connect(lambda result, p=page: self._on_add_done(result, p))
         page.add.failed.connect(lambda message, p=page: self._on_add_failed(message, p))
@@ -802,6 +993,12 @@ class MainWindow(QMainWindow):
         if page.desk is None or page.desk.stopping():
             return
         if not page.revealed and not page.revealing:
+            if (
+                page.desk is not None
+                and getattr(page.desk, "mode", "") == "run"
+                and isinstance(markup, (list, tuple))
+            ):
+                page.reveal_lines = markup
             if self._start_reveal(page):
                 return
         if page.revealing:
@@ -827,6 +1024,7 @@ class MainWindow(QMainWindow):
         page.revealing = False
         page.reveal_steps = []
         page.reveal_index = 0
+        page.reveal_lines = None
         page.desk_finished = False
         if not any(item.revealing for item in self._pages):
             self._reveal_timer.stop()
@@ -868,9 +1066,18 @@ class MainWindow(QMainWindow):
             return
         reveal = page.reveal_steps[page.reveal_index]
         page.reveal_index += 1
-        html = page.desk.runner.html_at(page.desk.cols, page.desk.rows, reveal=reveal)
-        if html:
-            page.terminal.set_live_frame(html)
+        lines = getattr(page, "reveal_lines", None)
+        if lines is not None and page.desk is not None and getattr(page.desk, "mode", "") == "run":
+            if reveal.footer:
+                page.terminal.set_live_lines(lines)
+            else:
+                rows = max(len((page.desk.runner.last_view or {}).get("rows") or []), 1)
+                shown = max(1, round(len(lines) * reveal.visible / rows))
+                page.terminal.set_live_lines(lines[:shown])
+        else:
+            html = page.desk.runner.html_at(page.desk.cols, page.desk.rows, reveal=reveal)
+            if html:
+                page.terminal.set_live_frame(html)
         if page.reveal_index >= len(page.reveal_steps):
             self._finish_reveal(page, settle=True)
 
@@ -878,9 +1085,13 @@ class MainWindow(QMainWindow):
         page.revealing = False
         page.revealed = settle
         if settle and page.desk is not None and page.desk.runner is not None:
-            html = page.desk.runner.html_at(page.desk.cols, page.desk.rows)
-            if html:
-                page.terminal.set_live_frame(html)
+            lines = getattr(page, "reveal_lines", None)
+            if lines is not None and getattr(page.desk, "mode", "") == "run":
+                page.terminal.set_live_lines(lines)
+            else:
+                html = page.desk.runner.html_at(page.desk.cols, page.desk.rows)
+                if html:
+                    page.terminal.set_live_frame(html)
             page.terminal.pin_live_chrome()
         if not any(item.revealing for item in self._pages):
             self._reveal_timer.stop()
@@ -997,6 +1208,9 @@ class MainWindow(QMainWindow):
         self._input.clear()
 
     def _interrupt(self) -> None:
+        if self._preview_timer is not None and self._preview_timer.isActive():
+            self._stop_add_preview()
+            return
         if self._desk is not None and self._desk.isRunning():
             self._request_stop(self._desk)
             return
@@ -1009,7 +1223,8 @@ class MainWindow(QMainWindow):
 
     def _on_escape(self) -> None:
         live = (
-            (self._desk is not None and self._desk.isRunning())
+            (self._preview_timer is not None and self._preview_timer.isActive())
+            or (self._desk is not None and self._desk.isRunning())
             or (self._add is not None and self._add.isRunning())
         )
         if live and not self._input.text():
