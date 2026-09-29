@@ -10,7 +10,8 @@ import time
 import traceback
 from importlib import resources
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time as clock_time, timedelta, timezone
+from zoneinfo import ZoneInfo
 from email.message import EmailMessage
 from email.utils import formataddr, formatdate, make_msgid
 from pathlib import Path
@@ -322,6 +323,27 @@ def send_desk(
     return msg
 
 
+_ET = ZoneInfo("America/New_York")
+_RTH_OPEN = clock_time(9, 30)
+_RTH_CLOSE = clock_time(16, 0)
+
+
+def mail_quiet(when: datetime | None = None) -> bool:
+    """No desk mail on weekends, or while the US regular session is open.
+
+    An aware clock is converted to America/New_York. A naive clock is read as
+    New York time so tests stay stable. Quiet from 09:30 until 16:00.
+    """
+    clock = when or datetime.now().astimezone()
+    if clock.tzinfo is None:
+        clock = clock.replace(tzinfo=_ET)
+    et = clock.astimezone(_ET)
+    if et.weekday() >= 5:
+        return True
+    current = et.timetz().replace(tzinfo=None)
+    return _RTH_OPEN <= current < _RTH_CLOSE
+
+
 def next_slot_wait(
     minutes: int,
     now: datetime | None = None,
@@ -467,6 +489,11 @@ def _record_cycle_failure(home: Path | None, exc: BaseException) -> None:
     )
 
 
+def _local_now() -> datetime:
+    """Aware local time. A naive ``datetime.now()`` would be misread as New York."""
+    return datetime.now().astimezone()
+
+
 def run_every(
     minutes: int,
     send_once: Callable[[], None],
@@ -477,7 +504,7 @@ def run_every(
     cycles: int | None = None,
     now: Callable[[], datetime] | None = None,
 ) -> None:
-    clock = now or datetime.now
+    clock = now or _local_now
     inclusive = True
     done = 0
     while True:
@@ -490,11 +517,15 @@ def run_every(
         if should_stop is not None and should_stop():
             return
         session = load_session(home)
-        if session is None or not session.paused:
+        paused = session is not None and session.paused
+        if not paused and not mail_quiet(clock()):
             try:
                 send_once()
             except Exception as exc:  # noqa: BLE001 — keep the 30m loop alive
                 _record_cycle_failure(home, exc)
+        elif not paused:
+            sys.stderr.write("quiet  us regular session\n")
+            sys.stderr.flush()
         done += 1
         if cycles is not None and done >= cycles:
             return

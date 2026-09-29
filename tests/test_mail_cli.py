@@ -1,3 +1,4 @@
+import os
 from datetime import date, datetime, timezone
 from unittest.mock import patch
 
@@ -157,6 +158,33 @@ def test_mail_every_detaches_and_returns(tmp_path, monkeypatch) -> None:
     assert "started" in result.output.lower()
     assert "4242" in result.output
     assert "next" in result.output.lower()
+
+
+def test_mail_every_refuses_when_a_worker_is_already_live(tmp_path, monkeypatch) -> None:
+    _account(tmp_path, monkeypatch)
+    assert runner.invoke(
+        app,
+        ["mail", "login", "devnull@example.com", "not-a-real-password"],
+    ).exit_code == 0
+    monkeypatch.setattr("optionda.cli.live_worker_pid", lambda _home: 19396)
+    with patch("optionda.cli.spawn_mail_every") as spawn:
+        result = runner.invoke(app, ["mail", "--every", "30"])
+    assert result.exit_code == 1
+    spawn.assert_not_called()
+    assert "19396" in result.output
+    assert "optionda mail stop" in result.output
+
+
+def test_mail_foreground_ignores_its_own_pid(tmp_path, monkeypatch) -> None:
+    _account(tmp_path, monkeypatch)
+    assert runner.invoke(
+        app,
+        ["mail", "login", "devnull@example.com", "not-a-real-password"],
+    ).exit_code == 0
+    monkeypatch.setattr("optionda.cli.live_worker_pid", lambda _home: os.getpid())
+    monkeypatch.setattr("optionda.cli.run_every", lambda *args, **kwargs: None)
+    result = runner.invoke(app, ["mail", "--every", "30", "--foreground"])
+    assert result.exit_code == 0, result.output
 
 
 def test_window_mints_session_token(tmp_path, qtbot, monkeypatch) -> None:

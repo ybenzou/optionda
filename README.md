@@ -1,6 +1,6 @@
 # optionda
 
-本地期权记账与盯市，当前版本 1.5.0。管的是你自己的小账本：冻结隐含波动率，再用标的的最新成交价把持仓重估成模型价。它不是券商下单终端，桌面上的价格也不能拿去成交。
+本地期权记账与盯市，当前版本 1.6.0。管的是你自己的小账本：冻结隐含波动率，再用标的的最新成交价把持仓重估成模型价。它不是券商下单终端，桌面上的价格也不能拿去成交。
 
 下面描述的是这个仓库里的当前程序。`pip install optionda` 装到的是已经发布的版本；要跑仓库里的这一版，在 `optionda` 环境里对这份源码做可编辑安装。
 
@@ -32,9 +32,9 @@
 
 策略图默认是包含上一周的两个星期。可以改成月或年。横轴是交易日，周五到周一的空隙被压窄，图不能自由缩放，否则这个比例会被拖乱。年视图从这一年最早有记录的月份画到十二月；一月就有记录时才从一月开始。折线是每个交易日的模型价相对成本的百分比。15 秒一次的快照不会接到这条日线后面。
 
-点一条线或左下图例上的名字就聚焦这张合约，再点一次取消。聚焦之后，加仓是向上的实心箭头，减仓是向下的实心箭头，建仓的第一天也算一次加仓。箭头不横跨两条线。两条线离得近或交叉时，箭头缩成贴在盈亏线外的小三角。这一段如果上涨，面积顶和盈亏线之间填绿；下跌填红。左边的名字和图例保持这张合约自己的颜色。同一标的、同一行权价有两张合约时，左边的短名字才加上月和日，避免把窄表撑开。
+点一条线或左下图例上的名字就聚焦这张合约，再点一次取消。聚焦之后，加仓是向上的圆角折线，减仓是向下的，都停在面积顶和盈亏线的中点，不横跨两条线。建仓的第一天也算一次加仓。这一段如果上涨，两线之间从盈亏线往面积淡出青色；下跌淡出红色。左边的名字和图例保持这张合约自己的颜色。同一标的、同一行权价有两张合约时，左边的短名字才加上月和日，避免把窄表撑开。
 
-已经平掉的合约，只要出场日落在当前周、月或年里，就留在图上。数量回到 0，百分比不在出场那天被拉回 0。更早平掉、这个窗口里没有点的，不出现。图例在左边持仓表下面，按当前张数从大到小，列出颜色、持仓天数和已实现。十字线只列出真正穿过那一天的合约，不放新闻标题。鼠标离开图，十字线马上消失。
+已经平掉的合约，只要出场日落在当前周、月或年里，就留在图上。数量回到 0，百分比不在出场那天被拉回 0。更早平掉、这个窗口里没有点的，不出现。图例在左边持仓表下面，按当前张数从大到小。持仓天数后面括号里是到期剩余天数：超过两个月绿色，一到两个月黄色，不到一个月红色；已经平仓的不写剩余天数。已实现仍是现金。最右一列是模型市值占比，高于 8% 红色，5% 到 8% 黄色，低于 5% 蓝色，卖光是灰色的 0%。十字线只列出真正穿过那一天的合约，不放新闻标题。鼠标离开图，十字线马上消失。
 
 周视图里，只有「今天、而且当前聚焦的那一张」可以再画一条更淡的 live 线，图例写明 live。它用的是今天的模型快照，停在今天，不改昨天的收盘点。
 
@@ -261,11 +261,12 @@ optionda mail login you@gmail.com <app-password>
 optionda mail
 optionda mail --every 30
 # prints: mail every 30 started  next 17:00  pid …
+# a second --every while that pid is alive stops and tells you to mail stop
 # prompt returns; worker keeps sending. Stop with:
 optionda mail stop
 ```
 
-One **session token** is minted when the window opens or mail starts. Subject stays `optionda · {account} · {token[:8]}`. Later sends are header replies (`In-Reply-To` / `References`) with a full run-style HTML desk — never a quoted plaintext thread.
+One **session token** is minted when the window opens or mail starts. Subject stays `optionda · {account} · {token[:8]}`. Later sends are header replies (`In-Reply-To` / `References`) with a full run-style HTML desk — never a quoted plaintext thread. The inbox preview shows today's gain and today's loss before any contract table. Mail stays quiet on weekends and on weekdays from 09:30 until 16:00 America/New_York.
 
 ```bash
 optionda mail list              # login (no password), token, paused, recent sends

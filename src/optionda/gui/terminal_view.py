@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+from datetime import date
 
 from PySide6.QtCore import QSize, Qt, QUrl, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen, QTextCursor, QTextDocument
@@ -16,11 +17,12 @@ from PySide6.QtWidgets import (
 )
 
 from optionda import __version__
-from optionda.gui.strategy_pane import StrategyPane
+from optionda.gui.strategy_pane import StrategyPane, remaining_tone
+from optionda.occ import OccError, parse_occ
 
 from optionda.gui.richview import wrap_desk_html
 from optionda.gui.splash import WORD, mark_html
-from optionda.gui.theme import BG, CYAN, GREEN, HAIR, MUTED, PROMPT, RED, TEXT, mono_font
+from optionda.gui.theme import ACCENT, BG, CYAN, GREEN, HAIR, MUTED, PROMPT, RED, TEXT, mono_font
 
 # Compact run desk. The table renders at 53 columns; one extra keeps the last glyph off the splitter.
 _DESK_COLS = 54
@@ -290,6 +292,25 @@ class _DeskList(QWidget):
         super().resizeEvent(event)
 
 
+def share_tone(label: str) -> str:
+    """Share ink: above 8% red, 5–8% yellow, below 5% blue. A flat book is gray."""
+    text = label.strip()
+    if text == "0%":
+        return MUTED
+    if text.startswith("<"):
+        return ACCENT
+    number = text[:-1] if text.endswith("%") else text
+    try:
+        pct = int(number)
+    except ValueError:
+        return MUTED
+    if pct > 8:
+        return RED
+    if pct >= 5:
+        return PROMPT
+    return ACCENT
+
+
 class _BookPanel(QWidget):
     """Legend, hold, and realized cash for the contracts on the chart."""
 
@@ -305,22 +326,26 @@ class _BookPanel(QWidget):
         self._ascent = metrics.ascent()
         self._rows: list[tuple[str, str, str, str, str]] = []
         self._focus = ""
+        self._as_of = date.today()
         self._scroll = 0
         self._ink: dict[str, QColor] = {}
         self.setMouseTracking(True)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
         self.hide()
 
-    def set_rows(self, rows, focus: str | None = None) -> None:
+    def set_rows(self, rows, focus: str | None = None, as_of: date | None = None) -> None:
         self._rows = list(rows)
         self._focus = focus or ""
+        if as_of is not None:
+            self._as_of = as_of
         self._clamp_scroll()
         self.update()
 
     def plain_text(self) -> str:
-        lines = ["held  realized"]
-        for _occ, name, _color, held, money in self._rows:
-            lines.append(f"{name}  {held}  {money}".rstrip())
+        lines = ["held  realized  share"]
+        for row in self._rows:
+            _occ, name, _color, held, money, share = self._fields(row)
+            lines.append(f"{name}  {held}  {money}  {share}".rstrip())
         return "\n".join(lines)
 
     def _color(self, token: str) -> QColor:
@@ -341,25 +366,36 @@ class _BookPanel(QWidget):
             return ""
         return self._rows[index][0]
 
-    def _column_layout(self, metrics: QFontMetrics, width: int) -> tuple[int, int, int, int, int]:
-        """Name ends, then held, then realized. Widths come from the draw font."""
+    @staticmethod
+    def _fields(row) -> tuple[str, str, str, str, str, str]:
+        share = row[5] if len(row) > 5 else ""
+        return row[0], row[1], row[2], row[3], row[4], share
+
+    def _column_layout(self, metrics: QFontMetrics, width: int) -> tuple[int, int, int, int, int, int, int]:
+        """Name, held, realized, then share. Widths come from the draw font."""
         em = max(metrics.horizontalAdvance("0"), 1)
         gap = em * 3
         pad = em + 4
         held_w = metrics.horizontalAdvance("held")
         money_w = metrics.horizontalAdvance("realized")
-        for _occ, _name, _color, held, money in self._rows:
+        share_w = metrics.horizontalAdvance("share")
+        for row in self._rows:
+            _occ, _name, _color, held, money, share = self._fields(row)
             if held:
                 held_w = max(held_w, metrics.horizontalAdvance(held))
             if money:
                 money_w = max(money_w, metrics.horizontalAdvance(money))
+            if share:
+                share_w = max(share_w, metrics.horizontalAdvance(share))
         held_w = max(held_w, em * 5)
         money_w = max(money_w, em * 8)
+        share_w = max(share_w, em * 4)
         right = max(pad, width - pad)
-        money_x = right - money_w
+        share_x = right - share_w
+        money_x = share_x - gap - money_w
         held_x = money_x - gap - held_w
         name_right = held_x - gap
-        return name_right, held_x, held_w, money_x, money_w
+        return name_right, held_x, held_w, money_x, money_w, share_x, share_w
 
     def paintEvent(self, _event) -> None:  # noqa: N802
         painter = QPainter(self)
@@ -367,15 +403,19 @@ class _BookPanel(QWidget):
         metrics = painter.fontMetrics()
         painter.fillRect(self.rect(), self._color(BG))
         painter.fillRect(0, 0, self.width(), 1, self._color(HAIR))
-        name_right, held_x, held_w, money_x, money_w = self._column_layout(metrics, self.width())
+        name_right, held_x, held_w, money_x, money_w, share_x, share_w = self._column_layout(
+            metrics, self.width()
+        )
         top = -self._scroll
         painter.setPen(self._color(MUTED))
         baseline = top + self._ascent
         self._draw_fit(painter, metrics, held_x, held_w, baseline, "held")
         self._draw_fit(painter, metrics, money_x, money_w, baseline, "realized")
+        self._draw_fit(painter, metrics, share_x, share_w, baseline, "share")
         top += self._line_h
         dot = metrics.horizontalAdvance("● ")
-        for occ, name, color, held, money in self._rows:
+        for row in self._rows:
+            occ, name, color, held, money, share = self._fields(row)
             if top + self._line_h >= 0 and top < self.height():
                 baseline = top + self._ascent
                 dim = bool(self._focus) and occ != self._focus
@@ -390,16 +430,53 @@ class _BookPanel(QWidget):
                     painter.setPen(self._color(MUTED if dim else color))
                     painter.drawText(4 + dot, baseline, label)
                     painter.setClipping(False)
-                painter.setPen(self._color(MUTED))
-                self._draw_fit(painter, metrics, held_x, held_w, baseline, held)
+                self._draw_held(painter, metrics, held_x, held_w, baseline, occ, held, dim)
                 if money:
                     tone = GREEN if money.startswith("+") else RED if money.startswith("-") else MUTED
                     painter.setPen(self._color(MUTED if dim else tone))
                     self._draw_fit(painter, metrics, money_x, money_w, baseline, money)
+                if share:
+                    tone = share_tone(share)
+                    painter.setPen(self._color(MUTED if dim else tone))
+                    self._draw_fit(painter, metrics, share_x, share_w, baseline, share)
             top += self._line_h
             if top > self.height():
                 break
         painter.end()
+
+    def _draw_held(
+        self,
+        painter: QPainter,
+        metrics: QFontMetrics,
+        x: int,
+        width: int,
+        baseline: int,
+        occ: str,
+        held: str,
+        dim: bool,
+    ) -> None:
+        mark = held.rfind(" (")
+        if mark < 0:
+            painter.setPen(self._color(MUTED))
+            self._draw_fit(painter, metrics, x, width, baseline, held)
+            return
+        prefix = held[:mark]
+        suffix = held[mark:]
+        tone = MUTED if dim else self._remaining_ink(occ)
+        full = metrics.horizontalAdvance(held)
+        origin = int(x + max(0, width - full))
+        painter.setPen(self._color(MUTED))
+        if prefix:
+            painter.drawText(origin, baseline, prefix)
+        painter.setPen(self._color(tone))
+        painter.drawText(origin + metrics.horizontalAdvance(prefix), baseline, suffix)
+
+    def _remaining_ink(self, occ: str) -> str:
+        try:
+            expiry = parse_occ(occ).expiry
+        except OccError:
+            return MUTED
+        return remaining_tone(self._as_of, expiry)
 
     @staticmethod
     def _draw_fit(painter: QPainter, metrics: QFontMetrics, x: int, width: int, baseline: int, text: str) -> None:
@@ -564,8 +641,8 @@ class TerminalView(QWidget):
             self.strategy.publish_book()
         self._lock_split()
 
-    def _show_book(self, rows, focus: str | None = None) -> None:
-        self.book.set_rows(rows, focus)
+    def _show_book(self, rows, focus: str | None = None, as_of: date | None = None) -> None:
+        self.book.set_rows(rows, focus, as_of=as_of)
         show = self.strategy.isVisible() and bool(rows)
         self.book.setVisible(show)
         if not show:

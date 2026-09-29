@@ -235,7 +235,7 @@ def test_run_every_sends_on_aligned_slot(tmp_path) -> None:
         home=tmp_path,
         sleep=sleeps.append,
         cycles=1,
-        now=lambda: datetime(2026, 8, 24, 12, 0, 0),
+        now=lambda: datetime(2026, 8, 24, 20, 0, 0),
     )
     assert sent == [1]
     assert sleeps == []
@@ -244,7 +244,7 @@ def test_run_every_sends_on_aligned_slot(tmp_path) -> None:
 def test_run_every_waits_for_next_clock_slot(tmp_path) -> None:
     from optionda.mailer import run_every
 
-    clock = {"t": datetime(2026, 8, 24, 12, 7, 0)}
+    clock = {"t": datetime(2026, 8, 24, 20, 7, 0)}
     sent: list[int] = []
     sleeps: list[float] = []
 
@@ -270,7 +270,7 @@ def test_run_every_waits_for_next_clock_slot(tmp_path) -> None:
 def test_run_every_continues_after_send_failure(tmp_path) -> None:
     from optionda.mailer import read_sends, run_every
 
-    clock = {"t": datetime(2026, 8, 24, 12, 0, 0)}
+    clock = {"t": datetime(2026, 8, 24, 20, 0, 0)}
     sent: list[int] = []
 
     def send_once() -> None:
@@ -321,6 +321,62 @@ def test_run_every_skips_send_while_paused(tmp_path) -> None:
     )
     assert sent == []
     assert sleeps == [30, 60]
+
+
+def test_mail_stays_quiet_during_the_regular_session(tmp_path) -> None:
+    from optionda.mailer import mail_quiet, run_every
+
+    monday_open = datetime(2026, 8, 24, 10, 0, 0)
+    monday_before = datetime(2026, 8, 24, 9, 29, 0)
+    monday_close = datetime(2026, 8, 24, 16, 0, 0)
+    saturday = datetime(2026, 8, 22, 10, 0, 0)
+    assert mail_quiet(monday_open) is True
+    assert mail_quiet(datetime(2026, 8, 24, 9, 30, 0)) is True
+    assert mail_quiet(monday_before) is False
+    assert mail_quiet(monday_close) is False
+    assert mail_quiet(saturday) is True
+
+    sent: list[int] = []
+    run_every(
+        30,
+        lambda: sent.append(1),
+        home=tmp_path,
+        sleep=lambda _seconds: None,
+        cycles=1,
+        now=lambda: monday_open,
+    )
+    assert sent == []
+    run_every(
+        30,
+        lambda: sent.append(1),
+        home=tmp_path,
+        sleep=lambda _seconds: None,
+        cycles=1,
+        now=lambda: monday_close,
+    )
+    assert sent == [1]
+
+
+def test_china_afternoon_is_before_the_us_open(tmp_path) -> None:
+    from zoneinfo import ZoneInfo
+
+    from optionda.mailer import mail_quiet, run_every
+
+    china = datetime(2026, 9, 29, 15, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    new_york = datetime(2026, 9, 29, 15, 0, tzinfo=ZoneInfo("America/New_York"))
+    assert mail_quiet(china) is False
+    assert mail_quiet(new_york) is True
+
+    sent: list[int] = []
+    run_every(
+        30,
+        lambda: sent.append(1),
+        home=tmp_path,
+        sleep=lambda _seconds: None,
+        cycles=1,
+        now=lambda: china,
+    )
+    assert sent == [1]
 
 
 def test_spawn_mail_every_is_detached(tmp_path, monkeypatch) -> None:

@@ -161,8 +161,28 @@ def _move_color(value: float | None, *, zero: float, up: str, down: str, flat: s
     return up if value > 0 else down
 
 
+def _group_today(rows: list[dict[str, Any]]) -> float | None:
+    total = 0.0
+    found = False
+    for row in rows:
+        day = row.get("today")
+        if day is None:
+            continue
+        total += float(day)
+        found = True
+    return total if found else None
+
+
+def inbox_line(view: dict[str, Any]) -> str:
+    """First line of the mail. Inbox previews stop before the position table."""
+    account = view.get("account") or "optionda"
+    up = _pnl(_group_today(view.get("up") or []))
+    down = _pnl(_group_today(view.get("down") or []))
+    return f"[{account}] optionda  today + {up}  today − {down}"
+
+
 def format_agent_text(view: dict[str, Any]) -> str:
-    lines = [f"[{view.get('account')}] optionda"]
+    lines = [inbox_line(view)]
     for title, key in (
         ("today +", "up"),
         ("today −", "down"),
@@ -375,11 +395,12 @@ def render_desk_html(view: dict[str, Any]) -> str:
         return "".join(bits)
 
     account = view.get("account") or "optionda"
+    preview = inbox_line(view)
     body = (
+        f'<div style="display:none;max-height:0;overflow:hidden;color:{bg};">{preview}</div>'
         f'<div style="background:{bg};color:{fg};padding:16px;'
         f'font-family:Consolas,Menlo,monospace;">'
-        f'<p style="margin:0 0 8px;color:{cyan};font-weight:bold;">[{account}]'
-        f'<span style="color:{fg};">  optionda</span></p>'
+        f'<p style="margin:0 0 8px;color:{cyan};font-weight:bold;">{preview}</p>'
         f"{section_html('today +', view.get('up') or [], green)}"
         f"{section_html('today −', view.get('down') or [], red)}"
         f'<p style="margin:16px 0 0;color:{cyan};">Σ {_money(view.get("sum_model"))}</p>'

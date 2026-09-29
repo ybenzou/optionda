@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import calendar
 from bisect import bisect_left, bisect_right
 from datetime import date, datetime, time, timezone
 from pathlib import Path
 from math import hypot
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QSize, Qt, QTimer
-from PySide6.QtGui import QBrush, QColor, QCursor, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QBrush, QColor, QCursor, QLinearGradient, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QFrame,
     QGraphicsPathItem,
@@ -257,10 +258,11 @@ class StrategyPane(QWidget):
     def publish_book(self) -> None:
         self._publish_book()
 
-    def book_rows(self) -> list[tuple[str, str, str, str, str]]:
-        """Rows for the lower-left book: occ, name, color, hold, realized."""
+    def book_rows(self, *, today: date | None = None) -> list[tuple[str, str, str, str, str, str]]:
+        """Rows for the lower-left book: occ, name, color, hold, realized, share."""
         from optionda.gui.format import signed_money
 
+        as_of = today or date.today()
         colors = assign_colors(series.occ for series in self._shown)
         realized: dict[str, float] = {}
         if self._account and self._home is not None:
@@ -268,25 +270,33 @@ class StrategyPane(QWidget):
 
             realized = realized_pnl_summary(self._account, self._home).get("by_occ") or {}
         full = {series.occ: series for series in self._series}
+        weights = {series.occ: _book_weight(series) for series in self._series}
+        total = sum(weights.values())
         ranked = sorted(
             self._shown,
             key=lambda series: _book_size(full.get(series.occ, series)),
             reverse=True,
         )
-        rows: list[tuple[str, str, str, str, str]] = []
+        rows: list[tuple[str, str, str, str, str, str]] = []
         for window in ranked:
             source = full.get(window.occ, window)
             days = hold_days(source.points)
-            held = f"{days}d" if days is not None else ""
+            held = _held_text(
+                days, _occ_expiry(window.occ), as_of, open_qty=_book_size(source)
+            )
             amount = realized.get(window.occ.upper())
             money = "" if amount is None else signed_money(amount)
-            rows.append((window.occ, _line_name(window.occ), colors[window.occ], held, money))
+            share = _share_label(weights.get(window.occ, _book_weight(source)), total)
+            rows.append(
+                (window.occ, _line_name(window.occ), colors[window.occ], held, money, share)
+            )
         return rows
 
     def _publish_book(self) -> None:
         if self._book_sink is None:
             return
-        self._book_sink(self.book_rows(), self._focus)
+        as_of = date.today()
+        self._book_sink(self.book_rows(today=as_of), self._focus, as_of)
 
     def _live_marks(self) -> list[tuple[float, float]]:
         if self._mode != "week" or not self._focus or not self._account or self._home is None:
@@ -465,6 +475,63 @@ def _book_size(series: ContractSeries) -> float:
     if not series.points:
         return 0.0
     return max(series.points[-1].qty, 0.0)
+
+
+def _book_weight(series: ContractSeries) -> float:
+    """Model value of the current holding. A flat name weighs nothing."""
+    if not series.points:
+        return 0.0
+    last = series.points[-1]
+    qty = max(last.qty, 0.0)
+    if qty <= 0:
+        return 0.0
+    model = last.model if last.model is not None and last.model > 0 else 1.0
+    return qty * model
+
+
+def _add_months(day: date, months: int) -> date:
+    index = day.month - 1 + months
+    year = day.year + index // 12
+    month = index % 12 + 1
+    last = calendar.monthrange(year, month)[1]
+    return date(year, month, min(day.day, last))
+
+
+def remaining_tone(as_of: date, expiry: date) -> str:
+    """More than two months green, one to two months yellow, under one month red."""
+    if expiry > _add_months(as_of, 2):
+        return GREEN
+    if expiry >= _add_months(as_of, 1):
+        return PROMPT
+    return RED
+
+
+def _occ_expiry(occ: str) -> date | None:
+    try:
+        return parse_occ(occ).expiry
+    except OccError:
+        return None
+
+
+def _held_text(days: int | None, expiry: date | None, as_of: date, *, open_qty: float) -> str:
+    core = f"{days}d" if days is not None else ""
+    if expiry is None or open_qty <= 0:
+        return core
+    left = max((expiry - as_of).days, 0)
+    tail = f"({left}d)"
+    return f"{core} {tail}" if core else tail
+
+
+def _share_label(weight: float, total: float) -> str:
+    if weight <= 0 or total <= 0:
+        return "0%"
+    pct = 100.0 * weight / total
+    rounded = int(round(pct))
+    if rounded <= 0:
+        return "<1%"
+    if rounded >= 100 and weight < total:
+        rounded = 99
+    return f"{rounded}%"
 
 
 def _line_name(occ: str) -> str:
@@ -646,60 +713,34 @@ def _trade_anchors(contract: ContractSeries) -> list[tuple[float, float, float, 
     return anchors
 
 
-def _triangle(head: QPointF, tail: QPointF) -> QPainterPath:
-    """Filled arrow head only. No shaft, so it cannot lie across either line."""
+_CHEVRON = 13.0
+_CHEVRON_ARM = 5.5
+_UP_BAND = "#26a69a"
+_DOWN_BAND = "#ef5350"
+_BAND_NEAR = 168
+_BAND_FAR = 64
+
+
+def _chevron(tip: QPointF, *, upward: bool) -> QPainterPath:
+    """Open mark. Round stroke, no fill, so it stays a tick rather than a wedge."""
     path = QPainterPath()
-    dx = head.x() - tail.x()
-    dy = head.y() - tail.y()
-    length = hypot(dx, dy)
-    if length < 1:
-        return path
-    ux, uy = dx / length, dy / length
-    half = max(3.0, min(8.0, length * 0.45))
-    path.moveTo(head)
-    path.lineTo(tail.x() - uy * half, tail.y() + ux * half)
-    path.lineTo(tail.x() + uy * half, tail.y() - ux * half)
-    path.closeSubpath()
+    if upward:
+        path.moveTo(tip.x() - _CHEVRON_ARM, tip.y() + _CHEVRON)
+        path.lineTo(tip)
+        path.lineTo(tip.x() + _CHEVRON_ARM, tip.y() + _CHEVRON)
+    else:
+        path.moveTo(tip.x() - _CHEVRON_ARM, tip.y() - _CHEVRON)
+        path.lineTo(tip)
+        path.lineTo(tip.x() + _CHEVRON_ARM, tip.y() - _CHEVRON)
     return path
 
 
 def _vertical_arrow(area: QPointF, pnl: QPointF, *, upward: bool) -> QPainterPath:
-    """Add points up, sell points down, and the mark stays off both strokes.
-
-    Screen y grows downward. A wide gap keeps a triangle in the middle, no
-    taller than half the gap and never more than 22px. A tight gap or a
-    crossing uses an 8px triangle just outside the percent line.
-    """
-    x = area.x()
-    gap = abs(area.y() - pnl.y())
-    if gap >= 16.0:
-        length = min(22.0, gap / 2.0)
-        mid = (area.y() + pnl.y()) / 2.0
-        head_y = mid - length / 2.0 if upward else mid + length / 2.0
-        tail_y = mid + length / 2.0 if upward else mid - length / 2.0
-        return _triangle(QPointF(x, head_y), QPointF(x, tail_y))
-    head_y, tail_y = _tight_arrow(area.y(), pnl.y(), upward=upward)
-    return _triangle(QPointF(x, head_y), QPointF(x, tail_y))
-
-
-def _tight_arrow(area_y: float, pnl_y: float, *, upward: bool) -> tuple[float, float]:
-    """8px head and tail. Prefer the percent line; step outside if that hits the area."""
-    length = 8.0
-    pad = 4.0
-
-    def beside(origin: float) -> tuple[float, float]:
-        if upward:
-            tail_y = origin - pad
-            return tail_y - length, tail_y
-        tail_y = origin + pad
-        return tail_y + length, tail_y
-
-    head_y, tail_y = beside(pnl_y)
-    lo, hi = (head_y, tail_y) if head_y <= tail_y else (tail_y, head_y)
-    if lo - 1.0 <= area_y <= hi + 1.0:
-        outer = min(area_y, pnl_y) if upward else max(area_y, pnl_y)
-        head_y, tail_y = beside(outer)
-    return head_y, tail_y
+    """Fixed chevron on the middle of the segment. Add points up, sell points down."""
+    mid_x = (area.x() + pnl.x()) / 2.0
+    mid_y = (area.y() + pnl.y()) / 2.0
+    tip_y = mid_y - _CHEVRON / 2.0 if upward else mid_y + _CHEVRON / 2.0
+    return _chevron(QPointF(mid_x, tip_y), upward=upward)
 
 
 class _TradeLink(QGraphicsPathItem):
@@ -710,31 +751,73 @@ class _TradeLink(QGraphicsPathItem):
         self.side = side
         self.setZValue(16)
         self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
-        self.setPen(QPen(Qt.PenStyle.NoPen))
-        self.setBrush(QBrush(QColor(color)))
+        pen = QPen(QColor(color))
+        pen.setWidthF(2.6)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        pen.setCosmetic(True)
+        self.setPen(pen)
+        self.setBrush(QBrush(Qt.BrushStyle.NoBrush))
         self.setCacheMode(QGraphicsPathItem.CacheMode.DeviceCoordinateCache)
         self.upward = side == "add"
 
     def paint(self, painter, option, widget=None) -> None:  # noqa: N802
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        halo = QPen(QColor(0, 0, 0, 200))
+        halo.setWidthF(self.pen().widthF() + 2.4)
+        halo.setCapStyle(Qt.PenCapStyle.RoundCap)
+        halo.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        halo.setCosmetic(True)
+        painter.setPen(halo)
+        painter.setBrush(QBrush(Qt.BrushStyle.NoBrush))
+        painter.drawPath(self.path())
         super().paint(painter, option, widget)
 
 
 class _GapFill(QGraphicsPathItem):
-    """Green or red band between the area top and the percent line."""
+    """Outcome band. Ink is strongest on the percent line and fades toward the area."""
 
     def __init__(self, tone: str, samples: list[tuple[float, float, float]]) -> None:
         super().__init__()
         self.tone = tone
         self.samples = samples
+        self.color = QColor(_UP_BAND if tone == "up" else _DOWN_BAND)
+        self._area_pts: list[QPointF] = []
+        self._pnl_pts: list[QPointF] = []
         self.setZValue(5)
         self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
-        color = QColor(GREEN if tone == "up" else RED)
-        color.setAlpha(110)
-        self.setBrush(QBrush(color))
+        self.setBrush(QBrush(Qt.BrushStyle.NoBrush))
         self.setPen(QPen(Qt.PenStyle.NoPen))
-        self.setCacheMode(QGraphicsPathItem.CacheMode.DeviceCoordinateCache)
+        self.setCacheMode(QGraphicsPathItem.CacheMode.NoCache)
         self.hide()
+
+    def paint(self, painter, option, widget=None) -> None:  # noqa: N802
+        if len(self._area_pts) < 2:
+            return
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(QPen(Qt.PenStyle.NoPen))
+        for index in range(len(self._area_pts) - 1):
+            area_a = self._area_pts[index]
+            area_b = self._area_pts[index + 1]
+            pnl_a = self._pnl_pts[index]
+            pnl_b = self._pnl_pts[index + 1]
+            quad = QPainterPath()
+            quad.moveTo(area_a)
+            quad.lineTo(area_b)
+            quad.lineTo(pnl_b)
+            quad.lineTo(pnl_a)
+            quad.closeSubpath()
+            near = QColor(self.color)
+            far = QColor(self.color)
+            near.setAlpha(_BAND_NEAR)
+            far.setAlpha(_BAND_FAR)
+            origin = QPointF((pnl_a.x() + pnl_b.x()) / 2.0, (pnl_a.y() + pnl_b.y()) / 2.0)
+            end = QPointF((area_a.x() + area_b.x()) / 2.0, (area_a.y() + area_b.y()) / 2.0)
+            fade = QLinearGradient(origin, end)
+            fade.setColorAt(0.0, near)
+            fade.setColorAt(1.0, far)
+            painter.setBrush(QBrush(fade))
+            painter.drawPath(quad)
 
     def place(self, qty_view, price_view) -> None:
         if len(self.samples) < 2:
@@ -751,7 +834,10 @@ class _GapFill(QGraphicsPathItem):
         for point in reversed(pnl_pts):
             path.lineTo(point)
         path.closeSubpath()
+        self._area_pts = area_pts
+        self._pnl_pts = pnl_pts
         self.setPath(path)
+        self.update()
 
 
 def _fit_window(plot_item, first: date, last: date) -> None:
@@ -927,13 +1013,21 @@ def _pnl_chart(
             curve = None
             qty_days = [_x(point.day) for point in contract.points]
             if qty_days:
-                area = pg.PlotDataItem(
-                    qty_days,
-                    [_qty_height(point.qty) for point in contract.points],
-                    fillLevel=0,
-                )
+                heights = [_qty_height(point.qty) for point in contract.points]
+                area = pg.PlotDataItem(qty_days, heights, fillLevel=0, antialias=True)
+                area.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+                edge_glow = pg.PlotDataItem(qty_days, heights, antialias=True)
+                edge_glow.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+                edge = pg.PlotDataItem(qty_days, heights, antialias=True)
+                edge.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+                area._edge_glow = edge_glow  # type: ignore[attr-defined]
+                area._edge = edge  # type: ignore[attr-defined]
                 item.addItem(area)
+                item.addItem(edge_glow)
+                item.addItem(edge)
                 drawn.append(("qty", area))
+                drawn.append(("qty", edge_glow))
+                drawn.append(("qty", edge))
             price_points = [
                 (point.day, point.pnl_pct)
                 for point in contract.points
@@ -945,7 +1039,13 @@ def _pnl_chart(
                 ys = [value for _day, value in price_points]
                 ends[contract.occ] = (xs[-1], last_pnl)
                 strokes.append((contract.occ, xs, ys, min(ys), max(ys)))
+                glow = pg.PlotDataItem(xs, ys, antialias=True)
+                glow.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+                price.addItem(glow)
+                drawn.append(("price", glow))
                 curve = pg.PlotDataItem(xs, ys, antialias=True)
+                curve.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+                curve._glow = glow  # type: ignore[attr-defined]
                 price.addItem(curve)
                 drawn.append(("price", curve))
                 guide = pg.PlotDataItem(antialias=True)
@@ -1062,12 +1162,26 @@ def _pnl_chart(
             for occ, color, area, curve in painted:
                 role = "all" if active is None else ("hot" if occ == active else "dim")
                 host.focus_roles[occ] = role
-                area_pen, area_brush, curve_pen, level = _series_ink(color, role)
+                area_pen, area_glow, area_brush, curve_pen, glow_pen, level = _series_ink(
+                    color, role
+                )
                 if area is not None:
-                    area.setPen(area_pen)
+                    area.setPen(pg.mkPen(None))
                     area.setBrush(area_brush)
                     area.setZValue(level)
+                    edge_glow = getattr(area, "_edge_glow", None)
+                    edge = getattr(area, "_edge", None)
+                    if edge_glow is not None:
+                        edge_glow.setPen(area_glow)
+                        edge_glow.setZValue(level + 0.4)
+                    if edge is not None:
+                        edge.setPen(area_pen)
+                        edge.setZValue(level + 0.8)
                 if curve is not None:
+                    glow = getattr(curve, "_glow", None)
+                    if glow is not None:
+                        glow.setPen(glow_pen)
+                        glow.setZValue(level + 0.4)
                     curve.setPen(curve_pen)
                     curve.setZValue(level + 1)
                 guide = guides.get(occ)
@@ -1111,7 +1225,7 @@ def _pnl_chart(
             color = colors.get(focus, MUTED)
             trace = pg.PlotDataItem(xs, ys, antialias=True)
             red, green, blue = pg.colorTuple(pg.mkColor(color))[:3]
-            trace.setPen(pg.mkPen(red, green, blue, 120, width=1.4))
+            trace.setPen(_round_pen(red, green, blue, 120, 1.4))
             price.addItem(trace)
             drawn.append(("price", trace))
             host.live_trace = trace  # type: ignore[attr-defined]
@@ -1139,15 +1253,31 @@ def _pnl_chart(
     return host
 
 
+def _round_pen(red: int, green: int, blue: int, alpha: int, width: float, *, dashed: bool = False):
+    import pyqtgraph as pg
+
+    pen = pg.mkPen(
+        red,
+        green,
+        blue,
+        alpha,
+        width=width,
+        style=Qt.PenStyle.DashLine if dashed else Qt.PenStyle.SolidLine,
+    )
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    return pen
+
+
 def _guide_ink(color: str, role: str):
     import pyqtgraph as pg
 
     red, green, blue = pg.colorTuple(pg.mkColor(color))[:3]
     if role == "hot":
-        return pg.mkPen(red, green, blue, 255, width=1.8, style=Qt.PenStyle.DashLine), 13
+        return _round_pen(red, green, blue, 255, 1.8, dashed=True), 13
     if role == "dim":
-        return pg.mkPen(red, green, blue, 48, width=1, style=Qt.PenStyle.DashLine), 2
-    return pg.mkPen(color, width=1, style=Qt.PenStyle.DashLine), 4
+        return _round_pen(red, green, blue, 48, 1, dashed=True), 2
+    return _round_pen(red, green, blue, 140, 1, dashed=True), 4
 
 
 def _series_ink(color: str, role: str):
@@ -1156,22 +1286,28 @@ def _series_ink(color: str, role: str):
     red, green, blue = pg.colorTuple(pg.mkColor(color))[:3]
     if role == "hot":
         return (
-            pg.mkPen(red, green, blue, 255, width=1.2),
+            _round_pen(red, green, blue, 255, 1.6),
+            _round_pen(red, green, blue, 64, 6.5),
             pg.mkBrush(red, green, blue, 96),
-            pg.mkPen(red, green, blue, 255, width=3.2),
+            _round_pen(red, green, blue, 255, 2.0),
+            _round_pen(red, green, blue, 72, 8.0),
             8,
         )
     if role == "dim":
         return (
-            pg.mkPen(red, green, blue, 36, width=1),
+            _round_pen(red, green, blue, 48, 1.05),
+            _round_pen(red, green, blue, 0, 1),
             pg.mkBrush(red, green, blue, 12),
-            pg.mkPen(red, green, blue, 48, width=1.1),
+            _round_pen(red, green, blue, 56, 1.15),
+            _round_pen(red, green, blue, 0, 1),
             0,
         )
     return (
-        pg.mkPen(color, width=1),
+        _round_pen(red, green, blue, 210, 1.25),
+        _round_pen(red, green, blue, 34, 4.5),
         _area_brush(color),
-        pg.mkPen(color, width=2.6),
+        _round_pen(red, green, blue, 230, 1.6),
+        _round_pen(red, green, blue, 38, 5.5),
         1,
     )
 

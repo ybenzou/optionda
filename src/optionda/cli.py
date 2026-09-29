@@ -55,6 +55,7 @@ from optionda.mailer import (
     delete_thread,
     ensure_session,
     format_list,
+    live_worker_pid,
     load_session,
     next_slot_label,
     pause_session,
@@ -1765,6 +1766,10 @@ def mail_cmd(
 
     if every is not None:
         minutes = max(int(every), 1)
+        other = live_worker_pid(home)
+        if other is not None and other != os.getpid():
+            _err(f"mail already running  pid {other}  — optionda mail stop")
+            raise typer.Exit(1)
         if not foreground:
             extra: list[str] = []
             if force:

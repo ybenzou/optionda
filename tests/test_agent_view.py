@@ -99,7 +99,12 @@ def test_agent_text_is_a_desk_table() -> None:
         realized=10.0,
     )
     text = format_agent_text(view)
-    assert "today +" in text
+    first = text.splitlines()[0]
+    assert first.startswith("[main] optionda  today +")
+    assert "today −" in first
+    assert "OCC" not in first
+    assert "+200.00" in first
+    assert "-200.00" in first
     assert "today −" in text or "today -" in text
     assert "AVGO" in text
     assert "INTC" in text
@@ -118,6 +123,8 @@ def test_desk_html_looks_like_run() -> None:
     )
     html = render_desk_html(view)
     assert "[main]" in html
+    assert "today +" in html.split("<table", 1)[0]
+    assert "today −" in html.split("<table", 1)[0]
     assert "optionda" in html
     assert "today +" in html
     assert "AVGO" in html

@@ -83,7 +83,7 @@ def test_strategy_pane_switches_month_and_year(qtbot) -> None:
     assert pane.findChildren(QLabel, "strategyPayback") == []
     assert pane.findChild(QWidget, "strategyLegend") is None
     assert any(row[1] == "SPCX 205 12/18/26" for row in pane.book_rows())
-    assert any(row[3].endswith("d") for row in pane.book_rows())
+    assert any(row[3].split()[0].endswith("d") for row in pane.book_rows())
     plot = pane.findChild(QWidget, "strategyPlot")
     assert plot is not None
     labels = [text for _pos, text in plot.getAxis("bottom")._tickLevels[0]]
@@ -137,12 +137,14 @@ def test_week_shows_a_close_inside_the_window(qtbot) -> None:
     pane.resize(900, 640)
     pane.show()
     pane.set_series([_series(), closed, earlier], anchor=date(2026, 9, 10))
-    names = {row[1]: row[3] for row in pane.book_rows()}
+    names = {row[1]: row[3] for row in pane.book_rows(today=date(2026, 9, 10))}
     assert any(name.startswith("INTC") for name in names)
     assert any(name.startswith("SPCX") for name in names)
     assert not any(name.startswith("HOOD") for name in names)
     held = next(days for name, days in names.items() if name.startswith("INTC"))
     assert held == "3d"
+    spcx = next(days for name, days in names.items() if name.startswith("SPCX"))
+    assert spcx == "5d (99d)"
 
 
 def test_book_lists_larger_positions_first(qtbot) -> None:
@@ -183,6 +185,44 @@ def test_book_lists_larger_positions_first(qtbot) -> None:
     assert [name.split()[0] for name in names] == ["AVGO", "IBM", "CSCO", "INTC"]
 
 
+def test_book_share_uses_model_value_and_flat_is_zero(qtbot) -> None:
+    from optionda.gui.strategy_pane import StrategyPane
+
+    def held(occ: str, qty: float, model: float) -> ContractSeries:
+        return ContractSeries(
+            occ=occ,
+            points=[StrategyPoint(date(2026, 9, 4), qty, 1.0, 100.0, model, 0.0)],
+            trades=[],
+            payback_days=None,
+        )
+
+    flat = ContractSeries(
+        occ="INTC261016C00140000",
+        points=[
+            StrategyPoint(date(2026, 9, 8), 30, 2.0, 20.0, 4.0, -25.0),
+            StrategyPoint(date(2026, 9, 10), 0, 2.0, 20.0, 4.0, -10.0),
+        ],
+        trades=[],
+        payback_days=None,
+    )
+    pane = StrategyPane()
+    qtbot.addWidget(pane)
+    pane.show()
+    pane.set_series(
+        [
+            held("IBM261218C00300000", 30, 1.0),
+            held("AVGO261218C00500000", 10, 8.0),
+            flat,
+        ],
+        anchor=date(2026, 9, 15),
+    )
+    pane.show_month()
+    shares = {row[1].split()[0]: row[5] for row in pane.book_rows()}
+    assert shares["AVGO"] == "73%"
+    assert shares["IBM"] == "27%"
+    assert shares["INTC"] == "0%"
+
+
 def test_book_panel_sits_under_the_desk_list(qtbot) -> None:
     from PySide6.QtWidgets import QApplication
 
@@ -212,6 +252,31 @@ def test_book_panel_sits_under_the_desk_list(qtbot) -> None:
     assert view.strategy.focus_occ() == "SPCX261218C00205000"
 
 
+def test_remaining_time_is_green_yellow_or_red_by_calendar_month() -> None:
+    from optionda.gui.strategy_pane import remaining_tone
+    from optionda.gui.theme import GREEN, PROMPT, RED
+
+    as_of = date(2026, 9, 10)
+    assert remaining_tone(as_of, date(2026, 11, 11)) == GREEN
+    assert remaining_tone(as_of, date(2026, 11, 10)) == PROMPT
+    assert remaining_tone(as_of, date(2026, 10, 10)) == PROMPT
+    assert remaining_tone(as_of, date(2026, 10, 9)) == RED
+    assert remaining_tone(as_of, date(2026, 9, 10)) == RED
+
+
+def test_share_tone_marks_risk_normal_and_probe() -> None:
+    from optionda.gui.terminal_view import share_tone
+    from optionda.gui.theme import ACCENT, MUTED, PROMPT, RED
+
+    assert share_tone("9%") == RED
+    assert share_tone("100%") == RED
+    assert share_tone("8%") == PROMPT
+    assert share_tone("5%") == PROMPT
+    assert share_tone("4%") == ACCENT
+    assert share_tone("<1%") == ACCENT
+    assert share_tone("0%") == MUTED
+
+
 def test_book_realized_column_stays_clear_of_held(qtbot) -> None:
     from optionda.gui.terminal_view import _BookPanel
 
@@ -220,19 +285,24 @@ def test_book_realized_column_stays_clear_of_held(qtbot) -> None:
     book.resize(420, 220)
     book.set_rows(
         [
-            ("A", "AVGO 500 12/18/26", "#8c53ea", "44d", "+2,506"),
-            ("B", "SPCX 205 12/18/26", "#16c60c", "22d", "-6.36"),
-            ("C", "XLV 160 12/18/26", "#cccccc", "149d", ""),
+            ("A", "AVGO 500 12/18/26", "#8c53ea", "44d", "+2,506", "73%"),
+            ("B", "SPCX 205 12/18/26", "#16c60c", "22d", "-6.36", "27%"),
+            ("C", "XLV 160 12/18/26", "#cccccc", "149d", "", "0%"),
         ]
     )
     metrics = book.fontMetrics()
-    name_right, held_x, held_w, money_x, money_w = book._column_layout(metrics, book.width())
+    name_right, held_x, held_w, money_x, money_w, share_x, share_w = book._column_layout(
+        metrics, book.width()
+    )
     assert held_x + held_w <= money_x
+    assert money_x + money_w <= share_x
     assert name_right <= held_x
     assert money_w >= metrics.horizontalAdvance("realized")
     assert money_w >= metrics.horizontalAdvance("+2,506")
     assert held_w >= metrics.horizontalAdvance("149d")
-    assert money_x + money_w <= book.width()
+    assert share_w >= metrics.horizontalAdvance("share")
+    assert share_w >= metrics.horizontalAdvance("100%")
+    assert share_x + share_w <= book.width()
 
 
 def test_book_stays_under_the_full_desk_list(qtbot) -> None:
@@ -707,41 +777,38 @@ def test_trade_runs_cover_the_four_outcomes() -> None:
     assert [tone for tone, _samples in _gap_runs(opened_before_the_line)] == ["down"]
 
 
-def test_trade_arrow_shrinks_when_the_lines_meet(qtbot) -> None:
+def test_trade_arrow_sits_midway_between_the_lines(qtbot) -> None:
     from PySide6.QtCore import QPointF
 
     from optionda.gui.strategy_pane import _vertical_arrow
 
-    def span(path):
-        rect = path.boundingRect()
-        return rect.top(), rect.bottom(), rect.height()
+    def center(area_y: float, pnl_y: float, *, upward: bool) -> tuple[float, float]:
+        rect = _vertical_arrow(QPointF(10, area_y), QPointF(10, pnl_y), upward=upward).boundingRect()
+        return (rect.top() + rect.bottom()) / 2.0, rect.height()
 
-    top, bottom, height = span(_vertical_arrow(QPointF(10, 0), QPointF(10, 100), upward=True))
-    assert height <= 22.5
-    assert top >= 4
-    assert bottom <= 96
+    mid, height = center(0, 100, upward=True)
+    assert 12 <= height <= 14
+    assert abs(mid - 50) < 1
 
-    top, bottom, height = span(_vertical_arrow(QPointF(10, 0), QPointF(10, 40), upward=False))
-    assert 14 <= height <= 20.5
-    assert top >= 4
-    assert bottom <= 36
+    mid, height = center(0, 40, upward=False)
+    assert 12 <= height <= 14
+    assert abs(mid - 20) < 1
 
-    top, bottom, height = span(_vertical_arrow(QPointF(10, 40), QPointF(10, 46), upward=True))
-    assert height <= 9
-    assert bottom <= 36
+    mid, height = center(40, 46, upward=True)
+    assert 12 <= height <= 14
+    assert abs(mid - 43) < 1
 
-    top, bottom, height = span(_vertical_arrow(QPointF(10, 50), QPointF(10, 50), upward=True))
-    assert height <= 9
-    assert bottom <= 46
+    mid, height = center(50, 50, upward=True)
+    assert 12 <= height <= 14
+    assert abs(mid - 50) < 1
 
-    top, bottom, height = span(_vertical_arrow(QPointF(10, 40), QPointF(10, 46), upward=False))
-    assert height <= 9
-    assert top >= 50
+    mid, height = center(40, 46, upward=False)
+    assert 12 <= height <= 14
+    assert abs(mid - 43) < 1
 
 
 def test_focus_shows_trade_arrows_and_colored_stretches(qtbot) -> None:
     from optionda.gui.strategy_pane import StrategyPane
-    from optionda.gui.theme import GREEN, RED
 
     series = _book(
         "SPCX261218C00205000",
@@ -773,12 +840,14 @@ def test_focus_shows_trade_arrows_and_colored_stretches(qtbot) -> None:
     assert all(link.isVisible() for link in links)
     assert links[0].upward is True
     assert links[1].upward is False
-    assert all(link.brush().style() != Qt.BrushStyle.NoBrush for link in links)
+    assert all(link.brush().style() == Qt.BrushStyle.NoBrush for link in links)
+    assert all(link.pen().capStyle() == Qt.PenCapStyle.RoundCap for link in links)
+    assert all(link.pen().widthF() >= 2.5 for link in links)
     bands = host.outcome_segments[occ]
     assert [band.tone for band in bands] == ["up", "down"]
     assert all(band.isVisible() for band in bands)
-    assert bands[0].brush().color().name() == GREEN
-    assert bands[1].brush().color().name() == RED
+    assert bands[0].color.name() == "#26a69a"
+    assert bands[1].color.name() == "#ef5350"
     before = bands[0].path().boundingRect().left()
     view = plot.getViewBox()
     left, right = view.viewRange()[0]
